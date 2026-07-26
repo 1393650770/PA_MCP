@@ -1,0 +1,131 @@
+# [AI:BEGIN]
+# PA_MCP - CI/CD Pipeline
+# GitHub Actions workflow: lint, test, build Docker, publish
+# [AI:END]
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily data source health check at 18:30 Beijing time (10:30 UTC)
+    - cron: "30 10 * * 1-5"
+
+env:
+  PYTHON_VERSION: "3.12"
+  DOCKER_REGISTRY: ghcr.io
+
+jobs:
+  # ---- Lint ----
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install ruff
+
+      - name: Lint with ruff
+        run: |
+          ruff check src/ tests/
+
+  # ---- Test ----
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libta-lib-dev
+
+      - name: Install Python deps
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v --tb=short
+
+      - name: Check coverage
+        run: |
+          python -m pytest tests/ --cov=pa_mcp --cov-report=term-missing
+
+  # ---- Docker Build & Publish ----
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:latest
+            ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:${{ github.sha }}
+
+  # ---- Data Source Health Check (Daily) ----
+  health-check:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install akshare duckdb pandas
+
+      - name: Check AKShare health
+        run: |
+          python -c "
+          import akshare as ak
+          try:
+              df = ak.stock_zh_a_spot_em()
+              count = len(df)
+              print(f'AKShare OK: {count} stocks fetched')
+              assert count > 4000, f'Expected >4000 stocks, got {count}'
+          except Exception as e:
+              print(f'AKShare FAILED: {e}')
+              exit(1)
+          "
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Data source health check failed. AKShare may have breaking changes."
+          exit 1
