@@ -1,6 +1,19 @@
 # Prerequisites
 *.d
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg
+
 # Compiled Object files
 *.slo
 *.lo
@@ -30,3 +43,17 @@
 *.exe
 *.out
 *.app
+
+# Data
+*.duckdb
+*.duckdb.wal
+/data/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.venv/
+venv/

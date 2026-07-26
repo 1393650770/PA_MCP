@@ -1,0 +1,97 @@
+# [AI:BEGIN]
+# PA_MCP - Docker Compose
+# 3 services: mcp-server (main), cron-scheduler (daily updates), redis (optional cache)
+# [AI:END]
+
+version: "3.8"
+
+services:
+  pa-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pa-mcp:latest
+    container_name: pa-mcp-server
+    ports:
+      - "8080:8080"
+    environment:
+      - PA_MCP_SERVER__TRANSPORT=http
+      - PA_MCP_SERVER__HTTP_PORT=8080
+      - PA_MCP_SERVER__LOG_LEVEL=INFO
+      - PA_MCP_DATABASE__PATH=/data/pa_mcp.duckdb
+      - PA_MCP_CACHE__BACKEND=memory
+      - PA_MCP_CACHE__REDIS_URL=redis://redis:6379
+      - TZ=Asia/Shanghai
+    volumes:
+      - pa_mcp_data:/data
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.path.insert(0,'src'); from pa_mcp.config import get_settings; get_settings()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - pa_mcp_net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2"
+        reservations:
+          memory: 1G
+          cpus: "1"
+
+  cron-scheduler:
+    build:
+      context: .
+      dockerfile: docker/cron-scheduler/Dockerfile
+    image: pa-mcp-cron:latest
+    container_name: pa-mcp-cron
+    environment:
+      - PA_MCP_DATABASE__PATH=/data/pa_mcp.duckdb
+      - PA_MCP_CACHE__BACKEND=memory
+      - TZ=Asia/Shanghai
+    volumes:
+      - pa_mcp_data:/data
+      - ./config:/app/config:ro
+    depends_on:
+      - pa-mcp-server
+    restart: unless-stopped
+    networks:
+      - pa_mcp_net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1"
+
+  redis:
+    image: redis:7-alpine
+    container_name: pa-mcp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - pa_mcp_net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    profiles:
+      - with-redis
+
+volumes:
+  pa_mcp_data:
+    name: pa_mcp_data
+  redis_data:
+    name: pa_mcp_redis_data
+
+networks:
+  pa_mcp_net:
+    name: pa_mcp_net
+    driver: bridge

@@ -1,0 +1,57 @@
+# PA_MCP Configuration - Default
+
+data_sources:
+  primary: akshare
+  fallback: tickflow
+  akshare:
+    rate_limit_rps: 5
+    retry_count: 3
+    timeout_seconds: 30
+    burst_max: 10
+  tickflow:
+    rate_limit_rps: 3
+    timeout_seconds: 30
+
+database:
+  path: /data/pa_mcp.duckdb
+  read_only: false
+  shadow_table_swap: true
+
+cache:
+  backend: memory  # memory | redis | none
+  redis_url: redis://localhost:6379
+  default_ttl: 300
+  realtime_ttl: 3
+  kline_ttl: 21600
+
+scheduler:
+  update_time: "17:30"
+  retry_count: 3
+  retry_backoff: linear
+  precompute_indicators: true
+  precompute_signals: true
+
+sentiment:
+  model: bardsai/finance-sentiment-zh-base
+  batch_size: 32
+  device: cpu
+
+llm:
+  provider: anthropic
+  model_fast: claude-sonnet-5
+  model_deep: claude-opus-5
+  max_tokens_per_analysis: 50000
+  temperature: 0.1
+
+risk:
+  max_single_stock: 0.20
+  max_sector_exposure: 0.40
+  max_total_position: 0.80
+  max_daily_loss: 0.03
+  max_consecutive_losses: 3
+  pause_days_after_big_loss: 3
+
+server:
+  transport: stdio  # stdio | http
+  http_port: 8080
+  log_level: INFO

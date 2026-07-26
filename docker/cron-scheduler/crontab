@@ -1,0 +1,6 @@
+# PA_MCP Daily Data Update
+# Runs at 17:30 Beijing time (UTC+8)
+TZ=Asia/Shanghai
+30 17 * * 1-5 cd /app && python -m pa_mcp.data.scheduler >> /var/log/cron.log 2>&1
+# Also run at 17:35 as fallback
+35 17 * * 1-5 cd /app && python -m pa_mcp.data.scheduler >> /var/log/cron.log 2>&1
