@@ -1,0 +1,83 @@
+{
+  "_comment": "PA_MCP LLM API Configuration — Fill in your API keys below",
+  "_instructions": "Copy this file to llm_config.json (gitignored) and fill in your keys",
+
+  "providers": {
+    "anthropic": {
+      "api_key": "YOUR_ANTHROPIC_API_KEY_HERE",
+      "base_url": "https://api.anthropic.com",
+      "models": {
+        "fast": "claude-sonnet-5-20251001",
+        "deep": "claude-opus-5-20251001"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "openai_compatible": {
+      "api_key": "YOUR_OPENAI_API_KEY_HERE",
+      "base_url": "https://api.openai.com/v1",
+      "models": {
+        "fast": "gpt-4o-mini",
+        "deep": "gpt-4o"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "deepseek": {
+      "api_key": "YOUR_DEEPSEEK_API_KEY_HERE",
+      "base_url": "https://api.deepseek.com/v1",
+      "models": {
+        "fast": "deepseek-chat",
+        "deep": "deepseek-reasoner"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "zhipu": {
+      "api_key": "YOUR_ZHIPU_API_KEY_HERE",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "models": {
+        "fast": "glm-4-flash",
+        "deep": "glm-4-plus"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "qwen": {
+      "api_key": "YOUR_QWEN_API_KEY_HERE",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "models": {
+        "fast": "qwen-turbo",
+        "deep": "qwen-plus"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    }
+  },
+
+  "active_provider": "anthropic",
+
+  "token_budget": {
+    "fast_analysis_max": 8000,
+    "deep_analysis_max": 50000,
+    "daily_scan_budget": 200000,
+    "per_request_timeout": 90
+  },
+
+  "retry": {
+    "max_retries": 3,
+    "backoff_base_seconds": 2,
+    "backoff_multiplier": 2
+  },
+
+  "cache": {
+    "enable_response_cache": true,
+    "cache_ttl_minutes": 60,
+    "max_cached_responses": 500
+  }
+}

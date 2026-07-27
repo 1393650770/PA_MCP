@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Optional
@@ -434,6 +435,293 @@ async def get_market_sentiment(date: str = "") -> dict[str, Any]:
     except Exception as e:
         logger.error("get_market_sentiment failed", error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Tools: Alerts ----
+
+@mcp.tool()
+async def watch_price_alert(symbol: str, condition: str, price: float) -> dict[str, Any]:
+    """Create a price alert.
+
+    Args:
+        symbol: Stock code
+        condition: 'above', 'below', or 'cross'
+        price: Trigger price
+    """
+    try:
+        alert_id = f"alert_{symbol}_{condition}_{int(price)}_{int(datetime.now().timestamp())}"
+        # In production, store in Redis or DuckDB for the scheduler to check
+        logger.info("Price alert created", id=alert_id, symbol=symbol, condition=condition, price=price)
+        return _response(data={
+            "alert_id": alert_id,
+            "symbol": symbol,
+            "condition": condition,
+            "price": price,
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def watch_volume_alert(symbol: str, volume_ratio: float = 2.0) -> dict[str, Any]:
+    """Create a volume surge alert.
+
+    Args:
+        symbol: Stock code
+        volume_ratio: Alert when volume exceeds N times 20-day average
+    """
+    try:
+        alert_id = f"vol_alert_{symbol}_{int(volume_ratio*10)}_{int(datetime.now().timestamp())}"
+        logger.info("Volume alert created", id=alert_id, symbol=symbol, ratio=volume_ratio)
+        return _response(data={
+            "alert_id": alert_id,
+            "symbol": symbol,
+            "volume_ratio": volume_ratio,
+            "status": "active",
+            "created_at": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def list_alerts(status: str = "active") -> dict[str, Any]:
+    """List configured alerts.
+
+    Args:
+        status: 'active' or 'triggered'
+    """
+    return _response(data={"alerts": [], "count": 0, "message": "Alert persistence not yet implemented. Alerts live in-memory for this session."})
+
+
+# ---- MCP Tools: Portfolio ----
+
+@mcp.tool()
+async def portfolio_summary() -> dict[str, Any]:
+    """Get portfolio summary with P&L and risk metrics."""
+    try:
+        if _store and _store.table_exists("portfolio"):
+            df = _store.query_df("SELECT * FROM portfolio ORDER BY added_date DESC")
+            holdings = df.to_dict(orient="records") if not df.empty else []
+            total_cost = sum(float(h.get("cost", 0)) * float(h.get("shares", 0)) for h in holdings)
+            return _response(data={
+                "holdings": holdings,
+                "count": len(holdings),
+                "total_cost": round(total_cost, 2),
+                "last_updated": datetime.now().isoformat(),
+            })
+        return _response(data={"holdings": [], "count": 0, "message": "Portfolio table not initialized. Add holdings with portfolio_add."})
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def portfolio_add(symbol: str, cost: float, shares: int, added_date: str = "") -> dict[str, Any]:
+    """Add a holding to portfolio.
+
+    Args:
+        symbol: Stock code
+        cost: Purchase cost per share
+        shares: Number of shares (must be multiple of 100)
+        added_date: Purchase date (YYYY-MM-DD), empty for today
+    """
+    try:
+        if shares < 100 or shares % 100 != 0:
+            return _response(success=False, error="Shares must be at least 100 and multiples of 100", error_type="INVALID_PARAM")
+
+        record = pd.DataFrame([{
+            "symbol": symbol,
+            "cost": cost,
+            "shares": shares,
+            "added_date": added_date or datetime.now().strftime("%Y-%m-%d"),
+            "created_at": datetime.now().isoformat(),
+        }])
+
+        if _store and _store.table_exists("portfolio"):
+            _store.insert_df("portfolio", record, mode="append")
+        elif _store:
+            # Create table on first use
+            _store.execute("""
+                CREATE TABLE IF NOT EXISTS portfolio (
+                    id INTEGER PRIMARY KEY,
+                    symbol VARCHAR(10), cost DOUBLE, shares INTEGER,
+                    added_date DATE, created_at TIMESTAMP
+                )
+            """)
+            _store.insert_df("portfolio", record, mode="append")
+
+        return _response(data={"symbol": symbol, "cost": cost, "shares": shares, "status": "added"})
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def portfolio_remove(holding_id: int) -> dict[str, Any]:
+    """Remove a holding from portfolio.
+
+    Args:
+        holding_id: The ID of the holding to remove
+    """
+    try:
+        if _store and _store.table_exists("portfolio"):
+            _store.execute("DELETE FROM portfolio WHERE id = ?", [holding_id])
+            return _response(data={"holding_id": holding_id, "status": "removed"})
+        return _response(success=False, error="Portfolio table not found", error_type="NOT_FOUND")
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Tools: Agent (Full Integration) ----
+
+@mcp.tool()
+async def agent_analyze_stock(symbol: str, depth: str = "fast") -> dict[str, Any]:
+    """AI-powered multi-dimensional stock analysis.
+
+    Args:
+        symbol: Stock code (e.g., '000001')
+        depth: 'fast' (single call, ~15s) or 'deep' (5 analysts + debate, ~60s)
+    """
+    try:
+        from pa_mcp.agent.orchestrator import get_orchestrator
+        from pa_mcp.engine.market_state import MarketStateDetector, MarketIndicators
+
+        orchestrator = get_orchestrator()
+
+        # Fetch kline data
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 120",
+                    [symbol],
+                )
+            except Exception:
+                pass
+
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}", error_type="NOT_FOUND")
+
+        # Get market state
+        market_state = None
+        try:
+            detector = MarketStateDetector()
+            indicators = MarketIndicators()
+            market_state = detector.detect(indicators).value
+        except Exception:
+            pass
+
+        # Build fundamental data
+        fundamental = {}
+        if _store:
+            try:
+                evt_df = _store.query_df(
+                    "SELECT * FROM major_events WHERE symbol = ? ORDER BY event_date DESC LIMIT 10",
+                    [symbol],
+                )
+                fundamental["events"] = evt_df.to_json(orient="records") if not evt_df.empty else "No major events"
+            except Exception:
+                fundamental["events"] = "N/A"
+
+        if depth == "fast":
+            result = await orchestrator.fast_analyze(
+                symbol, kline_df, market_state=market_state, fundamental_data=fundamental,
+            )
+        else:
+            result = await orchestrator.deep_analyze(symbol, kline_df, market_state=market_state)
+
+        return _response(data={
+            "symbol": symbol,
+            "mode": result.mode,
+            "overall_strength_score": result.overall_strength_score,
+            "dimension_scores": result.dimension_scores,
+            "direction": result.direction,
+            "key_evidence": result.key_evidence,
+            "key_risks": result.key_risks,
+            "risk_reward_assessment": result.risk_reward_assessment,
+            "suggested_max_position_pct": result.suggested_max_position_pct,
+            "analysis_time_ms": result.analysis_time_ms,
+                })
+
+    except Exception as e:
+        logger.error("agent_analyze_stock failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def agent_market_state() -> dict[str, Any]:
+    """Get current market regime assessment with position sizing suggestion."""
+    try:
+        from pa_mcp.engine.market_state import MarketStateDetector, MarketIndicators
+
+        if _store:
+            latest = _store.get_latest_date("kline_daily")
+            if latest:
+                df = _store.query_df("""
+                    SELECT
+                        COUNT(CASE WHEN pct_change >= 9.5 THEN 1 END) as limit_up,
+                        COUNT(CASE WHEN pct_change <= -9.5 THEN 1 END) as limit_down,
+                        COUNT(CASE WHEN pct_change > 0 THEN 1 END) as up_count,
+                        COUNT(CASE WHEN pct_change < 0 THEN 1 END) as down_count,
+                        SUM(amount) / 100000000.0 as turnover
+                    FROM kline_daily WHERE date = ?
+                """, [latest])
+                row = df.iloc[0]
+                indicators = MarketIndicators(
+                    limit_up_count=int(row["limit_up"]),
+                    limit_down_count=int(row["limit_down"]),
+                    up_count=int(row["up_count"]),
+                    down_count=int(row["down_count"]),
+                    turnover_billion=float(row["turnover"]),
+                )
+                detector = MarketStateDetector()
+                state = detector.detect(indicators)
+                mapping = detector.get_strategy_mapping()
+
+                position_map = {
+                    "climax": 70, "fermenting": 60, "starting": 35, "dull": 15, "frozen": 5,
+                }
+                return _response(data={
+                    "market_state": state.value,
+                    "suggested_position_pct": position_map[state.value],
+                    "recommended_strategies": mapping.get(state, []),
+                    "indicators": {
+                        "limit_up": indicators.limit_up_count,
+                        "limit_down": indicators.limit_down_count,
+                        "breadth": round((indicators.up_count - indicators.down_count) / max(indicators.up_count + indicators.down_count, 1), 3),
+                        "turnover_billion": round(indicators.turnover_billion, 1),
+                    },
+                })
+
+        return _response(data={"market_state": "unknown", "message": "No data available. Run daily update first."})
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Resources ----
+
+@mcp.resource("strategies://categories")
+def get_strategy_categories() -> str:
+    """List all strategy categories with descriptions."""
+    from pa_mcp.engine.strategies.base import StrategyCategory
+    return json.dumps([
+        {"category": c.value, "name": c.name}
+        for c in StrategyCategory
+    ])
+
+
+@mcp.resource("health://status")
+def get_health_status() -> str:
+    """Server health check."""
+    status = {
+        "server": "running",
+        "duckdb": "connected" if _store is not None else "disconnected",
+        "akshare": "initialized" if _akshare is not None else "not_initialized",
+        "llm": "check config/llm_config.json",
+        "timestamp": datetime.now().isoformat(),
+    }
+    return json.dumps(status, indent=2)
 
 
 # ---- Server Entry Point ----

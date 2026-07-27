@@ -229,7 +229,7 @@ class AgentOrchestrator:
         kline_summary = self._summarize_kline(kline_df)
 
         # Build the prompt
-        prompt = FAST_ANALYSIS_PROMPT.format(
+        user_prompt = FAST_ANALYSIS_PROMPT.format(
             symbol=symbol,
             kline_summary=kline_summary,
             capital_flow_summary=fundamental_data.get("capital_flow", "N/A") if fundamental_data else "N/A",
@@ -239,19 +239,33 @@ class AgentOrchestrator:
             market_state=market_state or "unknown",
         )
 
-        # Estimate tokens
-        estimated_tokens = len(prompt.split()) * 1.3 + 500  # ~500 output
+        # Call LLM
+        from pa_mcp.agent.llm_client import get_llm_client
+        client = get_llm_client()
+
+        SYSTEM_PROMPT = (
+            "You are a quantitative analyst for Chinese A-share stocks. "
+            "Output JSON only, no markdown. Never say 'buy' or 'sell'. "
+            "Output strength scores (0-100) and evidence only."
+        )
+
+        response = client.chat_json(SYSTEM_PROMPT, user_prompt, mode="fast")
 
         result = AnalysisResult(
             symbol=symbol,
             mode="fast",
-            token_used=int(estimated_tokens),
+            token_used=response.get("token_used", 0),
             analysis_time_ms=(datetime.now() - t0).total_seconds() * 1000,
         )
 
-        # Note: actual LLM call would go here. This stub returns a placeholder.
-        # In production, this calls the Anthropic API or compatible endpoint.
-        logger.info("Fast analysis prompt built", symbol=symbol, tokens_est=int(estimated_tokens))
+        if "error" not in response:
+            result.overall_strength_score = response.get("overall_strength_score", 50)
+            result.dimension_scores = response.get("dimension_scores", {})
+            result.direction = response.get("direction", "neutral")
+            result.key_evidence = response.get("key_evidence", [])
+            result.key_risks = response.get("key_risks", [])
+            result.risk_reward_assessment = response.get("risk_reward_assessment", "neutral")
+            result.suggested_max_position_pct = response.get("suggested_max_position_pct", 0)
 
         return result
 
