@@ -13,7 +13,7 @@ data_sources:
     timeout_seconds: 30
 
 database:
-  path: /data/pa_mcp.duckdb
+  path: data/pa_mcp.duckdb
   read_only: false
   shadow_table_swap: true
 
