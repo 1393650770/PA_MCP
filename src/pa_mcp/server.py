@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Optional
 
+import pandas as pd
 import structlog
 from mcp.server.fastmcp import FastMCP
 
