@@ -63,8 +63,7 @@ async def server_lifespan(server: FastMCP):
 settings = get_settings()
 mcp = FastMCP(
     name="pa-mcp",
-    description="Personal Analyst MCP - Full-stack A-share quantitative trading server",
-    version="0.1.0",
+    instructions="Personal Analyst MCP - Full-stack A-share quantitative trading server. Provides A-share market data, technical analysis, strategy signals, backtesting, and AI-powered stock analysis.",
     lifespan=server_lifespan,
 )
 
