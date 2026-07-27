@@ -699,6 +699,505 @@ async def agent_market_state() -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
+# ---- MCP Tools: Comprehensive Analysis (NEW) ----
+
+@mcp.tool()
+async def agent_scan_market(
+    top_n: int = 20,
+    strategy_filter: str = "",
+    sort_by: str = "strength",
+) -> dict[str, Any]:
+    """AI-powered full market scan — run all strategies, rank by strength score.
+
+    This is THE comprehensive analysis tool. It:
+    1. Runs all strategies on all stocks (using pre-computed signals if available)
+    2. Aggregates signals by stock
+    3. Returns top-ranked candidates with per-strategy breakdown
+
+    Args:
+        top_n: Number of top candidates to return (default 20, max 50)
+        strategy_filter: Only run specific strategy (empty = all strategies)
+        sort_by: 'strength' (highest score) or 'consensus' (most strategies agree)
+    """
+    try:
+        from pa_mcp.engine.strategies.base import StrategyRegistry, MarketState
+        from pa_mcp.engine.market_state import MarketStateDetector, MarketIndicators
+
+        registry = StrategyRegistry()
+        top_n = min(top_n, 50)
+
+        # Detect current market state
+        market_state = None
+        state_name = "unknown"
+        if _store:
+            latest = _store.get_latest_date("kline_daily")
+            if latest:
+                df = _store.query_df("""
+                    SELECT
+                        COUNT(CASE WHEN pct_change >= 9.5 THEN 1 END) as limit_up,
+                        COUNT(CASE WHEN pct_change <= -9.5 THEN 1 END) as limit_down,
+                        COUNT(CASE WHEN pct_change > 0 THEN 1 END) as up_count,
+                        COUNT(CASE WHEN pct_change < 0 THEN 1 END) as down_count,
+                        SUM(amount) / 100000000.0 as turnover
+                    FROM kline_daily WHERE date = ?
+                """, [latest])
+                row = df.iloc[0]
+                indicators = MarketIndicators(
+                    limit_up_count=int(row["limit_up"]),
+                    limit_down_count=int(row["limit_down"]),
+                    up_count=int(row["up_count"]),
+                    down_count=int(row["down_count"]),
+                    turnover_billion=float(row["turnover"]),
+                )
+                detector = MarketStateDetector()
+                market_state = detector.detect(indicators)
+                state_name = market_state.value
+
+        # Use pre-computed signals if available, else compute live
+        candidates: dict[str, list[dict]] = {}  # symbol -> [signal summaries]
+
+        if _store and _store.table_exists("signal_cache"):
+            # Use pre-computed cache (fast path)
+            df = _store.query_df(f"""
+                SELECT symbol, strategy_name, strength_score, direction, details
+                FROM signal_cache
+                WHERE date = (SELECT MAX(date) FROM signal_cache)
+                ORDER BY strength_score DESC
+                LIMIT 500
+            """)
+            for _, row in df.iterrows():
+                sym = row["symbol"]
+                if sym not in candidates:
+                    candidates[sym] = []
+                candidates[sym].append({
+                    "strategy": row["strategy_name"],
+                    "strength": round(float(row["strength_score"]), 1),
+                    "direction": row["direction"],
+                })
+        else:
+            # Compute live (slower but works without pre-computation)
+            available = registry.list_all()
+            if strategy_filter:
+                strategies_to_run = [strategy_filter] if strategy_filter in available else []
+            else:
+                strategies_to_run = available
+
+            if not strategies_to_run:
+                return _response(data={
+                    "market_state": state_name,
+                    "candidates": [],
+                    "count": 0,
+                    "strategies_run": 0,
+                    "message": f"No strategies found. Registered: {len(available)}",
+                })
+
+            # Get stock list
+            stock_list = []
+            if _store and _store.table_exists("stock_basic"):
+                basic_df = _store.query_df("SELECT symbol, name FROM stock_basic LIMIT 200")
+                stock_list = basic_df.to_dict(orient="records") if not basic_df.empty else []
+            else:
+                stock_list = [{"symbol": f"{i:06d}", "name": f"Stock{i}"} for i in range(1, 51)]
+
+            # Run each strategy on each stock (use DuckDB kline for caching)
+            for stock in stock_list[:100]:  # Cap at 100 stocks for live mode
+                sym = stock["symbol"]
+                try:
+                    kline = None
+                    if _store:
+                        try:
+                            kline = _store.query_df(
+                                "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 120",
+                                [sym],
+                            )
+                        except Exception:
+                            pass
+
+                    if kline is None or kline.empty:
+                        continue
+
+                    for s_name in strategies_to_run:
+                        try:
+                            strategy = registry.get(s_name)
+                            if market_state and not strategy.is_suitable_for(market_state):
+                                continue
+                            signals = strategy.generate_signals(kline, market_state)
+                            for sig in signals[-1:]:  # Only latest signal
+                                if sym not in candidates:
+                                    candidates[sym] = []
+                                candidates[sym].append({
+                                    "strategy": s_name,
+                                    "strength": round(sig.strength_score, 1),
+                                    "direction": sig.direction.value,
+                                })
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+        # Sort by strength or consensus
+        if sort_by == "consensus":
+            ranked = sorted(
+                candidates.items(),
+                key=lambda x: (len(x[1]), sum(s["strength"] for s in x[1])),
+                reverse=True,
+            )
+        else:  # strength
+            ranked = sorted(
+                candidates.items(),
+                key=lambda x: sum(s["strength"] for s in x[1]) / max(len(x[1]), 1) if x[1] else 0,
+                reverse=True,
+            )
+
+        # Build result
+        result_candidates = []
+        for sym, sigs in ranked[:top_n]:
+            avg_strength = sum(s["strength"] for s in sigs) / max(len(sigs), 1)
+            buy_sigs = [s for s in sigs if s["direction"] == "bullish"]
+            result_candidates.append({
+                "symbol": sym,
+                "avg_strength": round(avg_strength, 1),
+                "total_signals": len(sigs),
+                "bullish_count": len(buy_sigs),
+                "consensus_pct": round(len(buy_sigs) / max(len(sigs), 1) * 100, 1),
+                "top_strategies": sorted(sigs, key=lambda x: x["strength"], reverse=True)[:5],
+            })
+
+        return _response(data={
+            "market_state": state_name,
+            "strategies_run": len(strategies_to_run) if not _store or not _store.table_exists("signal_cache") else "pre_computed",
+            "scanned_stocks": len(candidates),
+            "candidates": result_candidates,
+            "count": len(result_candidates),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        logger.error("agent_scan_market failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def agent_compare_stocks(symbols: str, dimensions: str = "") -> dict[str, Any]:
+    """Side-by-side comparison of multiple stocks across all dimensions.
+
+    Args:
+        symbols: Comma-separated stock codes (e.g., '000001,000002,600036')
+        dimensions: Comma-separated dimensions to compare (technical,capital,sentiment,fundamental,event). Empty = all.
+    """
+    try:
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        if len(sym_list) < 2:
+            return _response(success=False, error="Need at least 2 symbols to compare", error_type="INVALID_PARAM")
+        if len(sym_list) > 10:
+            return _response(success=False, error="Max 10 symbols for comparison", error_type="INVALID_PARAM")
+
+        dim_list = [d.strip() for d in dimensions.split(",") if d.strip()] if dimensions else [
+            "technical", "capital", "sentiment", "fundamental", "event",
+        ]
+
+        comparison = {}
+        for sym in sym_list:
+            stock_info: dict[str, Any] = {"symbol": sym}
+
+            # Fetch kline
+            kline = None
+            if _store:
+                try:
+                    kline = _store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 60",
+                        [sym],
+                    )
+                except Exception:
+                    pass
+
+            if kline is not None and not kline.empty:
+                close = kline["close"].values
+                volume = kline["volume"].values if "volume" in kline.columns else [0] * len(close)
+
+                if "technical" in dim_list:
+                    change_5d = (close[-1] - close[-5]) / close[-5] * 100 if len(close) >= 5 else 0
+                    change_20d = (close[-1] - close[-20]) / close[-20] * 100 if len(close) >= 20 else 0
+                    vol_ratio = volume[-1] / (volume[-20:].mean() if len(volume) >= 20 else 1)
+                    ma20_pos = "above" if close[-1] > pd.Series(close).rolling(20).mean().iloc[-1] else "below"
+                    stock_info["technical"] = {
+                        "price": round(float(close[-1]), 2),
+                        "change_5d_pct": round(change_5d, 2),
+                        "change_20d_pct": round(change_20d, 2),
+                        "volume_ratio": round(float(vol_ratio), 2),
+                        "ma20_position": ma20_pos,
+                    }
+
+                if "capital" in dim_list and _store:
+                    try:
+                        flow = _store.query_df(
+                            "SELECT * FROM capital_flow WHERE symbol = ? ORDER BY trade_date DESC LIMIT 5",
+                            [sym],
+                        )
+                        if not flow.empty:
+                            stock_info["capital"] = {
+                                "main_net_inflow_5d": round(float(flow["main_net_inflow"].sum()), 0),
+                                "northbound_hold_pct": round(float(flow["northbound_hold_pct"].iloc[0] * 100), 2) if flow["northbound_hold_pct"].notna().any() else None,
+                            }
+                    except Exception:
+                        stock_info["capital"] = "N/A"
+
+            # Fetch events
+            if "event" in dim_list and _store:
+                try:
+                    events = _store.query_df(
+                        "SELECT event_type, event_date FROM major_events WHERE symbol = ? ORDER BY event_date DESC LIMIT 10",
+                        [sym],
+                    )
+                    stock_info["event"] = {
+                        "recent_events": len(events),
+                        "types": events["event_type"].unique().tolist() if not events.empty else [],
+                    }
+                except Exception:
+                    stock_info["event"] = "N/A"
+
+            comparison[sym] = stock_info
+
+        return _response(data={
+            "symbols": sym_list,
+            "dimensions": dim_list,
+            "comparison": comparison,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        logger.error("agent_compare_stocks failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def agent_morning_brief(date: str = "") -> dict[str, Any]:
+    """Daily pre-market briefing: overnight news, global markets, today's watchlist.
+
+    Aggregates multiple data sources into a single actionable morning brief.
+
+    Args:
+        date: Trading date (YYYY-MM-DD), empty for today
+    """
+    try:
+        brief = {
+            "date": date or datetime.now().strftime("%Y-%m-%d"),
+            "generated_at": datetime.now().isoformat(),
+        }
+
+        # 1. Market state
+        from pa_mcp.engine.market_state import MarketStateDetector, MarketIndicators
+        market_info: dict[str, Any] = {"state": "unknown"}
+        if _store:
+            latest = _store.get_latest_date("kline_daily")
+            if latest:
+                df = _store.query_df("""
+                    SELECT
+                        COUNT(CASE WHEN pct_change >= 9.5 THEN 1 END) as limit_up,
+                        COUNT(CASE WHEN pct_change <= -9.5 THEN 1 END) as limit_down,
+                        COUNT(CASE WHEN pct_change > 0 THEN 1 END) as up_count,
+                        COUNT(CASE WHEN pct_change < 0 THEN 1 END) as down_count,
+                        SUM(amount) / 100000000.0 as turnover
+                    FROM kline_daily WHERE date = ?
+                """, [latest])
+                row = df.iloc[0]
+                indicators = MarketIndicators(
+                    limit_up_count=int(row["limit_up"]),
+                    limit_down_count=int(row["limit_down"]),
+                    up_count=int(row["up_count"]),
+                    down_count=int(row["down_count"]),
+                    turnover_billion=float(row["turnover"]),
+                )
+                detector = MarketStateDetector()
+                ms = detector.detect(indicators)
+                pos_map = {"climax": 70, "fermenting": 60, "starting": 35, "dull": 15, "frozen": 5}
+                market_info = {
+                    "state": ms.value,
+                    "suggested_position_pct": pos_map[ms.value],
+                    "yesterday_breadth": round(
+                        (indicators.up_count - indicators.down_count) / max(indicators.up_count + indicators.down_count, 1), 3,
+                    ),
+                    "yesterday_limit_up": indicators.limit_up_count,
+                    "yesterday_limit_down": indicators.limit_down_count,
+                    "yesterday_turnover_billion": round(indicators.turnover_billion, 0),
+                }
+        brief["market"] = market_info
+
+        # 2. Top limit-up stocks from yesterday
+        if _store:
+            latest = _store.get_latest_date("kline_daily")
+            if latest:
+                limit_up_df = _store.query_df(f"""
+                    SELECT symbol, pct_change, volume, turnover
+                    FROM kline_daily WHERE date = ? AND pct_change >= 9.5
+                    ORDER BY pct_change DESC LIMIT 20
+                """, [latest])
+                brief["yesterday_top_boards"] = limit_up_df.to_dict(orient="records") if not limit_up_df.empty else []
+
+        # 3. Volume surge stocks
+        if _store:
+            latest = _store.get_latest_date("kline_daily")
+            if latest:
+                surge_df = _store.query_df(f"""
+                    WITH vol_avg AS (
+                        SELECT symbol, AVG(volume) as avg_vol
+                        FROM kline_daily WHERE date >= ?::DATE - INTERVAL '30 days' GROUP BY symbol
+                    )
+                    SELECT k.symbol, k.pct_change, k.volume / v.avg_vol as vol_ratio
+                    FROM kline_daily k JOIN vol_avg v ON k.symbol = v.symbol
+                    WHERE k.date = ? AND k.volume / v.avg_vol >= 2.0
+                    ORDER BY vol_ratio DESC LIMIT 15
+                """, [latest, latest])
+                brief["volume_surge_stocks"] = surge_df.to_dict(orient="records") if not surge_df.empty else []
+
+        # 4. Dragon-tiger activity
+        if _store:
+            latest_lhb = _store.get_latest_date("dragon_tiger", "trade_date")
+            if latest_lhb:
+                lhb_count = _store.query_df(
+                    "SELECT COUNT(DISTINCT symbol) as cnt FROM dragon_tiger WHERE trade_date = ?",
+                    [latest_lhb],
+                ).iloc[0, 0]
+                brief["dragon_tiger"] = {"date": latest_lhb, "stocks_count": int(lhb_count)}
+
+        # 5. Strategy-suggested watchlist
+        if _store and _store.table_exists("signal_cache"):
+            latest_sig = _store.get_latest_date("signal_cache")
+            if latest_sig:
+                top_sigs = _store.query_df(f"""
+                    SELECT symbol, strategy_name, strength_score
+                    FROM signal_cache
+                    WHERE date = ? AND strength_score >= 60
+                    ORDER BY strength_score DESC LIMIT 20
+                """, [latest_sig])
+                brief["strategy_watchlist"] = top_sigs.to_dict(orient="records") if not top_sigs.empty else []
+        else:
+            brief["strategy_watchlist"] = []
+
+        # 6. Risk alerts
+        systemic_alerts = []
+        if market_info.get("state") == "frozen":
+            systemic_alerts.append("FROZEN market — recommend cash position only")
+        if market_info.get("state") == "dull":
+            systemic_alerts.append("DULL market — reduce position, avoid chasing")
+        if market_info.get("yesterday_limit_down", 0) > 50:
+            systemic_alerts.append("Mass limit-downs detected — systemic sell-off risk")
+        if market_info.get("yesterday_turnover_billion", 1000) < 500:
+            systemic_alerts.append("Volume collapse — liquidity risk elevated")
+
+        from datetime import datetime as dt
+        current_month = dt.now().month
+        if current_month in (5, 6, 9, 11, 12):
+            systemic_alerts.append(f"Seasonal defense: {current_month}月 historically weak — reduce exposure")
+
+        brief["risk_alerts"] = systemic_alerts
+
+        # 7. What to watch today
+        watch_instructions = []
+        state = market_info.get("state", "unknown")
+        if state == "climax":
+            watch_instructions = [
+                "Ride momentum but trail stops aggressively",
+                "Watch for divergence: high limit-up count + declining turnover = top signal",
+                "Focus on: trend + momentum strategies",
+            ]
+        elif state == "fermenting":
+            watch_instructions = [
+                "Active trading environment — run full strategy scan",
+                "Focus on: platform breakout, MA golden cross, sector leaders",
+                "Position: 40-60%, use trailing stops",
+            ]
+        elif state == "starting":
+            watch_instructions = [
+                "Early recovery — small positions, test the water",
+                "Focus on: oversold bounce, value plays, insider buying",
+                "Position: 20-40%, wider stops",
+            ]
+        elif state == "dull":
+            watch_instructions = [
+                "Sideways market — grid strategies, avoid breakouts (false signals)",
+                "Focus on: high dividend, low PE value, range grid",
+                "Position: 10-20%, take profits quickly",
+            ]
+        elif state == "frozen":
+            watch_instructions = [
+                "STAY OUT — preservation mode",
+                "Review past trades for lessons, prepare watchlist for recovery",
+                "Position: 0-5%, all in cash or reverse repo",
+            ]
+        brief["today_playbook"] = watch_instructions
+
+        return _response(data=brief)
+
+    except Exception as e:
+        logger.error("agent_morning_brief failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def agent_sector_analysis(top_n: int = 10) -> dict[str, Any]:
+    """Sector/industry rotation analysis — identify leading and lagging sectors.
+
+    Args:
+        top_n: Number of top sectors to return
+    """
+    try:
+        if not _store:
+            return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
+
+        # Aggregate by sector from kline_daily
+        latest = _store.get_latest_date("kline_daily")
+        if not latest:
+            return _response(data={"message": "No data available"})
+
+        # Try sector mapping table first
+        sector_stats = []
+        if _store.table_exists("stock_sector_mapping") and _store.table_exists("stock_basic"):
+            sector_df = _store.query_df(f"""
+                SELECT s.sector, COUNT(*) as stock_count,
+                       AVG(k.pct_change) as avg_pct_change,
+                       SUM(k.amount) / 100000000.0 as total_turnover_billion,
+                       COUNT(CASE WHEN k.pct_change >= 9.5 THEN 1 END) as limit_up_count,
+                       COUNT(CASE WHEN k.pct_change <= -9.5 THEN 1 END) as limit_down_count
+                FROM kline_daily k
+                JOIN stock_basic s ON k.symbol = s.symbol
+                WHERE k.date = ?
+                GROUP BY s.sector
+                HAVING COUNT(*) >= 3
+                ORDER BY avg_pct_change DESC
+                LIMIT ?
+            """, [latest, top_n])
+            sector_stats = sector_df.to_dict(orient="records") if not sector_df.empty else []
+
+        # Leading stocks per sector
+        leading = {}
+        if _store.table_exists("stock_basic") and sector_stats:
+            for s in sector_stats[:5]:
+                sector = s.get("sector", "")
+                if sector:
+                    leaders_df = _store.query_df(f"""
+                        SELECT k.symbol, k.pct_change
+                        FROM kline_daily k
+                        JOIN stock_basic s ON k.symbol = s.symbol
+                        WHERE k.date = ? AND s.sector = ?
+                        ORDER BY k.pct_change DESC LIMIT 5
+                    """, [latest, sector])
+                    if not leaders_df.empty:
+                        leading[sector] = leaders_df.to_dict(orient="records")
+
+        return _response(data={
+            "date": latest,
+            "sectors": sector_stats,
+            "leaders_by_sector": leading,
+            "count": len(sector_stats),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        logger.error("agent_sector_analysis failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
 # ---- MCP Resources ----
 
 @mcp.resource("strategies://categories")
