@@ -57,3 +57,6 @@ build/
 .env
 .venv/
 venv/
+
+# User secrets (API keys)
+config/llm_config.json
