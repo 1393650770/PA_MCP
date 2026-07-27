@@ -1,7 +1,7 @@
 # Prerequisites
 *.d
 
-# Python
+# ---- Python ----
 __pycache__/
 *.pyc
 *.pyo
@@ -13,50 +13,93 @@ build/
 .ruff_cache/
 .mypy_cache/
 *.egg
+*.whl
 
-# Compiled Object files
+# ---- Coverage & Reports ----
+htmlcov/
+.coverage
+coverage.xml
+*.lcov
+
+# ---- Databases (local) ----
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+*.duckdb.wal
+*.duckdb-journal
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Compiled Object files ----
 *.slo
 *.lo
 *.o
 *.obj
 
-# Precompiled Headers
+# ---- Precompiled Headers ----
 *.gch
 *.pch
 
-# Compiled Dynamic libraries
+# ---- Compiled Dynamic libraries ----
 *.so
 *.dylib
 *.dll
 
-# Fortran module files
+# ---- Fortran module files ----
 *.mod
 *.smod
 
-# Compiled Static libraries
+# ---- Compiled Static libraries ----
 *.lai
 *.la
 *.a
 *.lib
 
-# Executables
+# ---- Executables ----
 *.exe
 *.out
 *.app
 
-# Data
-*.duckdb
-*.duckdb.wal
+# ---- Data directories ----
 /data/
+data/
 
-# IDE
+# ---- IDE ----
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
-# Environment
+# ---- OS junk ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---- Temp files ----
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# ---- Environment ----
 .env
+.env.*
 .venv/
 venv/
+.python-version
 
-# User secrets (API keys)
+# ---- User secrets & local config ----
 config/llm_config.json
+config/local.yaml
+config/local.*.yaml
+*.patch
+*.diff
