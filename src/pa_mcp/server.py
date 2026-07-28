@@ -17,7 +17,7 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from pa_mcp.config import get_settings, Settings
-from pa_mcp.data import AKShareAdapter, CacheManager, DataValidator, DuckDBStore
+from pa_mcp.data import AKShareAdapter, CacheManager, DataValidator, DuckDBStore, SinaAdapter
 from pa_mcp.risk.guard import RiskGuard
 
 logger = structlog.get_logger(__name__)
@@ -26,6 +26,7 @@ logger = structlog.get_logger(__name__)
 _store: Optional[DuckDBStore] = None
 _cache: Optional[CacheManager] = None
 _akshare: Optional[AKShareAdapter] = None
+_sina: Optional[SinaAdapter] = None
 _guard: Optional[RiskGuard] = None
 _settings: Optional[Settings] = None
 
@@ -45,6 +46,7 @@ async def server_lifespan(server: FastMCP):
     _store.connect()
     _cache = CacheManager()
     _akshare = AKShareAdapter()
+    _sina = SinaAdapter()
 
     # Initialize risk layer
     _guard = RiskGuard()
@@ -56,6 +58,8 @@ async def server_lifespan(server: FastMCP):
     # Cleanup
     if _store:
         _store.close()
+    if _sina:
+        await _sina.close()
     logger.info("PA_MCP server stopped")
 
 
@@ -91,6 +95,46 @@ def _response(
             "Trading involves risk of loss."
         ),
     }
+
+
+# ---- Helper: Data source fallback ----
+
+
+async def _get_kline_fallback(
+    symbol: str, period: str = "daily",
+    start_date: str = "", end_date: str = "",
+    adjust: str = "qfq",
+) -> tuple[pd.DataFrame, str]:
+    """Try AKShare first, fall back to Sina on failure."""
+    # Try AKShare
+    if _akshare:
+        try:
+            df = await _akshare.get_daily_kline(
+                symbol=symbol, period=period,
+                start_date=start_date or "20200101",
+                end_date=end_date or datetime.now().strftime("%Y%m%d"),
+                adjust=adjust,
+            )
+            if not df.empty:
+                return df, "akshare"
+        except Exception as e:
+            logger.warning("AKShare kline failed, trying Sina fallback", symbol=symbol, error=str(e))
+
+    # Fall back to Sina
+    if _sina:
+        try:
+            df = await _sina.get_daily_kline(
+                symbol=symbol, period=period,
+                start_date=start_date or "20200101",
+                end_date=end_date or datetime.now().strftime("%Y%m%d"),
+                adjust=adjust,
+            )
+            if not df.empty:
+                return df, "sina"
+        except Exception as e:
+            logger.error("Sina kline fallback also failed", symbol=symbol, error=str(e))
+
+    raise RuntimeError(f"All data sources failed for {symbol}")
 
 
 # ---- MCP Tools: Market Data ----
@@ -135,24 +179,24 @@ async def get_kline(
         adjust: 'qfq' (forward adjusted), 'hfq' (backward), 'bfq' (no adjust)
     """
     try:
-        if _akshare:
-            df = await _akshare.get_daily_kline(
-                symbol=symbol, period=period,
-                start_date=start_date or "20200101",
-                end_date=end_date or datetime.now().strftime("%Y%m%d"),
-                adjust=adjust,
-            )
-            # Convert to list of dicts for JSON serialization
-            records = df.to_dict(orient="records")
-            # Convert Timestamps to strings
-            for r in records:
-                for k, v in r.items():
-                    if hasattr(v, "isoformat"):
-                        r[k] = v.isoformat()
-                    elif hasattr(v, "item"):
-                        r[k] = float(v)
-            return _response(data={"symbol": symbol, "period": period, "adjust": adjust, "kline": records})
-        return _response(success=False, error="Data source not initialized", error_type="INTERNAL_ERROR")
+        df, source = await _get_kline_fallback(
+            symbol=symbol, period=period,
+            start_date=start_date, end_date=end_date,
+            adjust=adjust,
+        )
+        # Convert to list of dicts for JSON serialization
+        records = df.to_dict(orient="records")
+        # Convert Timestamps to strings
+        for r in records:
+            for k, v in r.items():
+                if hasattr(v, "isoformat"):
+                    r[k] = v.isoformat()
+                elif hasattr(v, "item"):
+                    r[k] = float(v)
+        return _response(
+            data={"symbol": symbol, "period": period, "adjust": adjust, "kline": records},
+            source=source,
+        )
     except Exception as e:
         logger.error("get_kline failed", symbol=symbol, error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
@@ -570,6 +614,189 @@ async def portfolio_remove(holding_id: int) -> dict[str, Any]:
             return _response(data={"holding_id": holding_id, "status": "removed"})
         return _response(success=False, error="Portfolio table not found", error_type="NOT_FOUND")
     except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Tools: Watchlist ----
+
+@mcp.tool()
+async def watchlist_add(symbol: str) -> dict[str, Any]:
+    """Add a stock to your watchlist (自选股).
+
+    Args:
+        symbol: Stock code (e.g., '000001')
+    """
+    try:
+        if _store:
+            _store.execute("""
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    id INTEGER GENERATED ALWAYS AS IDENTITY,
+                    symbol VARCHAR(10) NOT NULL UNIQUE,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            _store.execute(
+                "INSERT OR IGNORE INTO watchlist (symbol) VALUES (?)",
+                [symbol],
+            )
+            return _response(data={"symbol": symbol, "status": "added", "message": f"{symbol} added to watchlist"})
+        return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def watchlist_remove(symbol: str) -> dict[str, Any]:
+    """Remove a stock from your watchlist.
+
+    Args:
+        symbol: Stock code to remove
+    """
+    try:
+        if _store and _store.table_exists("watchlist"):
+            _store.execute("DELETE FROM watchlist WHERE symbol = ?", [symbol])
+            return _response(data={"symbol": symbol, "status": "removed"})
+        return _response(success=False, error="Watchlist not found", error_type="NOT_FOUND")
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def watchlist_show() -> dict[str, Any]:
+    """Show all stocks in your watchlist (watchlist only, no analysis)."""
+    try:
+        if _store and _store.table_exists("watchlist"):
+            df = _store.query_df("SELECT symbol, added_at FROM watchlist ORDER BY added_at DESC")
+            symbols = df["symbol"].tolist() if not df.empty else []
+            return _response(data={
+                "watchlist": df.to_dict(orient="records") if not df.empty else [],
+                "count": len(symbols),
+                "symbols": symbols,
+            })
+        return _response(data={"watchlist": [], "count": 0, "symbols": [], "message": "Watchlist empty. Use watchlist_add to add stocks."})
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool()
+async def watchlist_overview() -> dict[str, Any]:
+    """Get real-time overview of all watchlist stocks with key metrics.
+
+    Fetches real-time quotes and recent K-line data for all watchlist stocks.
+    Includes: price, change%, volume ratio, MA trend, RSI, and risk signals.
+    """
+    try:
+        if not _store or not _store.table_exists("watchlist"):
+            return _response(data={"message": "Watchlist empty. Use watchlist_add to add stocks.", "stocks": [], "count": 0})
+
+        wl_df = _store.query_df("SELECT symbol FROM watchlist ORDER BY added_at DESC")
+        symbols = wl_df["symbol"].tolist() if not wl_df.empty else []
+        if not symbols:
+            return _response(data={"message": "Watchlist empty.", "stocks": [], "count": 0})
+
+        stocks = []
+
+        for sym in symbols:
+            stock_info = {"symbol": sym, "name": "", "price": 0, "pct_change": 0,
+                          "trend": "N/A", "rsi": 0, "volume_ratio": 0, "signals": []}
+
+            # Try Sina for real-time quote
+            if _sina:
+                try:
+                    df_rt = await _sina.get_realtime_quote([sym])
+                    if not df_rt.empty:
+                        r = df_rt.iloc[0]
+                        stock_info["name"] = r.get("name", "")
+                        stock_info["price"] = float(r.get("price", 0))
+                        stock_info["open"] = float(r.get("open", 0))
+                        stock_info["high"] = float(r.get("high", 0))
+                        stock_info["low"] = float(r.get("low", 0))
+                        stock_info["prev_close"] = float(r.get("prev_close", 0))
+                        if stock_info["prev_close"] > 0:
+                            stock_info["pct_change"] = round(
+                                (stock_info["price"] - stock_info["prev_close"]) / stock_info["prev_close"] * 100, 2
+                            )
+                        stock_info["volume"] = float(r.get("volume", 0))
+                        stock_info["amount"] = float(r.get("amount", 0))
+                except Exception:
+                    pass
+
+            # Try Sina for K-line analysis
+            if _sina:
+                try:
+                    df_kl = await _sina.get_daily_kline(sym, start_date="20260601", end_date=datetime.now().strftime("%Y%m%d"))
+                    if not df_kl.empty and len(df_kl) >= 20:
+                        # MA trend
+                        df_kl["ma5"] = df_kl["close"].rolling(5).mean()
+                        df_kl["ma20"] = df_kl["close"].rolling(20).mean()
+                        latest = df_kl.iloc[-1]
+                        if pd.notna(latest.get("ma5")) and pd.notna(latest.get("ma20")):
+                            if latest["close"] > latest["ma5"] > latest["ma20"]:
+                                stock_info["trend"] = "bullish"
+                            elif latest["close"] < latest["ma5"] < latest["ma20"]:
+                                stock_info["trend"] = "bearish"
+                            else:
+                                stock_info["trend"] = "neutral"
+
+                        # RSI(14)
+                        delta = df_kl["close"].diff()
+                        gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+                        loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+                        rs = gain / loss.replace(0, float("nan"))
+                        rsi_series = 100 - (100 / (1 + rs))
+                        stock_info["rsi"] = round(float(rsi_series.iloc[-1]), 1) if pd.notna(rsi_series.iloc[-1]) else 0
+
+                        # Volume ratio
+                        vol_avg = df_kl["volume"].tail(20).mean()
+                        vol_latest = df_kl["volume"].iloc[-1]
+                        stock_info["volume_ratio"] = round(float(vol_latest / vol_avg), 2) if vol_avg > 0 else 0
+
+                        # 20-day change
+                        stock_info["change_20d"] = round(float(df_kl["pct_change"].tail(20).sum()), 2)
+
+                        # Signals
+                        pct = stock_info["pct_change"]
+                        if pct >= 9.5:
+                            stock_info["signals"].append("limit_up")
+                        elif pct <= -9.5:
+                            stock_info["signals"].append("limit_down")
+                        if stock_info["rsi"] > 70:
+                            stock_info["signals"].append("rsi_overbought")
+                        elif stock_info["rsi"] < 30:
+                            stock_info["signals"].append("rsi_oversold")
+                        if stock_info["volume_ratio"] > 2:
+                            stock_info["signals"].append("volume_surge")
+                        if stock_info.get("change_20d", 0) > 20:
+                            stock_info["signals"].append("strong_20d")
+                        elif stock_info.get("change_20d", 0) < -20:
+                            stock_info["signals"].append("weak_20d")
+                except Exception:
+                    pass
+
+            stocks.append(stock_info)
+
+        # Sort: attention-grabbing first (limit up/down, volume surge)
+        def sort_key(s):
+            score = 0
+            if "limit_up" in s.get("signals", []):
+                score += 100
+            if "limit_down" in s.get("signals", []):
+                score += 80
+            if "volume_surge" in s.get("signals", []):
+                score += 50
+            score += abs(s.get("pct_change", 0))
+            return -score
+
+        stocks.sort(key=sort_key)
+
+        return _response(data={
+            "stocks": stocks,
+            "count": len(stocks),
+            "updated_at": datetime.now().isoformat(),
+            "source": "sina",
+        })
+    except Exception as e:
+        logger.error("watchlist_overview failed", error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
