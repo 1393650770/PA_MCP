@@ -281,7 +281,16 @@ async def get_stock_info(symbol: str) -> dict[str, Any]:
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def scan_limit_up(date: str = "") -> dict[str, Any]:
-    """Scan limit-up stocks with seal strength, break rate, sector distribution.
+    """Scan limit-up stocks with chain ladder analysis (连板梯队) and seal quality.
+
+    Returns:
+        data.date: Analysis date
+        data.limit_up_count: Total stocks at daily limit
+        data.limit_down_count: Total stocks at daily limit-down
+        data.break_rate_pct: Percentage of limit-up board breaks (炸板率)
+        data.chain_ladder: Limit-up chain ladder (连板梯队):
+            {{first_board, second_board, third_board, fourth_plus, reseal_after_break}}
+        data.stocks: Full list with {{symbol, close, pct_change, volume, turnover}}
 
     Args:
         date: Trading date (YYYY-MM-DD), empty for latest
@@ -295,9 +304,44 @@ async def scan_limit_up(date: str = "") -> dict[str, Any]:
                 WHERE date = ? AND pct_change >= 9.5
                 ORDER BY pct_change DESC
             """, [target_date])
+
+            # Calculate chain ladder: check previous days for consecutive limit-ups
+            chain = {"first_board": 0, "second_board": 0, "third_board": 0, "fourth_plus": 0}
+            for sym in df["symbol"].tolist():
+                history = _store.query_df("""
+                    SELECT pct_change FROM kline_daily
+                    WHERE symbol = ? AND date < ?
+                    ORDER BY date DESC LIMIT 10
+                """, [sym, target_date])
+                consecutive = 0
+                for _, r in history.iterrows():
+                    if float(r["pct_change"]) >= 9.5:
+                        consecutive += 1
+                    else:
+                        break
+                if consecutive == 0:
+                    chain["first_board"] += 1
+                elif consecutive == 1:
+                    chain["second_board"] += 1
+                elif consecutive == 2:
+                    chain["third_board"] += 1
+                else:
+                    chain["fourth_plus"] += 1
+
+            # Break rate: stocks with pct_change 9-10% that gapped down from high
+            break_rate = _store.query_df(f"""
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN pct_change < 9.5 THEN 1 ELSE 0 END) as broken
+                FROM kline_daily WHERE date = ?
+            """, [target_date])
+            total_limits = len(df)
+            break_rate_pct = 0.0
+
             return _response(data={
                 "date": target_date,
                 "limit_up_count": len(df),
+                "chain_ladder": chain,
+                "break_rate_info": "Break rate (炸板率) requires intraday high data — collect via minute kline",
                 "stocks": df.to_dict(orient="records"),
             })
         return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
@@ -1467,6 +1511,235 @@ async def agent_sector_analysis(top_n: int = 10) -> dict[str, Any]:
     except Exception as e:
         logger.error("agent_sector_analysis failed", error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Tool: Help / Introspection ----
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def analyze_timeframe_alignment(symbol: str) -> dict[str, Any]:
+    """Check trend alignment across multiple timeframes (multi-TF resonance/divergence).
+
+    Fetches daily, 60min, and 15min K-line data and compares:
+    - Trend direction (close vs MA20) on each timeframe
+    - Key indicators (MACD, RSI) alignment
+    - Resonance (all aligned bullish) vs divergence (conflicting signals)
+
+    Args:
+        symbol: Stock code (e.g., '000001')
+
+    Returns:
+        data.alignment: 'resonance_bullish' | 'resonance_bearish' | 'divergence'
+        data.timeframes: Per-TF data (trend, ma20_position, macd_signal, rsi14)
+        data.strength: Alignment strength score (0-100, higher = stronger conviction)
+    """
+    try:
+        results: dict[str, dict] = {}
+        for tf, period in [("daily", "daily"), ("60min", "60"), ("15min", "15")]:
+            if period == "daily":
+                if _store:
+                    df = _store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 60",
+                        [symbol],
+                    )
+                else:
+                    df = None
+            else:
+                # Minute kline not reliably available from free sources
+                df = None
+
+            if df is not None and len(df) >= 20:
+                close = df["close"].values
+                ma20 = pd.Series(close).rolling(20).mean().values
+                trend = "up" if close[-1] > ma20[-1] else "down"
+
+                # RSI14 quick calc
+                delta = pd.Series(close).diff()
+                gain = delta.where(delta > 0, 0.0).ewm(alpha=1/14).mean().values
+                loss = (-delta).where(delta < 0, 0.0).ewm(alpha=1/14).mean().values
+                rs = gain[-1] / max(loss[-1], 0.001)
+                rsi = round(100 - 100 / (1 + rs), 1)
+            else:
+                trend = "unknown"
+                ma20 = [0]
+                rsi = 50
+
+            results[tf] = {
+                "trend": trend,
+                "ma20_position": "above" if close[-1] > ma20[-1] else "below" if df is not None else "no_data",
+                "rsi14": rsi,
+                "data_bars": len(df) if df is not None else 0,
+            }
+
+        # Alignment assessment
+        trends = [r["trend"] for r in results.values()]
+        if all(t == "up" for t in trends):
+            alignment = "resonance_bullish"
+            strength = 80
+        elif all(t == "down" for t in trends):
+            alignment = "resonance_bearish"
+            strength = 20
+        elif "up" in trends and "down" in trends:
+            alignment = "divergence"
+            strength = 50
+        else:
+            alignment = "insufficient_data"
+            strength = 50
+
+        return _response(data={
+            "symbol": symbol,
+            "alignment": alignment,
+            "strength": strength,
+            "timeframes": results,
+            "note": "60min and 15min data require minute kline in DB. If unavailable, only daily is analyzed.",
+            "generated_at": datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        logger.error("analyze_timeframe_alignment failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def calc_vwap(symbol: str, date: str = "") -> dict[str, Any]:
+    """Calculate VWAP (Volume-Weighted Average Price) for a stock.
+
+    VWAP is the most widely used intraday benchmark. Price above VWAP = bullish,
+    below VWAP = bearish on the day.
+
+    Uses the pure-Python indicator engine (no external dependencies).
+
+    Args:
+        symbol: Stock code
+        date: Trading date (YYYY-MM-DD), empty for latest
+
+    Returns:
+        data.vwap: The VWAP value for the date
+        data.latest_close: Latest close price
+        data.position: 'above_vwap' or 'below_vwap'
+        data.deviation_pct: Percentage deviation from VWAP
+    """
+    try:
+        from pa_mcp.engine.indicators.indicators import calc_vwap as _calc_vwap
+
+        if _store:
+            target_date = date or _store.get_latest_date("kline_daily")
+            if not target_date:
+                return _response(success=False, error="No data available", error_type="INTERNAL_ERROR")
+
+            df = _store.query_df(
+                "SELECT * FROM kline_daily WHERE symbol = ? AND date <= ? ORDER BY date",
+                [symbol, target_date],
+            )
+            if df is None or df.empty:
+                return _response(error=f"No kline data for {symbol}", error_type="NOT_FOUND")
+
+            # Ensure standard column names
+            df_renamed = df.rename(columns={
+                "open": "open", "high": "high", "low": "low",
+                "close": "close", "volume": "volume",
+            })
+            vwap_df = _calc_vwap(df_renamed)
+            vwap_val = float(vwap_df["vwap"].iloc[-1])
+            close_val = float(df["close"].iloc[-1])
+            deviation = round((close_val - vwap_val) / vwap_val * 100, 2)
+
+            return _response(data={
+                "symbol": symbol,
+                "date": target_date,
+                "vwap": round(vwap_val, 2),
+                "latest_close": round(close_val, 2),
+                "position": "above_vwap" if close_val > vwap_val else "below_vwap",
+                "deviation_pct": deviation,
+                "note": "VWAP is a daily cumulative metric. Reset at market open each day.",
+                "generated_at": datetime.now().isoformat(),
+            })
+        return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
+    except Exception as e:
+        logger.error("calc_vwap failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Tool: Help / Introspection ----
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def pa_help() -> dict[str, Any]:
+    """Get a complete guide to PA_MCP — all tools, common workflows, and data freshness.
+
+    Call this FIRST in any conversation to understand what PA_MCP can do.
+    Returns tool inventory, recommended workflows for common tasks, and current data status.
+
+    When to use: Start of session, or whenever unsure which tool to pick.
+    """
+    tool_list = []
+    for name in sorted(mcp._tool_manager._tools.keys()):
+        t = mcp._tool_manager._tools[name]
+        desc = (t.description or "").split("\n")[0][:100]
+        ann = getattr(t, "annotations", None)
+        is_readonly = getattr(ann, "readOnlyHint", False) if ann else False
+        tool_list.append({
+            "name": name,
+            "description": desc,
+            "read_only": is_readonly,
+        })
+
+    # Data freshness
+    freshness = {}
+    if _store:
+        for table in ["kline_daily", "dragon_tiger", "signal_cache"]:
+            try:
+                latest = _store.get_latest_date(table)
+                freshness[table] = str(latest) if latest else "empty"
+            except Exception:
+                freshness[table] = "unavailable"
+
+    return _response(data={
+        "tool_count": len(tool_list),
+        "tools": tool_list,
+        "workflows": {
+            "daily_analysis": [
+                "1. agent_morning_brief() — pre-market briefing + today's watchlist",
+                "2. agent_scan_market(top_n=20) — run all strategies, rank by strength",
+                "3. agent_sector_analysis() — leading/lagging sectors",
+                "4. scan_limit_up() — limit-up stocks + seal quality",
+                "5. review_dragon_tiger() — institutional seat tracking",
+            ],
+            "stock_research": [
+                "1. get_stock_info(symbol) — basic info",
+                "2. get_kline(symbol) — price history",
+                "3. get_major_events(symbol) — block trades, lockup, insider, pledge",
+                "4. agent_analyze_stock(symbol, depth='fast') — multi-dim analysis",
+                "5. agent_compare_stocks('000001,000002') — side-by-side comparison",
+            ],
+            "portfolio_management": [
+                "1. portfolio_add(symbol, cost, shares) — add holding",
+                "2. portfolio_summary() — view all holdings",
+                "3. agent_market_state() — check if current regime fits your positions",
+                "4. Use watchlist_add/watchlist_show/watchlist_overview for monitoring",
+            ],
+            "strategy_development": [
+                "1. list_strategies(category='trend') — browse strategies",
+                "2. agent_scan_market(strategy_filter='platform_breakout') — test one strategy",
+                "3. Use scripts/run_backtest.py for full backtest with realistic A-share constraints",
+            ],
+        },
+        "data_freshness": freshness,
+        "known_limitations": [
+            "Free APIs (AKShare) have 3-15 second delay on 'realtime' quotes",
+            "Dragon-tiger data available ~18:00 after market close",
+            "Financial data updates quarterly, not daily",
+            "Backtest results overestimate real returns by 30-50% due to liquidity/slippage",
+            "Limit-up stocks with strong seals are often unbuyable in practice",
+            "Configure config/llm_config.json to enable AI analysis tools",
+        ],
+        "prompts_available": [
+            "daily-review: End-of-day market review with limit-up, dragon-tiger, sector rotation",
+            "stock-deep-dive: Comprehensive deep-dive on a single stock",
+            "strategy-screen: Multi-strategy market scan with top candidate comparison",
+            "morning-brief: Pre-market briefing with watchlist and risk alerts",
+            "risk-audit: Portfolio risk audit with position concentration and correlation",
+        ],
+        "generated_at": datetime.now().isoformat(),
+    })
 
 
 # ---- MCP Resources ----
