@@ -19,6 +19,8 @@ from mcp.server.fastmcp import FastMCP
 from pa_mcp.config import get_settings, Settings
 from pa_mcp.data import AKShareAdapter, CacheManager, DataValidator, DuckDBStore, SinaAdapter
 from pa_mcp.risk.guard import RiskGuard
+from pa_mcp.tools.utils import format_error, not_found_error
+from pa_mcp.tools.prompts import PROMPTS
 
 logger = structlog.get_logger(__name__)
 
@@ -1444,10 +1446,37 @@ def get_health_status() -> str:
         "server": "running",
         "duckdb": "connected" if _store is not None else "disconnected",
         "akshare": "initialized" if _akshare is not None else "not_initialized",
+        "sina": "initialized" if _sina is not None else "not_initialized",
         "llm": "check config/llm_config.json",
+        "tools": len(list(mcp._tool_manager._tools.keys())) if hasattr(mcp, '_tool_manager') else 0,
         "timestamp": datetime.now().isoformat(),
     }
     return json.dumps(status, indent=2)
+
+
+# ---- MCP Prompts (reusable analysis workflows) ----
+
+def _register_prompts() -> None:
+    """Register all prompt templates. Each prompt is a reusable analysis workflow.
+
+    Following MCP best practices: Prompts = reusable structured templates;
+    Tools = actions with side effects. Prompts give the LLM a proven analysis
+    framework without dictating its reasoning.
+    """
+    for prompt_def in PROMPTS.values():
+        # Use factory to capture current prompt_def in closure
+        def _make_factory(pd: dict) -> Any:
+            @mcp.prompt(name=pd["name"], description=pd["description"])
+            def _prompt_fn(arguments: dict[str, Any] | None = None) -> str:
+                args = arguments or {}
+                # Default date to today
+                if "date" in pd.get("arguments", []) and "date" not in args:
+                    args["date"] = datetime.now().strftime("%Y-%m-%d")
+                return pd["template"].format(**args)
+            return _prompt_fn
+        _make_factory(prompt_def)
+
+_register_prompts()
 
 
 # ---- Server Entry Point ----
