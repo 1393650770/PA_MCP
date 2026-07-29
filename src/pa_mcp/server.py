@@ -206,6 +206,9 @@ async def get_kline(
             source=source,
             freshness=records[-1]["date"] if records else None,
         )
+    except RuntimeError as e:
+        logger.warning("get_kline all sources failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
     except Exception as e:
         logger.error("get_kline failed", symbol=symbol, error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
@@ -1548,27 +1551,29 @@ async def analyze_timeframe_alignment(symbol: str) -> dict[str, Any]:
                 df = None
 
             if df is not None and len(df) >= 20:
-                close = df["close"].values
-                ma20 = pd.Series(close).rolling(20).mean().values
-                trend = "up" if close[-1] > ma20[-1] else "down"
+                close_vals = df["close"].values
+                ma20_vals = pd.Series(close_vals).rolling(20).mean().values
+                trend_val = "up" if close_vals[-1] > ma20_vals[-1] else "down"
 
                 # RSI14 quick calc
-                delta = pd.Series(close).diff()
+                delta = pd.Series(close_vals).diff()
                 gain = delta.where(delta > 0, 0.0).ewm(alpha=1/14).mean().values
                 loss = (-delta).where(delta < 0, 0.0).ewm(alpha=1/14).mean().values
                 rs = gain[-1] / max(loss[-1], 0.001)
-                rsi = round(100 - 100 / (1 + rs), 1)
+                rsi_val = round(100 - 100 / (1 + rs), 1)
+                results[tf] = {
+                    "trend": trend_val,
+                    "ma20_position": "above" if close_vals[-1] > ma20_vals[-1] else "below",
+                    "rsi14": rsi_val,
+                    "data_bars": len(df),
+                }
             else:
-                trend = "unknown"
-                ma20 = [0]
-                rsi = 50
-
-            results[tf] = {
-                "trend": trend,
-                "ma20_position": "above" if close[-1] > ma20[-1] else "below" if df is not None else "no_data",
-                "rsi14": rsi,
-                "data_bars": len(df) if df is not None else 0,
-            }
+                results[tf] = {
+                    "trend": "no_data",
+                    "ma20_position": "no_data",
+                    "rsi14": 50,
+                    "data_bars": 0,
+                }
 
         # Alignment assessment
         trends = [r["trend"] for r in results.values()]
