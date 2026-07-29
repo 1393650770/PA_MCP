@@ -150,14 +150,6 @@ curl http://localhost:8080/health
 | `scan_volume_surge` | Abnormal volume vs 20-day average |
 | `get_major_events` | Block trades, lockup, insider trades, pledge, visits |
 
-### Analysis
-| Tool | Description |
-|------|-------------|
-| `analyze_technical` | Multi-indicator technical report |
-| `analyze_fundamental` | Financials + valuation + DuPont |
-| `analyze_sentiment` | News sentiment score + trend |
-| `analyze_capital_flow` | Main/retail/northbound fund flow |
-
 ### Review
 | Tool | Description |
 |------|-------------|

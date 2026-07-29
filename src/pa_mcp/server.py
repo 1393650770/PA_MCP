@@ -70,7 +70,12 @@ async def server_lifespan(server: FastMCP):
 settings = get_settings()
 mcp = FastMCP(
     name="pa-mcp",
-    instructions="Personal Analyst MCP - Full-stack A-share quantitative trading server. Provides A-share market data, technical analysis, strategy signals, backtesting, and AI-powered stock analysis.",
+    instructions=(
+        "Personal Analyst MCP — Full-stack A-share quantitative trading server. "
+        "Provides A-share market data, technical analysis, strategy signals, backtesting, and AI-powered stock analysis. "
+        "IMPORTANT: This is a research tool, not investment advice. No buy/sell recommendations — only strength scores and evidence. "
+        "All analysis is for reference only. Past performance does not guarantee future results. Trading involves risk of loss."
+    ),
     lifespan=server_lifespan,
 )
 
@@ -82,7 +87,12 @@ def _response(
     error: Optional[str] = None, error_type: Optional[str] = None,
     source: str = "akshare", freshness: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Build standardized tool response envelope."""
+    """Build standardized tool response envelope.
+
+    Args:
+        freshness: Data source timestamp (e.g. latest kline date), NOT response generation time.
+                   If None, defaults to datetime.now() as approximate.
+    """
     return {
         "success": success,
         "data": data,
@@ -90,12 +100,7 @@ def _response(
         "error_type": error_type,
         "data_source": source,
         "data_freshness": freshness or datetime.now().isoformat(),
-        "disclaimer": (
-            "This is a research tool, not investment advice. "
-            "All analysis is for reference only. "
-            "Past performance does not guarantee future results. "
-            "Trading involves risk of loss."
-        ),
+        "generated_at": datetime.now().isoformat(),
     }
 
 
@@ -198,6 +203,7 @@ async def get_kline(
         return _response(
             data={"symbol": symbol, "period": period, "adjust": adjust, "kline": records},
             source=source,
+            freshness=records[-1]["date"] if records else None,
         )
     except Exception as e:
         logger.error("get_kline failed", symbol=symbol, error=str(e))
@@ -705,21 +711,20 @@ async def watchlist_overview() -> dict[str, Any]:
             # Try Sina for real-time quote
             if _sina:
                 try:
-                    df_rt = await _sina.get_realtime_quote([sym])
-                    if not df_rt.empty:
-                        r = df_rt.iloc[0]
-                        stock_info["name"] = r.get("name", "")
-                        stock_info["price"] = float(r.get("price", 0))
-                        stock_info["open"] = float(r.get("open", 0))
-                        stock_info["high"] = float(r.get("high", 0))
-                        stock_info["low"] = float(r.get("low", 0))
-                        stock_info["prev_close"] = float(r.get("prev_close", 0))
+                    quote = await _sina.get_realtime_quote(sym)  # [AI] Fixed: pass str not list; return is dict not DataFrame
+                    if quote:
+                        stock_info["name"] = quote.get("name", "")
+                        stock_info["price"] = float(quote.get("price", 0))
+                        stock_info["open"] = float(quote.get("open", 0))
+                        stock_info["high"] = float(quote.get("high", 0))
+                        stock_info["low"] = float(quote.get("low", 0))
+                        stock_info["prev_close"] = float(quote.get("prev_close", 0))
                         if stock_info["prev_close"] > 0:
                             stock_info["pct_change"] = round(
                                 (stock_info["price"] - stock_info["prev_close"]) / stock_info["prev_close"] * 100, 2
                             )
-                        stock_info["volume"] = float(r.get("volume", 0))
-                        stock_info["amount"] = float(r.get("amount", 0))
+                        stock_info["volume"] = float(quote.get("volume", 0))
+                        stock_info["amount"] = float(quote.get("amount", 0))
                 except Exception:
                     pass
 
