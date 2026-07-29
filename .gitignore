@@ -63,9 +63,9 @@ logs/
 *.out
 *.app
 
-# ---- Data directories ----
+# ---- Data directories (project root only) ----
 /data/
-data/
+/data/**
 
 # ---- IDE ----
 .vscode/
