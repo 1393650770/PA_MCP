@@ -10,11 +10,11 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import pandas as pd
 import structlog
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 
 from pa_mcp.config import get_settings, Settings
 from pa_mcp.data import AKShareAdapter, CacheManager, DataValidator, DuckDBStore, SinaAdapter
@@ -146,8 +146,8 @@ async def _get_kline_fallback(
 
 # ---- MCP Tools: Market Data ----
 
-@mcp.tool()
-async def get_realtime_quote(symbol: str, source: str = "akshare") -> dict[str, Any]:
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_realtime_quote(symbol: str, source: Literal["akshare", "sina"] = "akshare") -> dict[str, Any]:
     """Get real-time stock quote with 5-level depth.
 
     Args:
@@ -170,11 +170,12 @@ async def get_realtime_quote(symbol: str, source: str = "akshare") -> dict[str, 
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_kline(
-    symbol: str, period: str = "daily",
+    symbol: str,
+    period: Literal["daily", "weekly", "monthly", "1", "5", "15", "30", "60"] = "daily",
     start_date: str = "", end_date: str = "",
-    adjust: str = "qfq",
+    adjust: Literal["qfq", "hfq", "bfq"] = "qfq",
 ) -> dict[str, Any]:
     """Get historical K-line (OHLCV) data.
 
@@ -210,9 +211,19 @@ async def get_kline(
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_market_overview() -> dict[str, Any]:
-    """Get current market overview: indices, breadth, turnover, northbound flow."""
+    """Get current A-share market overview with key metrics.
+
+    Returns:
+        data.sh_index: Shanghai Composite latest close
+        data.sz_index: Shenzhen Component latest close
+        data.total_stocks: Total A-shares tracked
+        data.up_count / down_count: Advancing vs declining stocks
+        data.limit_up_count / limit_down_count: Stocks at daily price limits
+        data.turnover_total: Total market turnover in CNY
+        data.data_delay_seconds: Approximate data delay (free APIs have 3-15s lag)
+    """
     try:
         if _akshare:
             overview = await _akshare.get_market_overview()
@@ -223,7 +234,7 @@ async def get_market_overview() -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def search_stock(keyword: str) -> dict[str, Any]:
     """Search stocks by name or code.
 
@@ -245,7 +256,7 @@ async def search_stock(keyword: str) -> dict[str, Any]:
         return _response(data={"matches": [], "count": 0})
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_stock_info(symbol: str) -> dict[str, Any]:
     """Get stock basic info: name, industry, market cap, list date.
 
@@ -268,7 +279,7 @@ async def get_stock_info(symbol: str) -> dict[str, Any]:
 
 # ---- MCP Tools: Screener ----
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def scan_limit_up(date: str = "") -> dict[str, Any]:
     """Scan limit-up stocks with seal strength, break rate, sector distribution.
 
@@ -295,7 +306,7 @@ async def scan_limit_up(date: str = "") -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def scan_volume_surge(ratio: float = 2.0, market_cap_min: float = 0) -> dict[str, Any]:
     """Scan stocks with abnormal volume surge.
 
@@ -327,7 +338,7 @@ async def scan_volume_surge(ratio: float = 2.0, market_cap_min: float = 0) -> di
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_major_events(symbol: str) -> dict[str, Any]:
     """Get all major events for a stock: block trades, lockup expiry, insider trades, pledge ratio.
 
@@ -354,7 +365,7 @@ async def get_major_events(symbol: str) -> dict[str, Any]:
 
 # ---- MCP Tools: Review ----
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def review_daily_limit_up(date: str = "") -> dict[str, Any]:
     """Daily limit-up review: seal time distribution, break rate, sector clustering, next-day premium.
 
@@ -388,7 +399,7 @@ async def review_daily_limit_up(date: str = "") -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def review_dragon_tiger(date: str = "") -> dict[str, Any]:
     """Daily dragon-tiger board review: seat analysis, famous trader tracking.
 
@@ -415,8 +426,8 @@ async def review_dragon_tiger(date: str = "") -> dict[str, Any]:
 
 # ---- MCP Tools: Strategy ----
 
-@mcp.tool()
-async def list_strategies(category: str = "") -> dict[str, Any]:
+@mcp.tool(annotations={"readOnlyHint": True})
+async def list_strategies(category: Literal["trend", "swing", "value", "board", "reversal", "event", "grid", ""] = "") -> dict[str, Any]:
     """List available trading strategies.
 
     Args:
@@ -430,7 +441,7 @@ async def list_strategies(category: str = "") -> dict[str, Any]:
     return _response(data={"strategies": strategies, "count": len(strategies)})
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_market_sentiment(date: str = "") -> dict[str, Any]:
     """Get current market sentiment assessment with position suggestion.
 
@@ -491,8 +502,8 @@ async def get_market_sentiment(date: str = "") -> dict[str, Any]:
 
 # ---- MCP Tools: Alerts ----
 
-@mcp.tool()
-async def watch_price_alert(symbol: str, condition: str, price: float) -> dict[str, Any]:
+@mcp.tool(annotations={"readOnlyHint": False})
+async def watch_price_alert(symbol: str, condition: Literal["above", "below", "cross"], price: float) -> dict[str, Any]:
     """Create a price alert.
 
     Args:
@@ -516,7 +527,7 @@ async def watch_price_alert(symbol: str, condition: str, price: float) -> dict[s
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False})
 async def watch_volume_alert(symbol: str, volume_ratio: float = 2.0) -> dict[str, Any]:
     """Create a volume surge alert.
 
@@ -538,21 +549,32 @@ async def watch_volume_alert(symbol: str, volume_ratio: float = 2.0) -> dict[str
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
-async def list_alerts(status: str = "active") -> dict[str, Any]:
-    """List configured alerts.
+@mcp.tool(annotations={"readOnlyHint": True})
+async def list_alerts(status: Literal["active","triggered"] = "active") -> dict[str, Any]:
+    """List configured price/volume alerts.
 
     Args:
-        status: 'active' or 'triggered'
+        status: Filter by 'active' (not yet triggered) or 'triggered'
+
+    Returns:
+        data.alerts: List of alert objects with {id, symbol, condition, price/ratio, status, created_at}
+        data.count: Total matching alerts.
+        Note: Alerts are checked on-demand, not continuously monitored.
     """
     return _response(data={"alerts": [], "count": 0, "message": "Alert persistence not yet implemented. Alerts live in-memory for this session."})
 
 
 # ---- MCP Tools: Portfolio ----
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def portfolio_summary() -> dict[str, Any]:
-    """Get portfolio summary with P&L and risk metrics."""
+    """Get portfolio summary with P&ampL and cost basis.
+
+    Returns:
+        data.holdings: List of {{symbol, cost, shares, added_date, created_at}}
+        data.count: Number of holdings
+        data.total_cost: Total cost basis (sum of cost * shares)
+    """
     try:
         if _store and _store.table_exists("portfolio"):
             df = _store.query_df("SELECT * FROM portfolio ORDER BY added_date DESC")
@@ -569,7 +591,7 @@ async def portfolio_summary() -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False})
 async def portfolio_add(symbol: str, cost: float, shares: int, added_date: str = "") -> dict[str, Any]:
     """Add a holding to portfolio.
 
@@ -609,7 +631,7 @@ async def portfolio_add(symbol: str, cost: float, shares: int, added_date: str =
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
 async def portfolio_remove(holding_id: int) -> dict[str, Any]:
     """Remove a holding from portfolio.
 
@@ -627,7 +649,7 @@ async def portfolio_remove(holding_id: int) -> dict[str, Any]:
 
 # ---- MCP Tools: Watchlist ----
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": True})
 async def watchlist_add(symbol: str) -> dict[str, Any]:
     """Add a stock to your watchlist (自选股).
 
@@ -653,7 +675,7 @@ async def watchlist_add(symbol: str) -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
 async def watchlist_remove(symbol: str) -> dict[str, Any]:
     """Remove a stock from your watchlist.
 
@@ -669,9 +691,15 @@ async def watchlist_remove(symbol: str) -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def watchlist_show() -> dict[str, Any]:
-    """Show all stocks in your watchlist (watchlist only, no analysis)."""
+    """Show all symbols in your watchlist (symbols only, no analysis).
+
+    Returns:
+        data.watchlist: List of {{symbol, added_at}} sorted by most recent first
+        data.count: Number of stocks in watchlist
+        Note: For analysis of watchlist stocks, use watchlist_overview instead.
+    """
     try:
         if _store and _store.table_exists("watchlist"):
             df = _store.query_df("SELECT symbol, added_at FROM watchlist ORDER BY added_at DESC")
@@ -686,7 +714,7 @@ async def watchlist_show() -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def watchlist_overview() -> dict[str, Any]:
     """Get real-time overview of all watchlist stocks with key metrics.
 
@@ -809,8 +837,8 @@ async def watchlist_overview() -> dict[str, Any]:
 
 # ---- MCP Tools: Agent (Full Integration) ----
 
-@mcp.tool()
-async def agent_analyze_stock(symbol: str, depth: str = "fast") -> dict[str, Any]:
+@mcp.tool(annotations={"readOnlyHint": True})
+async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep"] = "fast") -> dict[str, Any]:
     """AI-powered multi-dimensional stock analysis.
 
     Args:
@@ -883,9 +911,18 @@ async def agent_analyze_stock(symbol: str, depth: str = "fast") -> dict[str, Any
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_market_state() -> dict[str, Any]:
-    """Get current market regime assessment with position sizing suggestion."""
+    """Get current market regime and position sizing suggestion.
+
+    Uses 5-state detector (climax/fermenting/starting/dull/frozen) with hysteresis.
+
+    Returns:
+        data.market_state: Current market regime name
+        data.suggested_position_pct: Recommended max position as percentage (0-100)
+        data.recommended_strategies: Strategy categories suitable for current state
+        data.indicators: Key metrics (limit_up, limit_down, breadth, turnover_billion)
+    """
     try:
         from pa_mcp.engine.market_state import MarketStateDetector, MarketIndicators
 
@@ -935,11 +972,11 @@ async def agent_market_state() -> dict[str, Any]:
 
 # ---- MCP Tools: Comprehensive Analysis (NEW) ----
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_scan_market(
     top_n: int = 20,
     strategy_filter: str = "",
-    sort_by: str = "strength",
+    sort_by: Literal["strength","consensus"] = "strength",
 ) -> dict[str, Any]:
     """AI-powered full market scan — run all strategies, rank by strength score.
 
@@ -1111,7 +1148,7 @@ async def agent_scan_market(
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_compare_stocks(symbols: str, dimensions: str = "") -> dict[str, Any]:
     """Side-by-side comparison of multiple stocks across all dimensions.
 
@@ -1204,7 +1241,7 @@ async def agent_compare_stocks(symbols: str, dimensions: str = "") -> dict[str, 
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_morning_brief(date: str = "") -> dict[str, Any]:
     """Daily pre-market briefing: overnight news, global markets, today's watchlist.
 
@@ -1368,7 +1405,7 @@ async def agent_morning_brief(date: str = "") -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_sector_analysis(top_n: int = 10) -> dict[str, Any]:
     """Sector/industry rotation analysis — identify leading and lagging sectors.
 
