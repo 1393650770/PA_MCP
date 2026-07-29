@@ -40,9 +40,10 @@ jobs:
   # ---- Test ----
   test:
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.12"]
 
     steps:
@@ -52,11 +53,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libta-lib-dev
-
       - name: Install Python deps
         run: |
           pip install -e ".[dev]"
@@ -64,10 +60,6 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest tests/ -v --tb=short
-
-      - name: Check coverage
-        run: |
-          python -m pytest tests/ --cov=pa_mcp --cov-report=term-missing
 
   # ---- Docker Build & Publish ----
   docker:
