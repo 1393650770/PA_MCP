@@ -59,23 +59,32 @@ class SinaAdapter:
 
     @staticmethod
     def _to_sina_code(symbol: str) -> str:
-        """Convert 000001 -> sh600001 or sz000001 for Sina API."""
-        code = symbol.strip()
-        prefixes_6 = ["600", "601", "603", "605"]
-        prefixes_0 = ["000", "001", "002", "003"]
-        prefixes_3 = ["300", "301"]
-        prefixes_688 = ["688"]
+        """Convert 000001 -> sh600001 or sz000001 for Sina API.
 
-        if any(code.startswith(p) for p in prefixes_6):
+        Supported prefixes:
+          sh: 600/601/603/605 (上海主板), 688 (科创板)
+          sz: 000/001/002/003 (深圳主板+中小板), 300/301 (创业板)
+          bj: 8xx/4xx (北京证券交易所 — mapped to Sina as sh for API compatibility)
+        """
+        code = symbol.strip()
+        prefixes_sh = ["600", "601", "603", "605", "688"]
+        prefixes_sz = ["000", "001", "002", "003", "300", "301"]
+        prefixes_bj = ["4", "8"]
+
+        if any(code.startswith(p) for p in prefixes_sh):
             return f"sh{code}"
-        elif any(code.startswith(p) for p in prefixes_0):
+        elif any(code.startswith(p) for p in prefixes_sz):
             return f"sz{code}"
-        elif any(code.startswith(p) for p in prefixes_3):
-            return f"sz{code}"
-        elif any(code.startswith(p) for p in prefixes_688):
+        elif any(code.startswith(p) for p in prefixes_bj):
+            # Sina does not natively support BJ exchange — fallback to sh
+            logger.warning(
+                "Beijing Exchange stock mapped to sh (Sina may not have data)",
+                symbol=symbol,
+            )
             return f"sh{code}"
         else:
-            # Default: try sh first
+            # Unknown code range — try sh, but warn
+            logger.warning("Unknown code prefix, defaulting to sh", symbol=symbol)
             return f"sh{code}"
 
     async def get_daily_kline(
@@ -153,7 +162,37 @@ class SinaAdapter:
         # Add pct_change
         df["pct_change"] = df["close"].pct_change() * 100
 
+        # Add source tracking and symbol
+        df["symbol"] = symbol
+        df["source"] = "sina"
+        df["price_adjust_mode"] = adjust
+        # Note: Sina does not provide 'amount' (成交额) in this endpoint
+        if "amount" not in df.columns:
+            df["amount"] = 0.0
+
         return df.sort_values("date").reset_index(drop=True)
+
+    # ---- Capability Declaration ----
+
+    CAPABILITIES = {
+        "daily_bars": "available",           # 日K线（免费、稳定，但无成交额）
+        "minute_bars": "unavailable",        # Sina HTTP API 不提供分钟线
+        "security_status": "unavailable",    # 无历史ST/停牌/退市
+        "corporate_actions": "unavailable",  # 无分红送转
+        "financials": "unavailable",
+        "index_membership": "unavailable",
+        "trade_calendar": "unavailable",
+        "benchmark_total_return": "unavailable",
+        "events": "unavailable",
+        "fund_flow": "unavailable",
+        "dragon_tiger": "unavailable",
+        "realtime_quote": "available",       # 实时快照（免费，延迟3-15s）
+    }
+
+    @classmethod
+    def supports(cls, capability: str) -> bool:
+        """Check if this adapter supports a given capability."""
+        return cls.CAPABILITIES.get(capability, "unavailable") != "unavailable"
 
     async def get_realtime_quote(self, symbol: str) -> dict[str, Any]:
         """Get real-time quote from Sina live API.

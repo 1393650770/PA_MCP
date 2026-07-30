@@ -239,9 +239,9 @@ class AgentOrchestrator:
             market_state=market_state or "unknown",
         )
 
-        # Call LLM
-        from pa_mcp.agent.llm_client import get_llm_client
-        client = get_llm_client()
+        # Try new adapter first, fall back to legacy client
+        from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+        adapter = get_llm_adapter()
 
         SYSTEM_PROMPT = (
             "You are a quantitative analyst for Chinese A-share stocks. "
@@ -249,7 +249,17 @@ class AgentOrchestrator:
             "Output strength scores (0-100) and evidence only."
         )
 
-        response = client.chat_json(SYSTEM_PROMPT, user_prompt, mode="fast")
+        if adapter is not None:
+            params = LLMCallParams(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                mode="fast",
+            )
+            response = await adapter.chat_json(params)
+        else:
+            from pa_mcp.agent.llm_client import get_llm_client
+            client = get_llm_client()
+            response = client.chat_json(SYSTEM_PROMPT, user_prompt, mode="fast")
 
         result = AnalysisResult(
             symbol=symbol,

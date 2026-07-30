@@ -53,6 +53,15 @@ async def server_lifespan(server: FastMCP):
     # Initialize risk layer
     _guard = RiskGuard()
 
+    # Auto-discover strategies
+    try:
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        registry = StrategyRegistry()
+        count = registry.auto_discover()
+        logger.info("Strategies discovered", count=count)
+    except Exception as e:
+        logger.error("Strategy discovery failed", error=str(e))
+
     logger.info("PA_MCP server ready", transport=_settings.server.transport)
 
     yield
@@ -1071,11 +1080,17 @@ async def agent_scan_market(
                 market_state = detector.detect(indicators)
                 state_name = market_state.value
 
-        # Use pre-computed signals if available, else compute live
+        # Use pre-computed signals if available AND has data, else compute live
         candidates: dict[str, list[dict]] = {}  # symbol -> [signal summaries]
 
+        use_cache = False
         if _store and _store.table_exists("signal_cache"):
-            # Use pre-computed cache (fast path)
+            cache_count = _store.row_count("signal_cache")
+            if cache_count > 0:
+                use_cache = True
+
+        if use_cache:
+            # Use pre-computed cache (fast path — only if data exists)
             df = _store.query_df(f"""
                 SELECT symbol, strategy_name, strength_score, direction, details
                 FROM signal_cache

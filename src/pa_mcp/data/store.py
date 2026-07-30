@@ -76,6 +76,7 @@ TABLE_DEFINITIONS: dict[str, str] = {
             sector VARCHAR(100),
             market_cap DOUBLE,
             list_date DATE,
+            delist_date DATE,
             exchange VARCHAR(10),
             board VARCHAR(20),
             is_st BOOLEAN DEFAULT FALSE,
@@ -267,58 +268,164 @@ class DuckDBStore:
         """Execute SQL and return results as DataFrame."""
         return self.execute(sql, params).df()
 
+    def _get_table_columns(self, table_name: str) -> list[str]:
+        """Get the column names of an existing table in DuckDB."""
+        conn = self.connect()
+        result = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = ? ORDER BY ordinal_position",
+            [table_name],
+        ).fetchall()
+        return [row[0] for row in result]
+
+    def _validate_and_align_df(
+        self, table_name: str, df: pd.DataFrame, *,
+        fill_defaults: bool = True,
+    ) -> pd.DataFrame:
+        """Validate and align a DataFrame to match target table schema.
+
+        Returns a DataFrame with columns matching the target table in order.
+        Missing optional columns are filled with NaN defaults.
+        Extra columns not in the target schema raise an error.
+        """
+        target_cols = self._get_table_columns(table_name)
+        if not target_cols:
+            raise ValueError(f"Table '{table_name}' does not exist or has no columns")
+
+        df_cols = list(df.columns)
+        missing_cols = set(target_cols) - set(df_cols)
+        extra_cols = set(df_cols) - set(target_cols)
+
+        if extra_cols:
+            raise ValueError(
+                f"DataFrame has columns not in target table '{table_name}': "
+                f"{sorted(extra_cols)}. Target columns: {target_cols}"
+            )
+
+        df_aligned = df.copy()
+        for col in missing_cols:
+            if fill_defaults:
+                # Fill missing optional columns with None/NaN
+                df_aligned[col] = None
+            else:
+                raise ValueError(
+                    f"Required column '{col}' missing in DataFrame for table '{table_name}'"
+                )
+
+        # Reorder to match target schema
+        df_aligned = df_aligned[target_cols]
+
+        # Type coercion: ensure numeric columns are float
+        for col in target_cols:
+            if col in df_aligned.columns and df_aligned[col].dtype == 'object':
+                try:
+                    df_aligned[col] = pd.to_numeric(df_aligned[col], errors='ignore')
+                except (ValueError, TypeError):
+                    pass
+
+        return df_aligned
+
     def insert_df(
         self, table_name: str, df: pd.DataFrame,
         mode: str = "append",
     ) -> None:
-        """Insert a DataFrame into a table.
+        """Insert a DataFrame into a table with explicit column mapping.
 
         Args:
-            table_name: Target table name
+            table_name: Target table name (must be in TABLE_DEFINITIONS or already exist)
             df: DataFrame to insert
             mode: 'append' (default) or 'replace'
         """
         conn = self.connect()
+
+        if df.empty:
+            logger.debug("insert_df skipped: empty DataFrame", table=table_name)
+            return
+
+        # Validate table exists
+        if not self.table_exists(table_name):
+            raise ValueError(
+                f"Table '{table_name}' does not exist. Cannot insert into non-existent table."
+            )
+
+        # Align DataFrame columns to target schema
+        df_aligned = self._validate_and_align_df(table_name, df)
+
         if mode == "replace":
             conn.execute(f"DELETE FROM {table_name}")
-        conn.register("_tmp_insert", df)
-        conn.execute(f"INSERT OR REPLACE INTO {table_name} SELECT * FROM _tmp_insert")
-        conn.unregister("_tmp_insert")
+
+        # Use explicit column list for safety
+        cols = df_aligned.columns.tolist()
+        col_list = ", ".join(cols)
+        placeholders = ", ".join(["?" for _ in cols])
+
+        # Register temp table and insert with explicit columns
+        conn.register("__tmp_insert", df_aligned)
+        try:
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table_name} ({col_list}) "
+                f"SELECT {col_list} FROM __tmp_insert"
+            )
+        finally:
+            conn.unregister("__tmp_insert")
+
+        logger.debug("insert_df done", table=table_name, rows=len(df_aligned), mode=mode)
 
     def swap_table(self, table_name: str, df: pd.DataFrame) -> None:
         """Atomic table replacement using shadow table strategy.
 
-        Creates _new table, inserts data, then renames for zero-downtime swap.
-        This avoids the DuckDB write-lock issue during batch updates.
+        Creates _new table, inserts data with explicit column mapping,
+        then renames for zero-downtime swap.
         """
         conn = self.connect()
         new_table = f"{table_name}_new"
         shadow_table = f"{table_name}_old"
 
-        # Create shadow table with same schema
-        conn.execute(f"DROP TABLE IF EXISTS {new_table}")
-        conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+        # Clean up any leftover shadow tables
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {new_table}")
+            conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+        except Exception:
+            pass
 
         # Get original DDL and create new table
         ddl_key = table_name.split(".")[-1]
-        if ddl_key in TABLE_DEFINITIONS:
-            ddl = TABLE_DEFINITIONS[ddl_key].replace(
-                f"CREATE TABLE IF NOT EXISTS {ddl_key}",
-                f"CREATE TABLE {new_table}",
-            )
-            conn.execute(ddl)
+        if ddl_key not in TABLE_DEFINITIONS:
+            raise ValueError(f"No DDL defined for table '{ddl_key}'")
+        ddl = TABLE_DEFINITIONS[ddl_key].replace(
+            f"CREATE TABLE IF NOT EXISTS {ddl_key}",
+            f"CREATE TABLE {new_table}",
+        )
+        conn.execute(ddl)
 
-        # Insert data
-        conn.register("_swap_data", df)
-        conn.execute(f"INSERT INTO {new_table} SELECT * FROM _swap_data")
-        conn.unregister("_swap_data")
+        if df.empty:
+            logger.warning("swap_table called with empty DataFrame", table=table_name)
+            # Still create the new table, then swap
+            conn.execute(f"ALTER TABLE IF EXISTS {table_name} RENAME TO {shadow_table}")
+            conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
+            conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+            return
+
+        # Align and insert with explicit columns
+        new_cols = self._get_table_columns(new_table)
+        df_aligned = self._validate_and_align_df(ddl_key, df, fill_defaults=True)
+        col_list = ", ".join(new_cols)
+
+        conn.register("__swap_data", df_aligned)
+        try:
+            conn.execute(
+                f"INSERT INTO {new_table} ({col_list}) "
+                f"SELECT {col_list} FROM __swap_data"
+            )
+        finally:
+            conn.unregister("__swap_data")
 
         # Atomic swap
         conn.execute(f"ALTER TABLE IF EXISTS {table_name} RENAME TO {shadow_table}")
         conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
         conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
 
-        logger.info("Table swapped atomically", table=table_name, rows=len(df))
+        logger.info("Table swapped atomically", table=table_name, rows=len(df_aligned))
 
     def table_exists(self, table_name: str) -> bool:
         """Check if a table exists."""

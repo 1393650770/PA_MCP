@@ -170,7 +170,32 @@ class AKShareAdapter:
         df = df.rename(columns={k: v for k, v in COLUMN_MAP.items() if k in df.columns})
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
+        # Add source tracking and symbol
+        df["symbol"] = symbol
+        df["source"] = "akshare"
+        # Mark this as vendor-adjusted data (NOT raw/unaltered OHLCV)
+        df["price_adjust_mode"] = adjust
         return df
+
+    # ---- Capability Declaration ----
+
+    CAPABILITIES = {
+        "daily_bars": "available",           # 日K线（前复权，需network）
+        "minute_bars": "available",          # 分钟K线（当日/近期，free API延迟3-15s）
+        "security_status": "unavailable",    # 股票历史状态（ST/停牌/退市）
+        "corporate_actions": "unavailable",  # 分红送转/拆并股
+        "financials": "partial",             # 部分财务指标（未统一标准化）
+        "index_membership": "unavailable",   # 历史指数成分
+        "trade_calendar": "unavailable",     # 交易日历（需手工补充）
+        "benchmark_total_return": "unavailable",  # 基准总收益（只有价格）
+        "events": "unavailable",             # 事件公告时间（只有事件日期）
+        "fund_flow": "partial",              # 资金流向（部分端点可用）
+        "dragon_tiger": "available",         # 龙虎榜
+    }
+
+    def supports(self, capability: str) -> bool:
+        """Check if this adapter supports a given capability."""
+        return self.CAPABILITIES.get(capability, "unavailable") != "unavailable"
 
     async def get_realtime_spot_all(self) -> pd.DataFrame:
         """Get all A-share stocks' real-time quotes.
@@ -339,6 +364,8 @@ class AKShareAdapter:
 
         up_count = int((spot_df["涨跌幅"] > 0).sum()) if "涨跌幅" in spot_df.columns else 0
         down_count = int((spot_df["涨跌幅"] < 0).sum()) if "涨跌幅" in spot_df.columns else 0
+        # NOTE: 9.5% threshold is correct for 10% main board stocks,
+        # but wrong for 20%/30%/no-limit boards. This is a known simplification.
         limit_up_count = int((spot_df["涨跌幅"] >= 9.5).sum()) if "涨跌幅" in spot_df.columns else 0
         limit_down_count = int((spot_df["涨跌幅"] <= -9.5).sum()) if "涨跌幅" in spot_df.columns else 0
 
@@ -351,4 +378,7 @@ class AKShareAdapter:
             "limit_up_count": limit_up_count,
             "limit_down_count": limit_down_count,
             "turnover_total": float(spot_df["成交额"].sum()) if "成交额" in spot_df.columns else None,
+            "source": "akshare",
+            "data_delay_seconds": 5,
+            "capability_note": "9.5% threshold — does not account for 20%/30%/no-limit board rules",
         }

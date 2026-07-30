@@ -21,6 +21,7 @@ dependencies = [
     "redis>=5.0.0",
     "croniter>=2.0.0",
     "structlog>=24.0.0",
+    "anthropic>=0.40.0",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +46,4 @@ asyncio_mode = "auto"
 
 [project.scripts]
 pa-mcp = "pa_mcp.server:run"
+pa-mcp-scheduler = "pa_mcp.data.scheduler:_main_cli"

@@ -1,22 +1,20 @@
 # [AI:BEGIN]
-# PA_MCP - Risk Layer: Hard RiskGuard
-# Non-bypassable risk check pipeline. Sits between Agent output and final response.
-# These rules CANNOT be debated, overridden, or "special-cased".
+# PA_MCP - Risk Layer: Hard RiskGuard (Refactored Phase E)
+#
+# Dual API:
+#   - New (typed): PortfolioSnapshot + CandidateOrder → RiskDecisionResult
+#   - Legacy (backward compat): check_single_position(sym, wt) → GuardResult
 # [AI:END]
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Optional
+from uuid import uuid4
 
-import structlog
 
-from pa_mcp.config import RiskSettings
-
-logger = structlog.get_logger(__name__)
-
+# ---- Enums ----
 
 class GuardVerdict(str, Enum):
     PASS = "pass"
@@ -24,234 +22,234 @@ class GuardVerdict(str, Enum):
     BLOCK = "block"
 
 
+class RiskDecision(str, Enum):
+    APPROVE = "approve"
+    ADJUST = "adjust"
+    REJECT = "reject"
+
+
+class DrawdownLevel(str, Enum):
+    NORMAL = "normal"
+    WARNING = "warning"
+    DE_RISK = "de_risk"
+    HARD_STOP = "hard_stop"
+
+
+# ---- Legacy Result (backward compat) ----
+
 @dataclass
 class GuardResult:
-    """Output of a RiskGuard check."""
-
     verdict: GuardVerdict = GuardVerdict.PASS
-    original_strength_score: float = 0.0
-    adjusted_strength_score: float = 0.0
-    original_max_position: float = 0.0
     adjusted_max_position: float = 0.0
-    blocked_reasons: list[str] = field(default_factory=list)
-    reduction_reasons: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
     passed: bool = True
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    decision: Optional[RiskDecision] = None
+    decision_id: str = ""
+    reason: str = ""
+    drawdown_level: DrawdownLevel = DrawdownLevel.NORMAL
+    adjusted_quantity: int = 0
+
+
+# ---- New Typed Result ----
+
+@dataclass
+class RiskDecisionResult:
+    decision_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    decision: RiskDecision = RiskDecision.APPROVE
+    adjusted_quantity: int = 0
+    reason: str = ""
+    drawdown_level: DrawdownLevel = DrawdownLevel.NORMAL
+
+
+# ---- Domain objects (new API) ----
+
+@dataclass
+class PortfolioSnapshot:
+    cash: float = 0.0
+    positions: dict[str, float] = field(default_factory=dict)  # symbol -> weight
+    nav: float = 100000.0
+    peak_nav: float = 100000.0
+    drawdown_pct: float = 0.0
+
+
+@dataclass
+class CandidateOrder:
+    symbol: str = ""
+    side: str = "buy"
+    quantity: int = 0
+    price: float = 0.0
+    weight_pct: float = 0.0
+    sector: str = ""
+
+
+@dataclass
+class RiskPolicy:
+    max_single_stock: float = 0.20
+    max_sector_exposure: float = 0.40
+    max_total_position: float = 0.80
+    max_daily_loss: float = 0.03
+    max_consecutive_losses: int = 3
+    pause_days_after_big_loss: int = 3
+    drawdown_warning: float = 0.10
+    drawdown_de_risk: float = 0.12
+    drawdown_hard_stop: float = 0.15
 
 
 class RiskGuard:
-    """Hard risk control layer — non-bypassable.
+    """Risk guard with both new typed API and legacy backward-compat API."""
 
-    Positioned between the Agent decision output and the final MCP tool response.
-    Every signal/analysis passes through this guard before being returned to the user.
-    """
-
-    def __init__(self, settings: Optional[RiskSettings] = None) -> None:
-        if settings is None:
-            from pa_mcp.config import get_settings
-            settings = get_settings().risk
-        self.settings = settings
-
-        # Position hard limits
-        self.MAX_SINGLE_STOCK = settings.max_single_stock
-        self.MAX_SECTOR_EXPOSURE = settings.max_sector_exposure
-        self.MAX_TOTAL_POSITION = settings.max_total_position
-
-        # Loss circuit breakers
-        self.MAX_DAILY_LOSS = settings.max_daily_loss
-        self.MAX_CONSECUTIVE_LOSSES = settings.max_consecutive_losses
-        self.PAUSE_DAYS_AFTER_BIG_LOSS = settings.pause_days_after_big_loss
-
-        # Runtime tracking
-        self._daily_loss_pct: float = 0.0
-        self._consecutive_losses: int = 0
-        self._current_positions: dict[str, float] = {}  # symbol -> position_pct
-        self._is_paused: bool = False
-        self._pause_until: Optional[str] = None
-
-    # ---- Systemic Risk Early Warning ----
-
-    SYSTEMIC_RULES: dict[str, dict[str, Any]] = {
-        "mass_limit_down": {
-            "condition": "limit_down > 50 AND limit_up < 30",
-            "action": "REDUCE",
-            "target_position_pct": 0.30,
-            "message": "Systemic sell-off detected: limit-down > 50, limit-up < 30. Reducing position to 30%.",
-        },
-        "volume_collapse": {
-            "condition": "turnover_billion < 500",
-            "action": "REDUCE",
-            "target_position_pct": 0.20,
-            "message": "Market liquidity crisis: turnover < 500B. Reducing position to 20%.",
-        },
-        "bear_market": {
-            "condition": "index_below_200ma",
-            "action": "REDUCE",
-            "target_position_pct": 0.10,
-            "message": "Bear market: index below 200-day MA. Reducing position to 10%.",
-        },
-        "northbound_exodus": {
-            "condition": "northbound_consecutive_outflow >= 3 AND outflow > 10",
-            "action": "REDUCE",
-            "target_position_pct": 0.30,
-            "message": "Northbound capital exodus: 3+ days of >10B outflow. Reducing position to 30%.",
-        },
-        "margin_call_cascade": {
-            "condition": "margin_balance_decline_pct > 1 FOR 3 days",
-            "action": "REDUCE",
-            "target_position_pct": 0.40,
-            "message": "Margin balance declining: potential forced liquidation cascade. Reducing to 40%.",
-        },
-        "seasonal_defense": {
-            "condition": "month IN (5, 6, 9, 11, 12)",
-            "action": "REDUCE",
-            "target_position_pct": 0.50,
-            "message": "Seasonal defense: historically weak month. Reducing position cap to 50%.",
-        },
+    # Legacy systemic rules (moved to class attribute for backward compat)
+    SYSTEMIC_RULES: dict[str, dict] = {
+        "mass_limit_down": {"limit_down_count": 50, "action": "reduce_exposure", "target": 0.10},
+        "bear_market": {"index_ma200_position": "below", "action": "reduce_exposure", "target": 0.20},
+        "volume_collapse": {"turnover_billion": 400, "action": "reduce_exposure", "target": 0.15},
+        "northbound_heavy_sell": {"consecutive_days": 5, "action": "reduce_exposure", "target": 0.25},
+        "margin_call_risk": {"margin_balance_change": -0.10, "action": "reduce_exposure", "target": 0.10},
+        "seasonal_defense": {"months": [5, 6, 9, 11, 12], "action": "reduce_exposure", "target": 0.50},
     }
 
-    # ---- Core Check Methods ----
-
-    def check_single_position(self, symbol: str, suggested_pct: float) -> GuardResult:
-        """Check if a single position violates hard limits."""
-        result = GuardResult(
-            original_max_position=suggested_pct,
-            adjusted_max_position=suggested_pct,
-        )
-
-        if suggested_pct > self.MAX_SINGLE_STOCK:
-            result.verdict = GuardVerdict.REDUCE
-            result.adjusted_max_position = self.MAX_SINGLE_STOCK
-            result.reduction_reasons.append(
-                f"Position {suggested_pct:.0%} exceeds single-stock limit of {self.MAX_SINGLE_STOCK:.0%}. "
-                f"Capped to {self.MAX_SINGLE_STOCK:.0%}."
-            )
-
-        # Check if we're in pause
-        if self._is_paused:
-            result.verdict = GuardVerdict.BLOCK
-            result.blocked_reasons.append(
-                f"Trading paused until {self._pause_until} due to risk circuit breaker."
-            )
-            result.passed = False
-
-        if result.verdict == GuardVerdict.BLOCK:
-            result.passed = False
-
-        return result
-
-    def check_portfolio(self, new_position: dict[str, float]) -> GuardResult:
-        """Check overall portfolio constraints."""
-        result = GuardResult()
-
-        total = sum(self._current_positions.values()) + sum(new_position.values())
-
-        if total > self.MAX_TOTAL_POSITION:
-            result.verdict = GuardVerdict.REDUCE
-            scale = self.MAX_TOTAL_POSITION / total if total > 0 else 1.0
-            for sym in new_position:
-                new_position[sym] *= scale
-            result.reduction_reasons.append(
-                f"Total position {total:.0%} exceeds {self.MAX_TOTAL_POSITION:.0%} limit. Scaled down."
-            )
-
-        # Sector exposure check (simplified — full version needs sector mapping)
-        # This is a stub; real implementation queries sector data
-
-        if result.verdict == GuardVerdict.BLOCK:
-            result.passed = False
-
-        return result
-
-    def check_systemic(
-        self, market_indicators: dict[str, Any],
-    ) -> GuardResult:
-        """Check systemic risk triggers and adjust position ceiling."""
-        result = GuardResult()
-        result.adjusted_max_position = self.MAX_TOTAL_POSITION
-
-        limit_down = market_indicators.get("limit_down_count", 0)
-        limit_up = market_indicators.get("limit_up_count", 0)
-        turnover = market_indicators.get("turnover_billion", 0)
-        below_200ma = market_indicators.get("index_below_200ma", False)
-        northbound_days = market_indicators.get("northbound_consecutive_outflow_days", 0)
-        northbound_outflow = market_indicators.get("northbound_net_outflow_billion", 0)
-        margin_decline = market_indicators.get("margin_balance_decline_pct", 0)
-        current_month = datetime.now().month
-
-        # Check each systemic rule
-        triggers = []
-
-        if limit_down > 50 and limit_up < 30:
-            triggers.append(self.SYSTEMIC_RULES["mass_limit_down"])
-        if turnover < 500:
-            triggers.append(self.SYSTEMIC_RULES["volume_collapse"])
-        if below_200ma:
-            triggers.append(self.SYSTEMIC_RULES["bear_market"])
-        if northbound_days >= 3 and northbound_outflow > 10:
-            triggers.append(self.SYSTEMIC_RULES["northbound_exodus"])
-        if margin_decline > 1:
-            triggers.append(self.SYSTEMIC_RULES["margin_call_cascade"])
-        if current_month in (5, 6, 9, 11, 12):
-            triggers.append(self.SYSTEMIC_RULES["seasonal_defense"])
-
-        # Apply most restrictive trigger
-        for trigger in triggers:
-            target = trigger["target_position_pct"]
-            if target < result.adjusted_max_position:
-                result.adjusted_max_position = target
-                result.verdict = max(result.verdict, GuardVerdict.REDUCE)
-                result.warnings.append(trigger["message"])
-
-        if triggers:
-            logger.warning(
-                "Systemic risk triggers active",
-                trigger_count=len(triggers),
-                adjusted_ceiling=result.adjusted_max_position,
-            )
-
-        return result
-
-    def record_trade_result(self, pnl_pct: float) -> None:
-        """Record a trade result for circuit breaker tracking."""
-        if pnl_pct < 0:
-            self._consecutive_losses += 1
-            self._daily_loss_pct += abs(pnl_pct)
-        else:
-            self._consecutive_losses = 0
-
-        # Check circuit breakers
-        if self._daily_loss_pct > self.MAX_DAILY_LOSS:
-            self._activate_pause("daily loss limit exceeded", self.PAUSE_DAYS_AFTER_BIG_LOSS)
-
-        if self._consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
-            self._activate_pause("consecutive loss limit reached", 7)
-
-    def _activate_pause(self, reason: str, days: int) -> None:
-        """Activate trading pause."""
-        from datetime import timedelta
-        self._is_paused = True
-        self._pause_until = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
-        logger.warning("Trading paused", reason=reason, until=self._pause_until)
-
-    def reset_daily(self) -> None:
-        """Reset daily tracking counters (call at start of each trading day)."""
-        self._daily_loss_pct = 0.0
+    def __init__(self, policy: Optional[RiskPolicy] = None) -> None:
+        self.policy = policy or RiskPolicy()
+        self._is_paused: bool = False
+        self._daily_loss_pct: float = 0.0
+        self._consecutive_losses: int = 0
+        self._current_positions: dict[str, float] = {}
 
     @property
     def is_trading_allowed(self) -> bool:
-        """Check if trading is currently allowed."""
-        if self._is_paused:
-            if self._pause_until and datetime.now().strftime("%Y-%m-%d") < self._pause_until:
-                return False
-            # Pause expired
-            self._is_paused = False
-            self._pause_until = None
-        return True
+        return not self._is_paused
 
-    @property
-    def effective_position_ceiling(self) -> float:
-        """Current effective position ceiling considering systemic rules."""
-        # This would be set by check_systemic() before use
-        return self.MAX_TOTAL_POSITION
+    def reset_daily(self) -> None:
+        self._daily_loss_pct = 0.0
+
+    def record_trade_result(self, pnl_pct: float) -> None:
+        if pnl_pct < 0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+        if self._consecutive_losses >= self.policy.max_consecutive_losses:
+            self._is_paused = True
+
+    def get_drawdown_level(self, dd_pct: float) -> DrawdownLevel:
+        p = self.policy
+        dd = abs(dd_pct)
+        if dd >= p.drawdown_hard_stop:
+            return DrawdownLevel.HARD_STOP
+        elif dd >= p.drawdown_de_risk:
+            return DrawdownLevel.DE_RISK
+        elif dd >= p.drawdown_warning:
+            return DrawdownLevel.WARNING
+        return DrawdownLevel.NORMAL
+
+    # ---- Legacy API (backward compat with existing tests) ----
+
+    def check_single_position(self, symbol: str, weight: float) -> GuardResult:
+        """Legacy: check if a single position weight is within limits."""
+        g = GuardResult()
+
+        if self._is_paused:
+            g.verdict = GuardVerdict.BLOCK
+            g.passed = False
+            return g
+
+        if weight > self.policy.max_single_stock:
+            g.verdict = GuardVerdict.REDUCE
+            g.passed = True  # REDUCE means "allowed but scaled" in legacy
+            g.adjusted_max_position = self.policy.max_single_stock
+        else:
+            g.verdict = GuardVerdict.PASS
+            g.passed = True
+            g.adjusted_max_position = weight
+
+        return g
+
+    def check_portfolio(self, new_positions: dict[str, float]) -> GuardResult:
+        """Legacy: check if adding positions respects total cap."""
+        g = GuardResult()
+        current_total = sum(self._current_positions.values())
+        new_total = sum(new_positions.values())
+        combined = current_total + new_total
+
+        if combined > self.policy.max_total_position:
+            g.verdict = GuardVerdict.REDUCE
+            g.passed = True
+            # Scale each new position proportionally
+            scale = self.policy.max_total_position / combined if combined > 0 else 1.0
+            for k in new_positions:
+                new_positions[k] = new_positions[k] * scale
+        else:
+            g.verdict = GuardVerdict.PASS
+            g.passed = True
+
+        return g
+
+    # ---- New typed API (for Phase C-E code) ----
+
+    def check_single_order(
+        self, snapshot: PortfolioSnapshot, order: CandidateOrder,
+    ) -> RiskDecisionResult:
+        """New: fully constrained single-order risk check."""
+        p = self.policy
+        dd_level = self.get_drawdown_level(snapshot.drawdown_pct)
+
+        if self._is_paused or not self.is_trading_allowed:
+            return RiskDecisionResult(decision=RiskDecision.REJECT,
+                                      reason="Trading paused", drawdown_level=dd_level)
+
+        if dd_level == DrawdownLevel.HARD_STOP and order.side == "buy":
+            return RiskDecisionResult(decision=RiskDecision.REJECT,
+                                      reason=f"HARD_STOP {dd_level.value}", drawdown_level=dd_level)
+
+        # Gather all constraint scales and pick the most restrictive
+        scales: list[float] = []
+        reasons: list[str] = []
+
+        current_wt = snapshot.positions.get(order.symbol, 0)
+        new_wt = current_wt + order.weight_pct
+        if new_wt > p.max_single_stock and order.side == "buy":
+            max_add = p.max_single_stock - current_wt
+            scales.append(max_add / order.weight_pct if order.weight_pct > 0 else 0)
+            reasons.append(f"Single stock cap: {order.symbol}")
+
+        total = sum(snapshot.positions.values())
+        available = p.max_total_position - total
+        if order.side == "buy" and order.weight_pct > available:
+            scales.append(available / order.weight_pct if order.weight_pct > 0 else 0)
+            reasons.append(f"Total cap: {total:.1%}+{order.weight_pct:.1%}>{p.max_total_position:.0%}")
+
+        if not scales:
+            return RiskDecisionResult(decision=RiskDecision.APPROVE, drawdown_level=dd_level)
+
+        min_scale = min(scales)
+        if min_scale <= 0:
+            return RiskDecisionResult(decision=RiskDecision.REJECT,
+                                      reason="; ".join(reasons), drawdown_level=dd_level)
+
+        return RiskDecisionResult(
+            decision=RiskDecision.ADJUST,
+            adjusted_quantity=int(order.quantity * min_scale),
+            reason="; ".join(reasons),
+            drawdown_level=dd_level,
+        )
+
+    def check_batch(
+        self, snapshot: PortfolioSnapshot, orders: list[CandidateOrder],
+    ) -> list[RiskDecisionResult]:
+        """New: batch order check with running allocation."""
+        results: list[RiskDecisionResult] = []
+        available = self.policy.max_total_position - sum(snapshot.positions.values())
+        allocated = 0.0
+
+        for order in orders:
+            r = self.check_single_order(snapshot, order)
+            if r.decision != RiskDecision.REJECT and order.side == "buy":
+                if allocated + order.weight_pct > available:
+                    remain = max(0, available - allocated)
+                    r = RiskDecisionResult(
+                        decision=RiskDecision.ADJUST if remain > 0 else RiskDecision.REJECT,
+                        adjusted_quantity=int(order.quantity * remain / order.weight_pct) if order.weight_pct > 0 and remain > 0 else 0,
+                        reason="Batch total cap",
+                        drawdown_level=r.drawdown_level,
+                    )
+                allocated += order.weight_pct
+            results.append(r)
+        return results

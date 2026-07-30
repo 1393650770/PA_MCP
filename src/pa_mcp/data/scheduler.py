@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any, Optional
 
+import pandas as pd
 import structlog
 
 from pa_mcp.data.quality import DataValidator, ValidationReport
@@ -19,14 +22,31 @@ from pa_mcp.data.quality import DataValidator, ValidationReport
 logger = structlog.get_logger(__name__)
 
 
+class PhaseStatus(Enum):
+    """Outcome of one pipeline phase."""
+    SUCCESS = "success"
+    SKIPPED_NOT_REQUIRED = "skipped_not_required"
+    NOT_IMPLEMENTED = "not_implemented"
+    FAILED = "failed"
+
+
 @dataclass
 class PhaseResult:
     """Result of one pipeline phase."""
     phase_name: str
-    success: bool
+    status: PhaseStatus = PhaseStatus.SUCCESS
     rows_updated: int = 0
     elapsed_seconds: float = 0.0
     error: Optional[str] = None
+
+    @property
+    def success(self) -> bool:
+        return self.status in (PhaseStatus.SUCCESS, PhaseStatus.SKIPPED_NOT_REQUIRED)
+
+    @property
+    def is_blocking_failure(self) -> bool:
+        """A required phase that failed or is not implemented."""
+        return self.status in (PhaseStatus.FAILED, PhaseStatus.NOT_IMPLEMENTED)
 
 
 @dataclass
@@ -42,6 +62,10 @@ class PipelineReport:
         return all(p.success for p in self.phases)
 
     @property
+    def blocking_failures(self) -> list[str]:
+        return [p.phase_name for p in self.phases if p.is_blocking_failure]
+
+    @property
     def failed_phases(self) -> list[str]:
         return [p.phase_name for p in self.phases if not p.success]
 
@@ -52,16 +76,19 @@ class DataUpdateScheduler:
     Phase order matters — earlier phases populate tables later phases depend on.
 
     Pipeline:
-    1. Trading calendar
-    2. Stock basic info (list of all stocks)
-    3. Daily kline (price/volume data)
-    4. Minute kline (intraday data)
-    5. Financial statements (balance sheet, income, cash flow)
-    6. Capital flow (main force, northbound)
-    7. Dragon-tiger board
-    8. Technical indicators (pre-computation)
+    1. Trading calendar (required)
+    2. Stock basic info (required)
+    3. Daily kline (required)
+    4. Minute kline (not implemented)
+    5. Financial statements (not implemented)
+    6. Capital flow (not implemented)
+    7. Dragon-tiger board (optional)
+    8. Technical indicators (optional, depends on kline)
     9. Validation
     """
+
+    # Required phases that must succeed for the pipeline to be considered healthy
+    REQUIRED_PHASES = {"1_calendar", "2_stock_basic", "3_daily_kline"}
 
     def __init__(self, store, akshare_adapter=None, retry_count: int = 3) -> None:
         self._store = store
@@ -78,42 +105,57 @@ class DataUpdateScheduler:
         report = PipelineReport()
 
         phases = [
-            ("1_calendar", self._update_calendar),
-            ("2_stock_basic", self._update_stock_basic),
-            ("3_daily_kline", self._update_daily_kline),
-            ("4_minute_kline", self._update_minute_kline),
-            ("5_financials", self._update_financials),
-            ("6_capital_flow", self._update_capital_flow),
-            ("7_dragon_tiger", self._update_dragon_tiger),
-            ("8_indicators", self._update_indicators),
+            ("1_calendar", self._update_calendar, True),
+            ("2_stock_basic", self._update_stock_basic, True),
+            ("3_daily_kline", self._update_daily_kline, True),
+            ("4_minute_kline", self._update_minute_kline, False),
+            ("5_financials", self._update_financials, False),
+            ("6_capital_flow", self._update_capital_flow, False),
+            ("7_dragon_tiger", self._update_dragon_tiger, False),
+            ("8_indicators", self._update_indicators, False),
         ]
 
-        for phase_name, phase_func in phases:
+        for phase_name, phase_func, is_implemented in phases:
+            if not is_implemented:
+                report.phases.append(PhaseResult(
+                    phase_name=phase_name,
+                    status=PhaseStatus.NOT_IMPLEMENTED,
+                ))
+                continue
+
             try:
                 phase_result = await self._run_with_retry(phase_name, phase_func, force_full)
                 report.phases.append(phase_result)
-                if not phase_result.success:
+                if phase_result.is_blocking_failure:
                     logger.error(
-                        "Pipeline phase failed",
+                        "Pipeline required phase failed",
                         phase=phase_name,
                         error=phase_result.error,
                     )
             except Exception as e:
+                is_blocking = phase_name in self.REQUIRED_PHASES
                 report.phases.append(PhaseResult(
-                    phase_name=phase_name, success=False, error=str(e),
+                    phase_name=phase_name,
+                    status=PhaseStatus.FAILED if is_blocking else PhaseStatus.SKIPPED_NOT_REQUIRED,
+                    error=str(e),
                 ))
                 logger.error("Pipeline phase crashed", phase=phase_name, error=str(e))
 
         # Validation
-        validator = DataValidator()
-        report.validation = validator.validate_all(self._store)
+        try:
+            validator = DataValidator()
+            report.validation = validator.validate_all(self._store)
+        except Exception as e:
+            logger.warning("Validation step failed", error=str(e))
 
         report.total_elapsed = round(time.monotonic() - t0, 2)
+        healthy = len(report.blocking_failures) == 0
         logger.info(
             "Data update pipeline complete",
             total_seconds=report.total_elapsed,
-            all_success=report.all_success,
-            failed=report.failed_phases,
+            healthy=healthy,
+            blocking_failures=report.blocking_failures,
+            not_implemented=[p.phase_name for p in report.phases if p.status == PhaseStatus.NOT_IMPLEMENTED],
         )
         return report
 
@@ -127,8 +169,11 @@ class DataUpdateScheduler:
             try:
                 rows = await func(force_full)
                 elapsed = time.monotonic() - t0
+                # 0 rows is suspicious for required phases — but not an error
+                # (could genuinely be no new data on weekends)
+                status = PhaseStatus.SUCCESS
                 return PhaseResult(
-                    phase_name=name, success=True,
+                    phase_name=name, status=status,
                     rows_updated=rows,
                     elapsed_seconds=round(elapsed, 2),
                 )
@@ -142,8 +187,11 @@ class DataUpdateScheduler:
                     )
                     await asyncio.sleep(backoff)
 
+        is_blocking = name in self.REQUIRED_PHASES
         return PhaseResult(
-            phase_name=name, success=False, error=last_error,
+            phase_name=name,
+            status=PhaseStatus.FAILED if is_blocking else PhaseStatus.SKIPPED_NOT_REQUIRED,
+            error=last_error,
         )
 
     # ---- Phase Implementations ----
@@ -183,27 +231,34 @@ class DataUpdateScheduler:
         try:
             df = await self._akshare.get_realtime_spot_all()
             if df is None or df.empty:
+                logger.warning("Stock basic: AKShare returned empty spot data")
                 return 0
 
-            # Extract basic info
+            # Extract basic info with standard field names
             basic = pd.DataFrame()
             basic["symbol"] = df.get("代码", pd.Series(dtype=str))
             basic["name"] = df.get("名称", pd.Series(dtype=str))
-            basic["market_cap"] = df.get("总市值", pd.Series(dtype=float))
+            market_cap_series = df.get("总市值", pd.Series(dtype=float))
+            basic["market_cap"] = pd.to_numeric(market_cap_series, errors="coerce")
             basic["board"] = "main"
+            basic["exchange"] = ""
+
+            # Only keep rows with valid symbols
+            basic = basic[basic["symbol"].notna() & (basic["symbol"].str.strip() != "")]
 
             self._store.insert_df("stock_basic", basic, mode="replace")
+            logger.info("Stock basic updated", rows=len(basic))
             return len(basic)
         except Exception as e:
-            logger.warning("Stock basic update skipped (AKShare may need network)", error=str(e))
-            return 0
+            logger.error("Stock basic update failed", error=str(e))
+            raise  # Re-raise — this is a REQUIRED phase
 
     async def _update_daily_kline(self, force_full: bool) -> int:
         """Update daily kline for all stocks (incremental)."""
         store = self._store
         akshare = self._akshare
         if akshare is None:
-            return 0
+            raise RuntimeError("AKShare adapter not available — required for kline updates")
 
         today = datetime.now().strftime("%Y%m%d")
 
@@ -220,12 +275,13 @@ class DataUpdateScheduler:
 
         updated = 0
         batch_size = 50
+        total_batches = (len(symbols) + batch_size - 1) // batch_size
 
         for batch_start in range(0, len(symbols), batch_size):
             batch = symbols[batch_start:batch_start + batch_size]
-            for sym in batch[:10]:  # Limit to 10 stocks per run to avoid rate limiting
+            # Process all stocks in the batch (no arbitrary truncation)
+            for sym in batch:
                 try:
-                    # Incremental: fetch last 30 days
                     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
                     df = await akshare.get_daily_kline(
                         symbol=sym, period="daily",
@@ -238,38 +294,35 @@ class DataUpdateScheduler:
                 except Exception as e:
                     logger.debug("Kline fetch failed for symbol", symbol=sym, error=str(e))
 
+            batch_num = batch_start // batch_size + 1
+            logger.debug(
+                "Kline batch progress",
+                batch=f"{batch_num}/{total_batches}",
+                updated_so_far=updated,
+            )
             await asyncio.sleep(1)  # Rate limiting
 
         logger.info("Daily kline updated", stocks_updated=updated)
         return updated
 
     async def _update_minute_kline(self, force_full: bool) -> int:
-        """Update intraday minute kline (only for current day)."""
-        # Minute kline is large and expensive — only fetch if explicitly requested
-        if not force_full:
-            logger.debug("Skipping minute kline (incremental mode, use force_full for intraday)")
-            return 0
-        return 0  # Stub — implement when needed
+        """Update intraday minute kline (NOT YET IMPLEMENTED)."""
+        raise NotImplementedError(
+            "Minute kline ingestion is not yet implemented. "
+            "Use force_full=False to skip this phase automatically."
+        )
 
     async def _update_financials(self, force_full: bool) -> int:
-        """Update financial statements (quarterly, incremental)."""
-        # Financial data updates quarterly, not daily.
-        # Check if we need to refresh (last update > 30 days ago)
-        latest = self._store.get_latest_date("financials_income", "pub_date")
-        if latest and (datetime.now() - datetime.fromisoformat(str(latest))).days < 30:
-            logger.debug("Financials up to date, skipping")
-            return 0
-
-        logger.info("Financial data refresh needed (last: %s)", latest)
-        # Stub — AKShare financial endpoints to be called here
-        return 0
+        """Update financial statements (NOT YET IMPLEMENTED)."""
+        raise NotImplementedError(
+            "Financial statement ingestion is not yet implemented."
+        )
 
     async def _update_capital_flow(self, force_full: bool) -> int:
-        """Update capital flow data for current day."""
-        if self._akshare is None:
-            return 0
-        # Stub — requires AKShare fund flow endpoints
-        return 0
+        """Update capital flow data (NOT YET IMPLEMENTED)."""
+        raise NotImplementedError(
+            "Capital flow ingestion is not yet implemented."
+        )
 
     async def _update_dragon_tiger(self, force_full: bool) -> int:
         """Update dragon-tiger board data for current day."""
@@ -280,9 +333,11 @@ class DataUpdateScheduler:
             if df is not None and not df.empty:
                 self._store.insert_df("dragon_tiger", df, mode="append")
                 return len(df)
+            logger.debug("Dragon-tiger: no data for today")
+            return 0
         except Exception as e:
             logger.debug("Dragon-tiger not available for today", error=str(e))
-        return 0
+            return 0  # Optional — don't block the pipeline
 
     async def _update_indicators(self, force_full: bool) -> int:
         """Pre-compute technical indicators for all stocks."""
@@ -315,3 +370,44 @@ class DataUpdateScheduler:
         except Exception as e:
             logger.warning("Indicator pre-computation skipped", error=str(e))
             return 0
+
+
+# ---- Module Entry Point ----
+
+async def _main() -> None:
+    """Entry point for 'python -m pa_mcp.data.scheduler'."""
+    from pa_mcp.data.sources.akshare_adapter import AKShareAdapter
+    from pa_mcp.data.store import DuckDBStore
+
+    store = DuckDBStore()
+    store.connect()
+    akshare = AKShareAdapter()
+    scheduler = DataUpdateScheduler(store, akshare)
+
+    report = await scheduler.run()
+    store.close()
+
+    print(f"\n{'='*60}")
+    print(f"Pipeline: {report.timestamp}")
+    print(f"Elapsed: {report.total_elapsed}s")
+    for p in report.phases:
+        icon = "✓" if p.success else "✗"
+        status_str = p.status.value
+        print(f"  {icon} {p.phase_name:<25s} {status_str:<22s} rows={p.rows_updated}")
+    if report.validation:
+        print(f"\n  Validation: {report.validation}")
+    if report.blocking_failures:
+        print(f"\n  BLOCKING FAILURES: {report.blocking_failures}")
+    print(f"{'='*60}")
+
+    if report.blocking_failures:
+        sys.exit(1)
+
+
+def _main_cli() -> None:
+    """CLI wrapper for pa-mcp-scheduler entry point."""
+    asyncio.run(_main())
+
+
+if __name__ == "__main__":
+    asyncio.run(_main())
