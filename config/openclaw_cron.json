@@ -38,6 +38,24 @@
         "sessionTarget": "isolated",
         "prompt": "使用 PA_MCP 工具做持仓体检：\n1. 调 agent_portfolio_review() 获取持仓诊断\n2. 对告警标的调 get_valuation_snapshot() 看实时估值\n3. 调 get_data_source_health() 确认数据源\n输出：持仓健康度/集中度检查/风险告警/调整建议。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-prediction-brief",
+        "_description": "每日盘前：核心标的未来走势预测 + 决策树简报",
+        "cron": "17 8 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具生成盘前预测简报：\n1. 调 portfolio_summary() 获取持仓清单\n2. 对每只持仓调 predict_market(symbol, horizon='5d') 获取未来走势预测（方向/概率/区间/周期/场景）\n3. 调 get_decision_tree(symbol) 获取决策树（市场状态→策略路由→方向→仓位→结论）\n4. 调 agent_market_diagnosis() 确认市场状态\n输出：每只标的预测结论/决策树主路径/市场状态提示。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-prediction-review",
+        "_description": "每周五：预测验证成绩单 + 记忆偏差检测",
+        "cron": "45 15 * * 5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具做周度预测复盘：\n1. 调 evaluate_predictions() 获取预测验证成绩单（命中率/Brier分数/技能分/方向一致率）\n2. 调 agent_memory_status(days=30) 获取决策胜率与认知偏差检测\n3. 调 prediction_history(symbol) 抽查关键标的预测记录\n输出：本周预测命中率/Brier校准结论/记忆胜率/偏差告警/下周预测改进建议。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
       }
     ]
   },

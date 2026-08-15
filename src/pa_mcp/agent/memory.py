@@ -78,7 +78,15 @@ class LongTermMemory:
     5. Bias detection — overconfidence, disposition effect
     """
 
-    def __init__(self, db_path: str = "data/memory.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        """SQLite 长期记忆库。
+
+        db_path 默认用项目根绝对路径（data/memory.db），
+        避免从不同目录启动时连接到不同文件（与数据库同款修复）。
+        """
+        if db_path is None:
+            from pa_mcp.config import PROJECT_ROOT
+            db_path = str(PROJECT_ROOT / "data" / "memory.db")
         self.db_path = db_path
         self._init_db()
 

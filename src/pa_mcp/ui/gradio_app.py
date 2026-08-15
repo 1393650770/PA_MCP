@@ -1400,6 +1400,51 @@ def future_expectation_fig(symbol: str) -> tuple[Any, str]:
         return None, f"走势预期图生成失败：{str(e)[:200]}"
 
 
+def memory_status_ui(days: int = 60) -> str:
+    """长期记忆状态：决策胜率/盈亏 + 偏差检测 + 策略权重。"""
+    try:
+        from pa_mcp.agent.memory import LongTermMemory
+        mem = LongTermMemory()
+        perf = mem.get_performance_summary(days=days)
+        biases = mem.detect_bias()
+
+        lines = [f"## 🧠 长期记忆状态（近 {days} 天）"]
+        if perf.get("total_decisions", 0) == 0:
+            lines.append("\n暂无已回填结果的决策记录。AI 分析会自动记录决策，"
+                         "满 5 天后自动回填收益并参与统计。")
+            return "\n".join(lines)
+        lines.extend([
+            f"- **决策数**：{perf['total_decisions']}",
+            f"- **胜率**：**{perf['win_rate']:.0f}%**",
+            f"- **平均收益**：{perf['avg_return_pct']:+.2f}%"
+            f"（盈利均 {perf['avg_win_pct']:+.2f}% / 亏损均 {perf['avg_loss_pct']:+.2f}%）",
+        ])
+        if biases:
+            lines.append("\n### ⚠️ 认知偏差检测")
+            for b in biases:
+                lines.append(f"- **{b['type']}**（{b.get('severity', '')}）：{b['detail']}")
+        else:
+            lines.append("\n✅ 未检测到明显认知偏差（过度自信/处置效应）")
+        try:
+            import sqlite3
+            conn = sqlite3.connect(mem.db_path)
+            rows = conn.execute(
+                "SELECT strategy_name, weight, win_rate, total_trades "
+                "FROM strategy_weights ORDER BY weight DESC LIMIT 8").fetchall()
+            conn.close()
+            if rows:
+                lines.append("\n### 策略贝叶斯权重")
+                lines.append("| 策略 | 权重 | 胜率 | 样本 |")
+                lines.append("|---|---|---|---|")
+                for r in rows:
+                    lines.append(f"| {r[0]} | {r[1]:.2f} | {r[2]:.0%} | {r[3]} |")
+        except Exception:
+            pass
+        return "\n".join(lines)
+    except Exception as e:
+        return f"记忆状态查询失败：{str(e)[:200]}"
+
+
 def market_diagnosis_ui() -> str:
     """两阶段 Stage 1：市场诊断 + 策略路由（LLM 优先，确定性兜底）。"""
     try:
@@ -2070,6 +2115,11 @@ def build_app():
                            outputs=[tree_fig, tree_out])
             expect_btn.click(future_expectation_fig, inputs=[pred_sym],
                              outputs=[tree_fig, tree_out])
+
+            mem_btn = gr.Button("🧠 长期记忆状态（决策胜率/偏差检测）",
+                                variant="secondary")
+            mem_out = gr.Markdown()
+            mem_btn.click(memory_status_ui, outputs=[mem_out])
             gr.Markdown("经验库说明：每次 AI 分析自动沉淀到经验库，"
                         "后续分析自动参考相似历史案例（RAG）。")
 

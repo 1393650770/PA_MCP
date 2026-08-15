@@ -562,6 +562,54 @@ class AgentOrchestrator:
       "biggest_missed_risk": "..."
     }}"""
 
+    # 投资大师团（借鉴 TradingAgents 多投资大师机制）：
+    # 价值派 / 反身性派 / 趋势派 并行各自独立判断 → 确定性合议
+    MASTER_STYLES: tuple[dict[str, str], ...] = (
+        {
+            "key": "value",
+            "name": "格雷厄姆·巴菲特（价值派）",
+            "bias": "安全边际、内在价值、赔率优先",
+            "criteria": "只看风险收益比：支撑位是否提供足够缓冲、估值是否提供保护、"
+                        "预期收益是否数倍于下行风险。不给模糊观点，只给赔率判断。",
+        },
+        {
+            "key": "reflexivity",
+            "name": "索罗斯（反身性派）",
+            "bias": "反身性、证伪、趋势反转点",
+            "criteria": "寻找价格与基本面的正反馈循环及其衰竭信号；明确写出"
+                        "「什么证据出现 = 我判断错误」（证伪条件）；警惕共识一致性。",
+        },
+        {
+            "key": "trend",
+            "name": "利弗莫尔（趋势派）",
+            "bias": "关键点、趋势确认、顺势而为",
+            "criteria": "只参与已确认的趋势；等待关键点（突破/回踩确认）；"
+                        "趋势未破坏前不预测顶部；趋势破坏立即离场。",
+        },
+    )
+
+    MASTER_MEMBER_PROMPT = """你是投资大师{name}（{bias}）。
+
+    判断准则：{criteria}
+
+    分析师结论：
+    {analyst_results}
+
+    辩论观点：
+    {debate_summary}
+
+    输出 JSON（仅 JSON）：
+    {{
+      "final_direction": "bullish|bearish|neutral",
+      "final_strength_score": 0-100,
+      "suggested_max_position_pct": 0-20,
+      "verdict_reason": "一句话结论（中文，体现你的投资思想）",
+      "key_evidence_used": ["使用的关键证据"],
+      "falsification_conditions": ["什么情况下你判断错误"],
+      "final_risks": ["最终风险清单"]
+    }}
+    DO NOT output buy/sell orders. Output scores and evidence only."""
+
     # 投资大师最终裁定（综合分析师 + 辩论，输出确定性结论）
     MASTER_VERDICT_PROMPT = """你是投资大师（综合格雷厄姆的安全边际、索罗斯的反身性与证伪、利弗莫尔的关键点与趋势），对 {symbol} 做最终裁定。
 
@@ -741,8 +789,9 @@ DO NOT output buy/sell. Output scores and evidence only."""
                 symbol, analyst_results, result, pm_resp,
                 diagnosis=diagnosis, history_text=history_text)
 
-        # 自动写入经验库（best-effort）
+        # 自动写入经验库 + 长期记忆（best-effort）
         self._save_to_experience(symbol, result)
+        self._save_to_memory(symbol, result, market_state)
 
         logger.info(
             "Deep analysis complete",
@@ -838,18 +887,90 @@ DO NOT output buy/sell. Output scores and evidence only."""
 
             result.debate = {"bull": bull, "bear": bear}
 
-            # 3) 投资大师裁定
-            master_params = LLMCallParams(
-                system_prompt=self.MASTER_VERDICT_PROMPT.format(
-                    symbol=symbol, analyst_results=analyst_text,
-                    debate_summary=f"【多头】\n{bull_txt}\n\n【空头】\n{bear_txt}"),
-                user_prompt=f"请对 {symbol} 做出最终裁定",
-                mode="deep", max_tokens=900,
-            )
-            master = await self._chat_json_with_retry(
-                adapter, master_params, self._validate_master_json)
-            if not master:
+            # 3) 投资大师团：3 位大师并行独立判断 → 确定性合议
+            debate_summary = f"【多头】\n{bull_txt}\n\n【空头】\n{bear_txt}"
+            member_params = [
+                LLMCallParams(
+                    system_prompt=self.MASTER_MEMBER_PROMPT.format(
+                        name=style["name"], bias=style["bias"],
+                        criteria=style["criteria"],
+                        symbol=symbol, analyst_results=analyst_text,
+                        debate_summary=debate_summary),
+                    user_prompt=f"请以{style['name']}视角对 {symbol} 独立判断",
+                    mode="deep", max_tokens=800,
+                )
+                for style in self.MASTER_STYLES
+            ]
+            master_responses = await asyncio.gather(*[
+                self._chat_json_with_retry(
+                    adapter, p, self._validate_master_json)
+                for p in member_params
+            ], return_exceptions=True)
+
+            masters = []
+            for style, resp in zip(self.MASTER_STYLES, master_responses):
+                if isinstance(resp, Exception) or not isinstance(resp, dict):
+                    continue
+                masters.append({
+                    "name": style["name"],
+                    "key": style["key"],
+                    "bias": style["bias"],
+                    "final_direction": resp.get("final_direction", "neutral"),
+                    "final_strength_score": resp.get("final_strength_score", 50),
+                    "suggested_max_position_pct": resp.get("suggested_max_position_pct", 0),
+                    "verdict_reason": resp.get("verdict_reason", ""),
+                    "key_evidence_used": resp.get("key_evidence_used", []),
+                    "falsification_conditions": resp.get("falsification_conditions", []),
+                    "final_risks": resp.get("final_risks", []),
+                })
+            if not masters:
                 return
+
+            # 确定性合议：方向按「置信加权投票」（分数越极端权重越高），
+            # 分数/仓位按加权平均；RiskGuard 20% 硬上限保留
+            def _weight(m: dict) -> float:
+                try:
+                    return 0.5 + min(0.5, abs(float(m["final_strength_score"]) - 50) / 40)
+                except Exception:
+                    return 0.5
+
+            votes: dict[str, float] = {"bullish": 0.0, "bearish": 0.0, "neutral": 0.0}
+            wsum = 0.0
+            score_sum = 0.0
+            pos_sum = 0.0
+            for m in masters:
+                w = _weight(m)
+                d = str(m["final_direction"]).lower()
+                if d in votes:
+                    votes[d] += w
+                wsum += w
+                try:
+                    score_sum += w * float(m["final_strength_score"])
+                except Exception:
+                    pass
+                try:
+                    pos_sum += w * float(m["suggested_max_position_pct"])
+                except Exception:
+                    pass
+            final_direction = max(votes, key=votes.get)
+            final_score = score_sum / wsum if wsum > 0 else 50.0
+            final_pos = pos_sum / wsum if wsum > 0 else 0.0
+
+            master = {
+                "final_direction": final_direction,
+                "final_strength_score": round(final_score, 1),
+                "suggested_max_position_pct": round(
+                    max(0.0, min(20.0, final_pos)), 1),
+                "master_style": f"大师团合议（{len(masters)}/3 位参与）",
+                "verdict_reason": (
+                    f"投票：看多 {votes['bullish']:.1f} / 看空 {votes['bearish']:.1f} / "
+                    f"中性 {votes['neutral']:.1f}"),
+                "masters": masters,
+                "falsification_conditions": [c for m in masters for c in
+                                             (m.get("falsification_conditions") or [])][:5],
+                "final_risks": list({r for m in masters for r in
+                                     (m.get("final_risks") or [])})[:8],
+            }
             result.master_verdict = master
             # 大师裁定生效（RiskGuard 20% 硬上限保留）
             d = str(master.get("final_direction", "")).lower()
@@ -967,6 +1088,24 @@ DO NOT output buy/sell. Output scores and evidence only."""
             get_experience_service().save_analysis(symbol, result)
         except Exception as e:  # noqa: BLE001
             logger.debug("save to experience failed", symbol=symbol, error=str(e))
+
+    @staticmethod
+    def _save_to_memory(symbol: str, result, market_state: Optional[str]) -> None:
+        """分析完成后写入长期记忆（决策记录，供结果回填/偏差检测）。"""
+        try:
+            from pa_mcp.agent.memory import LongTermMemory
+            mem = LongTermMemory()
+            mem.record_decision(
+                symbol=symbol,
+                strength_score=float(getattr(result, "overall_strength_score", 50) or 50),
+                direction=str(getattr(result, "direction", "neutral")),
+                market_state=str(market_state or ""),
+                mode=str(getattr(result, "mode", "fast")),
+                evidence=getattr(result, "key_evidence", []) or [],
+                risks=getattr(result, "key_risks", []) or [],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("save to memory failed", symbol=symbol, error=str(e))
 
 
 # Global orchestrator instance

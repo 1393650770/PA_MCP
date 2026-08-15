@@ -213,11 +213,10 @@ def _bear_ok():
     }
 
 
-def _master_ok():
+def _master_ok(direction="bearish", score=45, pos=6):
     return {
-        "final_direction": "bearish", "final_strength_score": 45,
-        "suggested_max_position_pct": 6,
-        "master_style": "反身性",
+        "final_direction": direction, "final_strength_score": score,
+        "suggested_max_position_pct": pos,
         "verdict_reason": "高位风险大于收益",
         "key_evidence_used": ["量价背离"], "falsification_conditions": ["放量新高"],
         "final_risks": ["回调风险"],
@@ -225,12 +224,13 @@ def _master_ok():
 
 
 def test_deep_analyze_with_debate():
-    """debate=True：PM 合成 → Bull → Bear → 大师裁定覆盖。"""
+    """debate=True：PM → Bull → Bear → 大师团（3位并行）→ 合议覆盖。"""
     orch = AgentOrchestrator()
     responses = [
         _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(),
         _pm_ok(),
-        _bull_ok(), _bear_ok(), _master_ok(),
+        _bull_ok(), _bear_ok(),
+        _master_ok(), _master_ok(), _master_ok(),  # 3 位大师一致看空
     ]
     adapter = MockAdapter(responses)
     from pa_mcp.agent import llm_port
@@ -240,12 +240,14 @@ def test_deep_analyze_with_debate():
         result = asyncio.run(orch.deep_analyze(
             "000001", _kline(), debate=True))
         assert result.mode == "deep"
-        # 大师裁定覆盖 PM：方向转空、分数 45、仓位 6%
+        # 合议覆盖 PM：3/3 看空 → 方向空、分数 45、仓位 6
         assert result.direction == "bearish"
         assert result.overall_strength_score == 45.0
         assert result.suggested_max_position_pct == 6.0
         assert result.master_verdict is not None
-        assert result.master_verdict["master_style"] == "反身性"
+        assert "大师团合议" in result.master_verdict["master_style"]
+        assert len(result.master_verdict["masters"]) == 3
+        assert "投票" in result.master_verdict["verdict_reason"]
         assert result.debate is not None
         assert len(result.debate["bull"]["bull_points"]) == 3
         assert len(result.debate["bear"]["bear_points"]) == 3
@@ -254,14 +256,39 @@ def test_deep_analyze_with_debate():
         llm_port.register_adapter(orig)
 
 
-def test_deep_analyze_debate_master_fails_keeps_pm():
-    """大师裁定失败 → 保留 PM 结论（不破坏主流程）。"""
+def test_master_panel_weighted_vote():
+    """大师分歧时按置信加权投票：2 看空(极端分) + 1 看多(中庸分) → 看空胜。"""
     orch = AgentOrchestrator()
     responses = [
         _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(),
         _pm_ok(),
         _bull_ok(), _bear_ok(),
-        {"final_direction": "lol", "final_strength_score": -5},
+        _master_ok("bearish", 20, 4),    # 极端看空 → 权重大
+        _master_ok("bearish", 25, 5),    # 极端看空 → 权重大
+        _master_ok("bullish", 60, 10),   # 温和看多 → 权重小
+    ]
+    adapter = MockAdapter(responses)
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    llm_port.register_adapter(adapter)
+    try:
+        result = asyncio.run(orch.deep_analyze(
+            "000001", _kline(), debate=True))
+        assert result.direction == "bearish"
+        assert 20 <= result.overall_strength_score <= 45
+        assert 4 <= result.suggested_max_position_pct <= 10
+    finally:
+        llm_port.register_adapter(orig)
+
+
+def test_deep_analyze_debate_master_fails_keeps_pm():
+    """大师团全体失败 → 保留 PM 结论（不破坏主流程）。"""
+    orch = AgentOrchestrator()
+    responses = [
+        _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(),
+        _pm_ok(),
+        _bull_ok(), _bear_ok(),
+        {"error": "rate limited"}, {"error": "rate limited"}, {"error": "rate limited"},
     ]
     adapter = MockAdapter(responses)
     from pa_mcp.agent import llm_port

@@ -1835,6 +1835,36 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def agent_memory_status(days: int = 60) -> dict[str, Any]:
+    """长期记忆状态：决策记录数量/胜率/盈亏比 + 认知偏差检测。
+
+    每次 AI 分析自动记录决策，事后回填实际收益；
+    偏差检测：过度自信（高分决策+负收益）、处置效应等。
+    """
+    try:
+        from pa_mcp.agent.memory import LongTermMemory
+        mem = LongTermMemory()
+        perf = mem.get_performance_summary(days=days)
+        biases = mem.detect_bias()
+        # 策略权重（贝叶斯滚动校准）
+        import sqlite3
+        conn = sqlite3.connect(mem.db_path)
+        rows = conn.execute(
+            "SELECT strategy_name, weight, win_rate, total_trades FROM strategy_weights "
+            "ORDER BY weight DESC LIMIT 10").fetchall()
+        conn.close()
+        return _response(data={
+            "performance": perf,
+            "biases": biases,
+            "strategy_weights": [
+                {"strategy": r[0], "weight": r[1], "win_rate": r[2], "trades": r[3]}
+                for r in rows],
+        })
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_experience_search(symbol: str = "", cycle_position: str = "",
                                   direction: str = "", limit: int = 5) -> dict[str, Any]:
     """经验库检索（RAG）：按符号/周期位置/方向检索历史 AI 分析案例。
