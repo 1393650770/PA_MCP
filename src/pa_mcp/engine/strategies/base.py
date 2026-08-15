@@ -89,6 +89,10 @@ class Signal:
     suggested_max_position_pct: float = 0.05  # 5% default
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    # 市场时间：信号对应的 bar 日期（YYYY-MM-DD）。
+    # P0-6 修复：timestamp 是对象创建时间，不能用于回测信号匹配；
+    # 策略必须设置 signal_time 为信号所在 bar 的日期。
+    signal_time: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

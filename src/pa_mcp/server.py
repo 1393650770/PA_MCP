@@ -29,6 +29,7 @@ _store: Optional[DuckDBStore] = None
 _cache: Optional[CacheManager] = None
 _akshare: Optional[AKShareAdapter] = None
 _sina: Optional[SinaAdapter] = None
+_router: Optional[Any] = None
 _guard: Optional[RiskGuard] = None
 _settings: Optional[Settings] = None
 
@@ -49,6 +50,41 @@ async def server_lifespan(server: FastMCP):
     _cache = CacheManager()
     _akshare = AKShareAdapter()
     _sina = SinaAdapter()
+
+    # Multi-source router: ordered failover chain from config
+    try:
+        from pa_mcp.data.router import DataSourceRouter, CircuitBreakerConfig
+        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
+        from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
+
+        source_factory = {
+            "akshare": lambda: _akshare,
+            "sina": lambda: _sina,
+            "tencent": TencentAdapter,
+            "eastmoney": EastMoneyAdapter,
+        }
+
+        chain: list[tuple[str, Any]] = []
+        for name in _settings.router.sources:
+            factory = source_factory.get(name)
+            if factory is None:
+                logger.warning("Unknown data source in config", source=name)
+                continue
+            try:
+                chain.append((name, factory() if callable(factory) and name not in ("akshare", "sina") else factory()))
+            except Exception as e:
+                logger.warning("Failed to init data source", source=name, error=str(e))
+
+        if chain:
+            breaker_cfg = CircuitBreakerConfig(
+                failure_threshold=_settings.router.circuit.failure_threshold,
+                cooldown_seconds=_settings.router.circuit.cooldown_seconds,
+            )
+            _router = DataSourceRouter(chain, {name: breaker_cfg for name, _ in chain})
+            logger.info("Data source router ready", chain=[n for n, _ in chain])
+    except Exception as e:
+        logger.warning("Data source router init failed, using single-source path", error=str(e))
+        _router = None
 
     # Initialize risk layer
     _guard = RiskGuard()
@@ -121,8 +157,22 @@ async def _get_kline_fallback(
     start_date: str = "", end_date: str = "",
     adjust: str = "qfq",
 ) -> tuple[pd.DataFrame, str]:
-    """Try AKShare first, fall back to Sina on failure."""
-    # Try AKShare
+    """Fetch kline via the multi-source router, or legacy AKShare→Sina fallback."""
+    # Preferred: multi-source router (with circuit breakers)
+    if _router is not None:
+        try:
+            df, source_name = await _router.fetch_daily_kline(
+                symbol=symbol, period=period,
+                start_date=start_date or "20200101",
+                end_date=end_date or datetime.now().strftime("%Y%m%d"),
+                adjust=adjust,
+            )
+            if not df.empty:
+                return df, source_name
+        except Exception as e:
+            logger.warning("Router kline fetch failed", symbol=symbol, error=str(e))
+
+    # Legacy fallback: AKShare first, then Sina
     if _akshare:
         try:
             df = await _akshare.get_daily_kline(
@@ -417,6 +467,326 @@ async def get_major_events(symbol: str) -> dict[str, Any]:
         logger.warning("get_major_events fallback", error=str(e))
         # Return empty — table may not be populated yet
         return _response(data={"symbol": symbol, "events": [], "count": 0})
+
+
+# ---- MCP Tools: 专业理财分析 (Professional Wealth Management) ----
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_valuation_snapshot(symbol: str) -> dict[str, Any]:
+    """专业估值快照：PE/PB/市值/换手率/量比/涨跌停价（腾讯实时数据）。
+
+    理财分析的核心实时估值数据，用于判断：
+    - 估值水平（PE/PB 横向、纵向比较）
+    - 流动性（换手率、量比）
+    - 当日交易区间（高低点、均价、涨跌停距离）
+
+    Args:
+        symbol: Stock code (e.g., '000001')
+    """
+    try:
+        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
+
+        adapter = TencentAdapter()
+        try:
+            quote = await adapter.get_realtime_quote(symbol)
+        finally:
+            await adapter.close()
+
+        if not quote or quote.get("price", 0) <= 0:
+            return _response(success=False, error=f"无法获取 {symbol} 实时行情",
+                             error_type="NOT_FOUND")
+
+        # 专业衍生指标
+        price = quote["price"]
+        prev_close = quote["prev_close"]
+        limit_up = quote["limit_up_price"]
+        limit_down = quote["limit_down_price"]
+
+        quote["distance_to_limit_up_pct"] = round(
+            (limit_up / price - 1) * 100, 2
+        ) if limit_up > 0 and price > 0 else None
+        quote["distance_to_limit_down_pct"] = round(
+            (price / limit_down - 1) * 100, 2
+        ) if limit_down > 0 and price > 0 else None
+        quote["intraday_position"] = None
+        if quote["high"] > quote["low"] > 0:
+            quote["intraday_position"] = round(
+                (price - quote["low"]) / (quote["high"] - quote["low"]) * 100, 1
+            )
+
+        return _response(data=quote, source="tencent",
+                         freshness=datetime.now().isoformat())
+    except Exception as e:
+        logger.error("get_valuation_snapshot failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_stock_capital_flow(symbol: str, days: int = 20) -> dict[str, Any]:
+    """个股主力资金流：主力/超大单/大单/中单/小单净流入（东财独有数据）。
+
+    用于判断"聪明钱"动向：
+    - 主力连续净流入 + 价格滞涨 → 可能吸筹
+    - 主力连续净流出 + 价格坚挺 → 派发风险
+    - 超大单净流入占比高 → 机构行为
+
+    Args:
+        symbol: Stock code
+        days: 历史天数 (default 20, max 120)
+    """
+    try:
+        from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
+        import asyncio as _asyncio
+
+        adapter = EastMoneyAdapter()
+        try:
+            await _asyncio.sleep(1.2)  # 东财限流
+            df = await adapter.get_stock_fund_flow(symbol, min(days, 120))
+        finally:
+            await adapter.close()
+
+        if df.empty:
+            return _response(success=False, error=f"{symbol} 资金流数据不可用",
+                             error_type="NOT_FOUND")
+
+        records = df.to_dict(orient="records")
+
+        # 专业汇总
+        main_total = sum(r["main_net_inflow"] for r in records)
+        super_large_total = sum(r["super_large_net_inflow"] for r in records)
+        positive_days = sum(1 for r in records if r["main_net_inflow"] > 0)
+        recent = records[-5:] if len(records) >= 5 else records
+
+        return _response(data={
+            "symbol": symbol,
+            "days": len(records),
+            "main_net_total": round(main_total, 0),
+            "super_large_net_total": round(super_large_total, 0),
+            "main_positive_days": positive_days,
+            "main_positive_ratio": round(positive_days / len(records) * 100, 1),
+            "recent_5d": recent,
+            "interpretation": (
+                f"近{len(records)}日主力净流入 {main_total/1e8:.2f} 亿元，"
+                f"其中{positive_days}日净流入({positive_days/len(records)*100:.0f}%)。"
+            ),
+            "note": "东财数据可能被限流；研究参考，非投资建议。",
+        }, source="eastmoney")
+    except Exception as e:
+        logger.error("get_stock_capital_flow failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def agent_portfolio_review() -> dict[str, Any]:
+    """持仓体检：结合实时行情、估值、风险规则输出专业组合诊断。
+
+    检查维度：
+    1. 持仓集中度（单股/总仓位 vs RiskGuard 红线）
+    2. 估值水平（PE/PB 极端值告警）
+    3. 距涨跌停风险距离
+    4. 回撤状态（若数据库有净值历史）
+    5. 建议（仅研究参考，非投资建议）
+
+    Returns:
+        data.holdings_review: 每只持仓的诊断
+        data.portfolio_health: 组合级健康度
+        data.risk_alerts: 风险告警列表
+    """
+    try:
+        from pa_mcp.risk.guard import RiskGuard, RiskPolicy, PortfolioSnapshot
+
+        if not _store or not _store.table_exists("portfolio"):
+            return _response(data={
+                "portfolio_health": "empty",
+                "message": "持仓为空。先用 portfolio_add 添加持仓。",
+            })
+
+        holdings = _store.query_df("SELECT * FROM portfolio ORDER BY added_date DESC")
+        if holdings.empty:
+            return _response(data={"portfolio_health": "empty", "holdings_review": []})
+
+        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
+        adapter = TencentAdapter()
+        try:
+            reviews = []
+            total_value = 0.0
+            risk_alerts: list[str] = []
+
+            for _, h in holdings.iterrows():
+                sym = h["symbol"]
+                cost = float(h.get("cost", 0))
+                shares = int(h.get("shares", 0))
+
+                try:
+                    quote = await adapter.get_realtime_quote(sym)
+                except Exception:
+                    reviews.append({
+                        "symbol": sym, "name": sym,
+                        "error": "行情不可用",
+                    })
+                    continue
+
+                price = quote.get("price", 0)
+                value = price * shares
+                total_value += value
+                pnl_pct = (price / cost - 1) * 100 if cost > 0 else 0.0
+
+                review = {
+                    "symbol": sym,
+                    "name": quote.get("name", sym),
+                    "shares": shares,
+                    "cost": cost,
+                    "price": price,
+                    "value": round(value, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "pe": quote.get("pe"),
+                    "pb": quote.get("pb"),
+                    "turnover_pct": quote.get("turnover_pct"),
+                    "volume_ratio": quote.get("volume_ratio"),
+                    "distance_to_limit_up_pct": quote.get("distance_to_limit_up_pct"),
+                }
+
+                # 专业诊断规则
+                if quote.get("pe") and 0 < quote["pe"] < 5:
+                    review["valuation_note"] = "PE 极低（<5），可能存在价值陷阱或周期底部，需结合行业判断"
+                elif quote.get("pe") and quote["pe"] > 80:
+                    review["valuation_note"] = "PE 极高（>80），估值泡沫风险，注意业绩兑现"
+                if quote.get("pb") and quote["pb"] < 1:
+                    review["valuation_note"] = (review.get("valuation_note", "") +
+                                                "；PB<1 破净，观察基本面恶化风险")
+                if review.get("distance_to_limit_up_pct") is not None and \
+                        review["distance_to_limit_up_pct"] < 2:
+                    risk_alerts.append(f"{sym} 距涨停仅 {review['distance_to_limit_up_pct']}%，追高风险大")
+
+                reviews.append(review)
+
+            # 组合集中度检查
+            if total_value > 0:
+                for r in reviews:
+                    if "value" in r:
+                        r["weight_pct"] = round(r["value"] / total_value * 100, 1)
+
+                max_weight = max((r.get("weight_pct", 0) for r in reviews), default=0)
+                if max_weight > 10:
+                    risk_alerts.append(f"单股集中度 {max_weight:.1f}% > 10% 建议红线")
+                if max_weight > 20:
+                    risk_alerts.append(f"严重集中：单股 {max_weight:.1f}%，考虑分散")
+
+            health_score = max(0, 100 - len(risk_alerts) * 15)
+
+            return _response(data={
+                "portfolio_health": "good" if health_score >= 70 else "warning",
+                "health_score": health_score,
+                "total_value": round(total_value, 2),
+                "holdings_review": reviews,
+                "risk_alerts": risk_alerts,
+                "note": "研究参考输出，非投资建议。数据来自免费行情，可能有延迟。",
+            }, source="tencent")
+        finally:
+            await adapter.close()
+    except Exception as e:
+        logger.error("agent_portfolio_review failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def agent_earnings_analysis(symbol: str, report_period: str = "") -> dict[str, Any]:
+    """财报专业分析：从财务表提取关键指标并生成结构化解读。
+
+    分析维度：
+    1. 盈利能力：ROE、毛利率、净利率、EPS
+    2. 成长性：营收/利润同比
+    3. 偿债能力：资产负债率、流动比率
+    4. 现金流质量：经营现金流、自由现金流
+    5. 综合诊断：财务健康评分 + 关注点
+
+    Args:
+        symbol: Stock code
+        report_period: 报告期 (YYYY-MM-DD)，空 = 最新
+    """
+    try:
+        if not _store:
+            return _response(success=False, error="Database not initialized",
+                             error_type="INTERNAL_ERROR")
+
+        # 最新报告期
+        if not report_period:
+            latest = _store.query_df(
+                "SELECT MAX(report_date) as d FROM financials_income WHERE symbol = ?",
+                [symbol],
+            ).iloc[0, 0]
+            if latest is None:
+                return _response(success=False,
+                                 error=f"{symbol} 无财务数据。先运行数据调度或补充财务数据。",
+                                 error_type="NOT_FOUND")
+            report_period = str(latest)
+
+        income = _store.query_df(
+            "SELECT * FROM financials_income WHERE symbol = ? AND report_date = ?",
+            [symbol, report_period],
+        )
+        balance = _store.query_df(
+            "SELECT * FROM financials_balance WHERE symbol = ? AND report_date = ?",
+            [symbol, report_period],
+        )
+        cashflow = _store.query_df(
+            "SELECT * FROM financials_cashflow WHERE symbol = ? AND report_date = ?",
+            [symbol, report_period],
+        )
+
+        if income.empty:
+            return _response(success=False,
+                             error=f"{symbol} {report_period} 无财务数据",
+                             error_type="NOT_FOUND")
+
+        row = income.iloc[0]
+        analysis: dict[str, Any] = {
+            "symbol": symbol,
+            "report_period": report_period,
+            "revenue": float(row.get("revenue") or 0),
+            "net_profit_parent": float(row.get("net_profit_parent") or 0),
+            "eps": float(row.get("eps") or 0),
+            "roe": float(row.get("roe") or 0),
+            "revenue_yoy": float(row.get("revenue_yoy") or 0),
+            "profit_yoy": float(row.get("profit_yoy") or 0),
+            "notes": [],
+        }
+
+        if not balance.empty:
+            b = balance.iloc[0]
+            analysis["debt_ratio"] = float(b.get("debt_ratio") or 0)
+            analysis["total_assets"] = float(b.get("total_assets") or 0)
+
+        if not cashflow.empty:
+            c = cashflow.iloc[0]
+            analysis["cf_operations"] = float(c.get("cf_operations") or 0)
+            analysis["free_cash_flow"] = float(c.get("free_cash_flow") or 0)
+
+        # 专业诊断
+        roe = analysis.get("roe", 0)
+        if roe >= 15:
+            analysis["notes"].append(f"ROE {roe:.1f}% 优秀（>15%），资本回报能力强")
+        elif roe < 5:
+            analysis["notes"].append(f"ROE {roe:.1f}% 偏低（<5%），资本回报弱")
+        if analysis.get("profit_yoy", 0) < -30:
+            analysis["notes"].append("净利润同比下滑超30%，成长性存疑")
+        if analysis.get("debt_ratio", 0) > 70:
+            analysis["notes"].append(f"资产负债率 {analysis['debt_ratio']:.1f}% 偏高（>70%）")
+        if analysis.get("free_cash_flow", 0) < 0:
+            analysis["notes"].append("自由现金流为负，注意现金流压力")
+
+        # 综合评分（简化版）
+        score = 50.0
+        score += min(20, max(0, roe))          # ROE 贡献 0-20
+        score += min(15, max(0, analysis.get("revenue_yoy", 0) / 10))  # 营收增速 0-15
+        score += 15 if analysis.get("debt_ratio", 100) < 50 else 5
+        score += 10 if analysis.get("free_cash_flow", 0) >= 0 else 0
+        analysis["health_score"] = round(min(100, max(0, score)), 1)
+
+        return _response(data=analysis, source="duckdb")
+    except Exception as e:
+        logger.error("agent_earnings_analysis failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
 # ---- MCP Tools: Review ----

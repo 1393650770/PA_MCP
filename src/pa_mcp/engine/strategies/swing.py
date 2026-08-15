@@ -76,6 +76,7 @@ class MACDDivergenceSwingStrategy(BaseStrategy):
                     {"type": "macd", "detail": f"MACD hist turning positive at {hist[i]:.4f}"},
                 ],
                 suggested_max_position_pct=0.05,
+            signal_time=str(data["date"].iloc[i])[:10],
             ))
 
         return signals
@@ -140,9 +141,16 @@ class BollingerMeanReversionSwingStrategy(BaseStrategy):
                     {"type": "reversal", "detail": f"Bullish reversal candle detected"},
                 ],
                 suggested_max_position_pct=0.05,
+            signal_time=str(data["date"].iloc[i])[:10],
             ))
 
         return signals
+    def get_params_space(self) -> list[ParamRange]:
+        return [
+            ParamRange("bb_period", 10, 30, 5),
+            ParamRange("bb_std", 1.5, 3.0, 0.5),
+        ]
+
 
 
 class ROEPBValueStrategy(BaseStrategy):
@@ -203,6 +211,8 @@ class ROEPBValueStrategy(BaseStrategy):
                         {"type": "quality", "detail": f"ROE={roe_val:.1%}"},
                     ],
                     suggested_max_position_pct=0.08,  # Value positions can be larger
+                    # P0-6: row 迭代用 row 的 date
+                    signal_time=str(row.get("date", data["date"].iloc[-1]))[:10],
                 ))
 
         return signals
@@ -281,6 +291,7 @@ class PriceRangeGridStrategy(BaseStrategy):
                 {"type": "trend_risk", "severity": "high", "detail": "Grid strategies lose heavily in trending markets"},
             ],
             suggested_max_position_pct=0.03,  # Small for grid
+        signal_time=str(data["date"].iloc[-1])[:10],
         ))
 
         return signals
@@ -331,4 +342,6 @@ class VolumePriceBreakoutMomentumStrategy(BaseStrategy):
                 {"type": "volume_trend", "detail": f"Volume expanding {vol_trend:.1f}x"},
             ],
             suggested_max_position_pct=0.05,
+            # P0-6: 最新 bar 市场时间
+            signal_time=str(data["date"].iloc[-1])[:10],
         )]

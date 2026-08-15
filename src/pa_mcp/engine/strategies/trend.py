@@ -92,6 +92,7 @@ class PlatformBreakoutStrategy(BaseStrategy):
                     {"type": "volume", "detail": f"Volume ratio {vol_ratio:.1f}x"},
                 ],
                 suggested_max_position_pct=0.05,
+                signal_time=str(data["date"].iloc[i])[:10],
             ))
 
         return signals
@@ -156,6 +157,8 @@ class MAGoldenCrossStrategy(BaseStrategy):
                     {"type": "volume", "detail": f"Volume ratio {vol_ratio_val:.1f}x"},
                 ],
                 suggested_max_position_pct=0.05,
+                # P0-6: 信号市场时间 = bar 日期（供回测延迟一天执行）
+                signal_time=str(data["date"].iloc[i])[:10],
             ))
 
         return signals

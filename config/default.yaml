@@ -1,8 +1,12 @@
 # PA_MCP Configuration - Default
 
 data_sources:
-  primary: akshare
-  fallback: tickflow
+  # 多源容灾：顺序尝试，主源失败自动切备用；连续失败触发熔断冷却
+  # akshare 提供全市场快照（stock_basic）；tencent 最快最稳；eastmoney 限流补充
+  sources: [akshare, tencent, sina, eastmoney]
+  circuit:
+    failure_threshold: 3
+    cooldown_seconds: 300
   akshare:
     rate_limit_rps: 5
     retry_count: 3

@@ -79,6 +79,7 @@ class FirstBoardBreakoutStrategy(BaseStrategy):
                     {"type": "strategy", "severity": "high", "detail": "Board strategies are HIGH RISK. Backtest overestimates real returns by 60-70%."},
                 ],
                 suggested_max_position_pct=0.03,  # Only 3% for board plays
+                signal_time=str(data["date"].iloc[i])[:10],
             ))
 
         return signals
@@ -158,6 +159,7 @@ class DragonSecondWaveStrategy(BaseStrategy):
                     {"type": "reversal", "detail": f"Today gain: {pct_change[i]:.1f}%"},
                 ],
                 suggested_max_position_pct=0.05,
+                signal_time=str(data["date"].iloc[i])[:10],
             ))
 
         return signals

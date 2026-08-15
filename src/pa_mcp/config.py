@@ -23,6 +23,21 @@ class DataSourceSettings(BaseModel):
     burst_max: int = Field(default=10, description="Burst capacity for token bucket")
 
 
+class CircuitBreakerSettings(BaseModel):
+    """Circuit breaker configuration for the data source router."""
+    failure_threshold: int = Field(default=3, description="Consecutive failures to trip")
+    cooldown_seconds: float = Field(default=300.0, description="Cooldown before probe")
+
+
+class RouterSettings(BaseModel):
+    """Multi-source failover router configuration."""
+    sources: list[str] = Field(
+        default_factory=lambda: ["akshare", "sina", "tencent", "eastmoney"],
+        description="Ordered source chain: first = primary, rest = fallbacks",
+    )
+    circuit: CircuitBreakerSettings = Field(default_factory=CircuitBreakerSettings)
+
+
 class CacheSettings(BaseModel):
     """Cache layer configuration."""
     backend: Literal["memory", "redis", "none"] = "memory"
@@ -90,6 +105,7 @@ class Settings(BaseSettings):
 
     akshare: DataSourceSettings = Field(default_factory=DataSourceSettings)
     tickflow: DataSourceSettings = Field(default_factory=DataSourceSettings)
+    router: RouterSettings = Field(default_factory=RouterSettings)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
@@ -117,6 +133,13 @@ class Settings(BaseSettings):
                 config_data["akshare"] = ds["akshare"]
             if "tickflow" in ds and isinstance(ds["tickflow"], dict):
                 config_data["tickflow"] = ds["tickflow"]
+            # Router source chain + circuit breaker
+            if "sources" in ds and isinstance(ds["sources"], list):
+                config_data["router"] = {"sources": ds["sources"]}
+            if "circuit" in ds and isinstance(ds["circuit"], dict):
+                router_cfg = dict(config_data.get("router", {}))
+                router_cfg["circuit"] = ds["circuit"]
+                config_data["router"] = router_cfg
 
         return cls(**config_data)
 

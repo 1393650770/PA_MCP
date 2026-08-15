@@ -134,6 +134,112 @@ Then produce:
 """
 
 
+# ---- 专业理财分析 Prompts ----
+
+VALUATION_ANALYSIS_PROMPT = """
+You are a professional equity valuation analyst. Analyze the valuation of {symbol}.
+
+Workflow:
+1. Call get_valuation_snapshot(symbol="{symbol}") for real-time PE/PB/market-cap/turnover
+2. Call get_kline(symbol="{symbol}") for price history (52-week context)
+3. Call agent_earnings_analysis(symbol="{symbol}") for fundamentals (if financial data exists)
+4. Call get_stock_info(symbol="{symbol}") for industry/sector context
+
+Then produce a professional valuation report:
+## {symbol} 估值分析
+### 实时估值快照
+[PE, PB, 总市值, 换手率, 量比 — 与行业/历史水平对比]
+### 盈利能力
+[ROE, 毛利率/净利率, EPS, 营收/利润增速]
+### 财务健康
+[资产负债率, 现金流质量, 自由现金流]
+### 估值结论
+[估值水平判断：低估/合理/高估，附依据]
+### 风险提示
+[价值陷阱风险（低PE+基本面恶化）、估值泡沫风险、行业周期风险]
+### 免责声明
+[研究参考，非投资建议]
+"""
+
+PORTFOLIO_HEALTH_PROMPT = """
+You are a professional portfolio manager reviewing the current holdings.
+
+Workflow:
+1. Call agent_portfolio_review() for the automated holdings diagnosis
+2. Call portfolio_summary() to confirm the position records
+3. For any flagged holding, call get_valuation_snapshot() and agent_earnings_analysis()
+
+Then produce a professional portfolio health report:
+## 持仓体检报告
+### 组合概况
+[Total value, position count, sector distribution]
+### 逐仓诊断
+[For each: P&L, valuation level, concentration weight, risk flags]
+### 集中度检查
+[Single-stock vs 10% guideline, sector vs 25% guideline]
+### 风险清单
+[Prioritized risk alerts with severity]
+### 调整建议
+[Position sizing, hedging, rebalance suggestions — research only]
+### 免责声明
+[研究参考，非投资建议]
+"""
+
+EARNINGS_INTERPRETATION_PROMPT = """
+You are a professional financial statement analyst interpreting the earnings of {symbol} for period {report_period}.
+
+Workflow:
+1. Call agent_earnings_analysis(symbol="{symbol}", report_period="{report_period}")
+2. Call get_valuation_snapshot(symbol="{symbol}") for market reaction context
+3. Call get_kline(symbol="{symbol}") to see price action around earnings
+
+Then produce a professional earnings interpretation:
+## {symbol} 财报解读 ({report_period})
+### 核心数据
+[Revenue, net profit, EPS, ROE, YoY growth]
+### 盈利质量
+[Profitability trend, margin analysis, cash flow quality]
+### 资产负债
+[Debt ratio, asset structure, solvency]
+### 市场反应
+[Price action, valuation level post-earnings]
+### 投资启示
+[What this earnings means for the investment thesis]
+### 关注点
+[Red flags and things to monitor next quarter]
+### 免责声明
+[研究参考，非投资建议]
+"""
+
+INVESTMENT_MEMO_PROMPT = """
+You are a professional research analyst writing an investment memo for {symbol}.
+
+Workflow:
+1. Call agent_analyze_stock(symbol="{symbol}", depth="deep") for the multi-dimensional AI analysis
+2. Call get_valuation_snapshot(symbol="{symbol}") for real-time valuation
+3. Call agent_earnings_analysis(symbol="{symbol}") for fundamentals
+4. Call get_major_events(symbol="{symbol}") for catalysts
+5. Call agent_portfolio_review() to check interaction with existing holdings
+
+Then produce a professional investment memo:
+## 投资备忘录：{symbol}
+### 一、投资论点
+[Thesis in 3-5 sentences: what this company does, why it could create value]
+### 二、催化剂
+[Earnings, product launches, policy, industry events]
+### 三、风险因素
+[Company-specific, industry, macro risks — be specific]
+### 四、估值区间
+[Valuation summary with bull/base/bear scenarios]
+### 五、仓位建议
+[Position sizing relative to 10% single-stock guideline, entry considerations]
+### 六、跟踪指标
+[What to monitor: financial metrics, price levels, events]
+### 免责声明
+[研究参考，非投资建议。过往业绩不代表未来。]
+"""
+
+
 # ---- Prompt Registry ----
 
 PROMPTS = {
@@ -166,5 +272,32 @@ PROMPTS = {
         "description": "Portfolio risk audit: position concentration, event risk, systemic risk, hard guard violations",
         "template": RISK_AUDIT_PROMPT,
         "arguments": [],
+    },
+    "valuation-analysis": {
+        "name": "valuation-analysis",
+        "description": "Professional equity valuation: real-time PE/PB/market-cap, profitability, financial health, valuation conclusion",
+        "template": VALUATION_ANALYSIS_PROMPT,
+        "arguments": [{"name": "symbol", "description": "6-digit A-share stock code", "required": True}],
+    },
+    "portfolio-health": {
+        "name": "portfolio-health",
+        "description": "Professional portfolio health check: holdings diagnosis, concentration, risk alerts, rebalance suggestions",
+        "template": PORTFOLIO_HEALTH_PROMPT,
+        "arguments": [],
+    },
+    "earnings-interpretation": {
+        "name": "earnings-interpretation",
+        "description": "Professional earnings interpretation: core metrics, quality, balance sheet, market reaction, investment implications",
+        "template": EARNINGS_INTERPRETATION_PROMPT,
+        "arguments": [
+            {"name": "symbol", "description": "6-digit A-share stock code", "required": True},
+            {"name": "report_period", "description": "Report period (YYYY-MM-DD), empty for latest", "required": False},
+        ],
+    },
+    "investment-memo": {
+        "name": "investment-memo",
+        "description": "Professional investment memo: thesis, catalysts, risks, valuation scenarios, position sizing, tracking metrics",
+        "template": INVESTMENT_MEMO_PROMPT,
+        "arguments": [{"name": "symbol", "description": "6-digit A-share stock code", "required": True}],
     },
 }

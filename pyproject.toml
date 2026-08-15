@@ -47,3 +47,4 @@ asyncio_mode = "auto"
 [project.scripts]
 pa-mcp = "pa_mcp.server:run"
 pa-mcp-scheduler = "pa_mcp.data.scheduler:_main_cli"
+pa-mcp-ui = "pa_mcp.ui.gradio_app:main"

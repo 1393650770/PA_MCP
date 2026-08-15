@@ -57,10 +57,12 @@ class BacktestEngine:
     """
 
     def __init__(self, initial_cash: float = 100_000.0,
-                 fee_schedule: Optional[FeeSchedule] = None) -> None:
+                 fee_schedule: Optional[FeeSchedule] = None,
+                 slippage_bps: float = 0.0) -> None:
         self.initial_cash = initial_cash
         self.broker = DailyBroker(fee_schedule=fee_schedule,
-                                  initial_cash=initial_cash)
+                                  initial_cash=initial_cash,
+                                  slippage_bps=slippage_bps)
         self.ledger = Ledger(cash=initial_cash)
 
     def run(
@@ -110,10 +112,15 @@ class BacktestEngine:
                 self._execute_signal(sig, bar, fills)
 
             # Collect signals generated on THIS bar → execute at NEXT bar
-            current_sigs = strategy_signals[
-                (strategy_signals["date"] == row["date"])
-                & (strategy_signals["symbol"] == symbol)
-            ] if not strategy_signals.empty else pd.DataFrame()
+            # 统一按字符串日期匹配（兼容 Timestamp 与 str 两种格式）
+            bar_date_str = str(row["date"])[:10]
+            if not strategy_signals.empty and "date" in strategy_signals.columns:
+                sig_dates = strategy_signals["date"].astype(str).str[:10]
+                mask = (sig_dates == bar_date_str) & \
+                       (strategy_signals["symbol"].astype(str) == symbol)
+                current_sigs = strategy_signals[mask]
+            else:
+                current_sigs = pd.DataFrame()
 
             pending_signals = []
             if not current_sigs.empty:
@@ -134,8 +141,15 @@ class BacktestEngine:
 
         symbol = bar.symbol
 
+        # 单笔预算：默认 10% 可用现金；若买不起 1 手（100股），
+        # 用最多 25% 现金尝试（适配中高价股）；仍买不起（如茅台
+        # 1手16万 > 10万账户）则跳过。
         cash_for_trade = self.ledger.available_cash * 0.10
-        qty = max(100, int(cash_for_trade / max(bar.close, 0.01) / 100) * 100)
+        one_lot_cost = 100 * max(bar.close, 0.01)
+        if cash_for_trade < one_lot_cost:
+            cash_for_trade = min(self.ledger.available_cash * 0.25,
+                                 max(cash_for_trade, one_lot_cost))
+        qty = int(cash_for_trade / max(bar.close, 0.01) / 100) * 100
         if qty <= 0:
             return
 
@@ -212,7 +226,9 @@ class BacktestEngine:
         report.total_trades = len(fills)
         report.total_fees = round(sum(f["commission"] + f["transfer_fee"] for f in fills), 2)
         report.total_stamp_tax = round(sum(f["stamp_tax"] for f in fills), 2)
-        report.nav_series = self.ledger.nav_history[-120:]
+        # 保留完整净值供研究层（walk-forward 需要按窗口切片）；
+        # UI 展示层自行截断。
+        report.nav_series = self.ledger.nav_history
         report.trade_records = fills[-20:]
 
         return report

@@ -103,3 +103,11 @@ config/local.yaml
 config/local.*.yaml
 *.patch
 *.diff
+
+# ---- 一次性分析 / 调试 / 失真实验脚本（不入库）----
+scripts/analyze_*.py
+scripts/test_*.py
+scripts/backtest_limit_up*.py
+
+# ---- 本地计划文件 ----
+plans/

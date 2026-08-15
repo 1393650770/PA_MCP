@@ -73,9 +73,11 @@ class DailyBroker:
     """Deterministic A-share daily broker simulator."""
 
     def __init__(self, fee_schedule: Optional[FeeSchedule] = None,
-                 initial_cash: float = 100_000.0) -> None:
+                 initial_cash: float = 100_000.0,
+                 slippage_bps: float = 0.0) -> None:
         self.fees = fee_schedule or FeeSchedule()
         self.initial_cash = initial_cash
+        self.slippage_bps = slippage_bps  # 单边滑点（基点）
 
     def submit_order(self, order: Order, bar: MarketBar) -> tuple[Order, list[Fill]]:
         """Submit an order and simulate fills.
@@ -128,6 +130,11 @@ class DailyBroker:
         # Conservative: fill at next-day open (not today's close)
         # For this simple daily model: fill at today's close
         fill_price = bar.close
+
+        # 滑点（单边）：买价上浮、卖价下调
+        if self.slippage_bps > 0:
+            slip = self.slippage_bps / 10000.0
+            fill_price = bar.close * (1 + slip) if order.is_buy else bar.close * (1 - slip)
 
         # Limit price constraint
         if order.limit_price is not None:

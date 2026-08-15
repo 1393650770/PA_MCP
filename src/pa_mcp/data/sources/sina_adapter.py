@@ -69,13 +69,15 @@ class SinaAdapter:
         code = symbol.strip()
         prefixes_sh = ["600", "601", "603", "605", "688"]
         prefixes_sz = ["000", "001", "002", "003", "300", "301"]
-        prefixes_bj = ["4", "8"]
+        prefixes_bj_new = ["920"]          # 北交所新号段
+        prefixes_bj_old = ["4", "8"]       # 北交所老号段
 
         if any(code.startswith(p) for p in prefixes_sh):
             return f"sh{code}"
         elif any(code.startswith(p) for p in prefixes_sz):
             return f"sz{code}"
-        elif any(code.startswith(p) for p in prefixes_bj):
+        elif any(code.startswith(p) for p in prefixes_bj_new) or \
+                any(code.startswith(p) for p in prefixes_bj_old):
             # Sina does not natively support BJ exchange — fallback to sh
             logger.warning(
                 "Beijing Exchange stock mapped to sh (Sina may not have data)",
@@ -103,10 +105,14 @@ class SinaAdapter:
         """
         sina_code = self._to_sina_code(symbol)
 
-        # Determine scale based on adjust mode
-        # qfq=0 (forward adjustment), hfq=1 (backward), bfq=2 (no adjust)
-        scale_map = {"qfq": 0, "hfq": 1, "bfq": 2}
-        scale = scale_map.get(adjust, 0)
+        # Sina scale is the BAR PERIOD, not adjustment mode:
+        #   5/15/30/60 = minutes, 240 = daily, 1200 = weekly
+        # This endpoint only returns unadjusted (原始) data.
+        scale_map = {
+            "daily": 240, "weekly": 1200, "monthly": 7200,
+            "1": 1, "5": 5, "15": 15, "30": 30, "60": 60,
+        }
+        scale = scale_map.get(period, 240)
 
         # Build URL
         # Sina API: KLINE format with datalen parameter
@@ -165,8 +171,10 @@ class SinaAdapter:
         # Add source tracking and symbol
         df["symbol"] = symbol
         df["source"] = "sina"
-        df["price_adjust_mode"] = adjust
-        # Note: Sina does not provide 'amount' (成交额) in this endpoint
+        # Sina getKLineData only returns unadjusted (原始) prices
+        df["price_adjust_mode"] = "bfq"
+        # Note: Sina does not provide 'amount' (成交额) in this endpoint;
+        # volume is already in shares (股), no conversion needed.
         if "amount" not in df.columns:
             df["amount"] = 0.0
 

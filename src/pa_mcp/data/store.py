@@ -204,6 +204,20 @@ TABLE_DEFINITIONS: dict[str, str] = {
             PRIMARY KEY (symbol, date, strategy_name)
         )
     """,
+
+    "fund_flow_daily": """
+        CREATE TABLE IF NOT EXISTS fund_flow_daily (
+            symbol VARCHAR(10) NOT NULL,
+            trade_date DATE NOT NULL,
+            main_net_inflow DOUBLE,
+            small_net_inflow DOUBLE,
+            mid_net_inflow DOUBLE,
+            large_net_inflow DOUBLE,
+            super_large_net_inflow DOUBLE,
+            main_net_inflow_pct DOUBLE,
+            PRIMARY KEY (symbol, trade_date)
+        )
+    """,
 }
 
 
@@ -360,10 +374,11 @@ class DuckDBStore:
         placeholders = ", ".join(["?" for _ in cols])
 
         # Register temp table and insert with explicit columns
+        verb = "INSERT OR REPLACE" if mode != "insert" else "INSERT"
         conn.register("__tmp_insert", df_aligned)
         try:
             conn.execute(
-                f"INSERT OR REPLACE INTO {table_name} ({col_list}) "
+                f"{verb} INTO {table_name} ({col_list}) "
                 f"SELECT {col_list} FROM __tmp_insert"
             )
         finally:

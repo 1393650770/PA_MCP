@@ -69,6 +69,8 @@ class InsiderBuyingFollowStrategy(BaseStrategy):
             strength = min(amount_score + count_score + safety_score, 100)
             if strength >= 50:
                 signals.append(Signal(
+                    # P0-6: 信号市场时间
+                    signal_time=str(row.get("date", ""))[:10] if row.get("date", "") else None,
                     symbol=str(row.get("symbol", "")),
                     strategy_name=self.name,
                     strength_score=round(strength, 1),
@@ -140,6 +142,8 @@ class LockupExpiryAvoidanceStrategy(BaseStrategy):
             strength = 100 - severity * 60  # Higher lockup = lower strength (bearish)
 
             signals.append(Signal(
+                # P0-6: 信号市场时间
+                signal_time=str(row.get("date", ""))[:10] if row.get("date", "") else None,
                 symbol=str(row.get("symbol", "")),
                 strategy_name=self.name,
                 strength_score=round(strength, 1),
@@ -235,6 +239,8 @@ class OversoldBounceReversalStrategy(BaseStrategy):
                      "detail": "Oversold can become more oversold — use tight stops"},
                 ],
                 suggested_max_position_pct=0.03,  # Small position for reversal plays
+            # P0-6: 信号市场时间
+            signal_time=str(data["date"].iloc[i])[:10] if "date" in data.columns and data["date"].iloc[i] else None,
             ))
 
         return signals
@@ -289,6 +295,8 @@ class BlockTradeDiscountedStrategy(BaseStrategy):
             strength = 100 - severity * 50  # Bigger discount = more bearish
 
             signals.append(Signal(
+                # P0-6: 信号市场时间
+                signal_time=str(data["date"].iloc[i])[:10] if "date" in data.columns and data["date"].iloc[i] else None,
                 symbol=str(row.get("symbol", "")),
                 strategy_name=self.name,
                 strength_score=round(strength, 1),

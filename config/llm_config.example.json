@@ -5,10 +5,11 @@
   "providers": {
     "anthropic": {
       "api_key": "YOUR_ANTHROPIC_API_KEY_HERE",
-      "base_url": "https://api.anthropic.com",
+      "_note": "使用官方 Messages API（非 /chat/completions）。base_url 留空即可走官方 SDK 默认。",
+      "base_url": "",
       "models": {
-        "fast": "claude-sonnet-5-20251001",
-        "deep": "claude-opus-5-20251001"
+        "fast": "claude-sonnet-5",
+        "deep": "claude-opus-5"
       },
       "max_tokens": 4096,
       "temperature": 0.1,
