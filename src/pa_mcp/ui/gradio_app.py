@@ -1089,9 +1089,24 @@ def build_app():
 
 def main() -> None:
     """启动 Gradio UI：python -m pa_mcp.ui.gradio_app"""
+    import socket
     import gradio as gr
+
+    # 端口被占用时自动避让（7860 → 7861 → ... 7869）
+    port = 7860
+    for p in range(7860, 7870):
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", p))
+                port = p
+                break
+            except OSError:
+                continue
+    else:
+        port = 7860  # 全部占用则用默认并让 gradio 报错
+
     app = build_app()
-    app.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True,
+    app.launch(server_name="127.0.0.1", server_port=port, inbrowser=True,
                show_error=True, theme=gr.themes.Soft())
 
 
