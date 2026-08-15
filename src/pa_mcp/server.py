@@ -2016,6 +2016,55 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def chan_beichi_backtest(symbols: str) -> dict[str, Any]:
+    """缠论背驰信号组合回测验证。
+
+    背驰信号（下跌背驰=看多 / 上涨背驰=看空）作为调仓信号 →
+    共享账本组合回测（延迟一天执行）vs 全池等权基准 → 超额收益。
+    直接回答「缠论背驰能否构建组合」（背驰稀疏 → 组合可能长期空仓，
+    诚实呈现）。
+
+    Args:
+        symbols: 股票池（逗号分隔，≥2 只，≥150 根行情）
+    """
+    try:
+        from pa_mcp.research.chan_backtest import (
+            backtest_beichi_signals, format_beichi_backtest)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return _response(success=False, error="至少需要 2 只股票",
+                             error_type="INVALID_ARGUMENT")
+        klines = {}
+        for sym in pool:
+            try:
+                df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 300", [sym]) if _store else None
+                if df is None or df.empty:
+                    kdf, _ = await _get_kline_fallback(sym, days=300)
+                    df = kdf
+                if df is not None and not df.empty:
+                    klines[sym] = df
+            except Exception:
+                continue
+        if len(klines) < 2:
+            return _response(success=False,
+                             error=f"仅 {len(klines)} 只股票有数据（需 ≥2）",
+                             error_type="DATA_UNAVAILABLE")
+
+        result = backtest_beichi_signals(klines)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result,
+                               "report": format_beichi_backtest(result)})
+    except Exception as e:
+        logger.error("chan_beichi_backtest failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def ai_market_report(symbols: str) -> dict[str, Any]:
     """AI 市场研究报告：确定性研究结果 → LLM 综述。
 

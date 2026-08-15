@@ -1737,6 +1737,30 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def chan_beichi_backtest_ui(symbols: str) -> str:
+    """缠论背驰信号组合回测（背驰买/卖 → 共享账本）。"""
+    try:
+        from pa_mcp.research.chan_backtest import (
+            backtest_beichi_signals, format_beichi_backtest)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return "至少需要 2 只股票"
+        klines = {}
+        for sym in pool:
+            df = _load_long_history(sym)
+            if not df.empty:
+                klines[sym] = df
+        if len(klines) < 2:
+            return f"仅 {len(klines)} 只股票有行情（需 ≥2）"
+        result = backtest_beichi_signals(klines)
+        if "error" in result:
+            return result["error"]
+        return format_beichi_backtest(result)
+    except Exception as e:
+        return f"背驰组合回测失败：{str(e)[:200]}"
+
+
 def ai_report_ui(symbols: str) -> str:
     """AI 市场研究报告（确定性研究 → LLM 综述）。"""
     try:
@@ -2735,6 +2759,12 @@ def build_app():
             report_out = gr.Markdown()
             report_btn.click(ai_report_ui, inputs=[fs_pool],
                              outputs=[report_out])
+
+            cbb_btn = gr.Button("🌀 缠论背驰信号组合回测（vs 等权）",
+                                variant="secondary")
+            cbb_out = gr.Markdown()
+            cbb_btn.click(chan_beichi_backtest_ui, inputs=[fs_pool],
+                          outputs=[cbb_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
