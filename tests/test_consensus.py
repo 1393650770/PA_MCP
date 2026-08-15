@@ -58,3 +58,22 @@ def test_consensus_no_data():
     r = asyncio.run(ConsensusAnalyzer(
         store_path=":memory:").analyze("000001", kline_df=pd.DataFrame()))
     assert "error" in r
+
+
+def test_consensus_event_study():
+    """强趋势 → 综合信号 → 事件研究可跑（可检验性）。"""
+    from pa_mcp.research.consensus import (
+        scan_consensus_signals, consensus_event_study,
+        format_consensus_event_study)
+    df = _df(n=300, trend=0.005)
+    sig = asyncio.run(scan_consensus_signals("000001", df, step=10))
+    assert not sig.empty, "强趋势应产生综合信号"
+    assert sig["direction"].isin(["up", "down"]).all()
+    assert sig["strategy_name"].eq("consensus").all()
+
+    r = consensus_event_study("000001", df, step=10)
+    assert r["n_signals"] >= 1
+    assert r["results"]
+    assert "has_edge" in r
+    text = format_consensus_event_study(r)
+    assert "综合信号事件研究" in text or "未检出" in text

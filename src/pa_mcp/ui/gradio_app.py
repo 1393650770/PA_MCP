@@ -1356,6 +1356,23 @@ def calibration_fig_ui() -> tuple[Any, str]:
         return None, f"校准图生成失败：{str(e)[:200]}"
 
 
+def consensus_event_study_ui(symbol: str) -> str:
+    """综合信号事件研究（融合投票预测力）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.research.consensus import (
+            consensus_event_study, format_consensus_event_study)
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+        result = consensus_event_study(symbol, df)
+        return format_consensus_event_study(result)
+    except Exception as e:
+        return f"综合信号事件研究失败：{str(e)[:200]}"
+
+
 def signal_consensus_ui(symbol: str) -> str:
     """综合决策信号（多信号源加权投票）。"""
     symbol = symbol.strip()
@@ -3487,6 +3504,11 @@ def build_app():
                                  variant="secondary")
             cons_btn.click(signal_consensus_ui, inputs=[pred_sym],
                            outputs=[res_out])
+
+            cons_es_btn = gr.Button("🧮 综合信号事件研究（预测力检验）",
+                                    variant="secondary")
+            cons_es_btn.click(consensus_event_study_ui, inputs=[pred_sym],
+                              outputs=[res_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")
