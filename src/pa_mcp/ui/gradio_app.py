@@ -1400,6 +1400,93 @@ def future_expectation_fig(symbol: str) -> tuple[Any, str]:
         return None, f"走势预期图生成失败：{str(e)[:200]}"
 
 
+def chan_fig(symbol: str) -> tuple[Any, str]:
+    """缠论结构图：K线 + 分型标注 + 笔连线 + 中枢区间框。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return None, "请输入股票代码"
+    try:
+        from pa_mcp.engine.indicators.chan import chan_analysis, format_chan
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return None, f"{symbol} 无行情数据"
+        data = df.sort_values("date").reset_index(drop=True).tail(80)
+        a = chan_analysis(data, symbol=symbol)
+
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=data["date"], open=data["open"], high=data["high"],
+            low=data["low"], close=data["close"], name="K线",
+            increasing_line_color="#e03131", decreasing_line_color="#2f9e44"))
+
+        # 分型标记
+        tops = [f for f in a.fractals if f.kind == "top"]
+        bots = [f for f in a.fractals if f.kind == "bottom"]
+        if tops:
+            fig.add_trace(go.Scatter(
+                x=[f.date for f in tops], y=[f.price for f in tops],
+                mode="markers+text", text=["顶"] * len(tops),
+                textposition="top center", name="顶分型",
+                marker=dict(symbol="triangle-down", size=10, color="#e8590c")))
+        if bots:
+            fig.add_trace(go.Scatter(
+                x=[f.date for f in bots], y=[f.price for f in bots],
+                mode="markers+text", text=["底"] * len(bots),
+                textposition="bottom center", name="底分型",
+                marker=dict(symbol="triangle-up", size=10, color="#2b8a3e")))
+
+        # 笔连线（用合并K线序号映射到原始日期）
+        if a.bi_list and a.merged_bars:
+            xs, ys = [], []
+            for b in a.bi_list:
+                s_date = data["date"].iloc[b.start_idx] if b.start_idx < len(data) else None
+                e_date = data["date"].iloc[b.end_idx] if b.end_idx < len(data) else None
+                if s_date is not None and e_date is not None:
+                    xs.extend([s_date, e_date, None])
+                    ys.extend([b.start_price, b.end_price, None])
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines", name="笔",
+                line=dict(color="#7048e8", width=1.6)))
+
+        # 中枢区间框
+        for z in a.zhongshu_list[-3:]:
+            s_date = data["date"].iloc[z.start_idx] if z.start_idx < len(data) else None
+            e_date = data["date"].iloc[min(z.end_idx, len(data) - 1)]
+            if s_date is not None:
+                fig.add_shape(type="rect",
+                              x0=s_date, x1=e_date,
+                              y0=z.low, y1=z.high,
+                              line=dict(color="#f59f00", width=1.5, dash="dash"),
+                              fillcolor="#f59f00", opacity=0.12)
+
+        sig = a.beichi_signal
+        color = "#e03131" if sig == "bearish" else "#2b8a3e" if sig == "bullish" else "#495057"
+        fig.update_layout(
+            title=(f"🌀 缠论结构 {symbol}：{a.position} · "
+                   f"笔{len(a.bi_list)}段 · 中枢{len(a.zhongshu_list)}个"
+                   + (f" · {'⚠️上涨背驰' if sig == 'bearish' else '💡下跌背驰'}"
+                      if sig != "none" else "")),
+            height=520, xaxis_rangeslider_visible=False,
+            legend=dict(orientation="h", y=1.08),
+            margin=dict(l=10, r=10, t=60, b=10))
+        return fig, format_chan(a)
+    except Exception as e:
+        return None, f"缠论分析失败：{str(e)[:200]}"
+
+
+def canslim_ui(top_n: int = 20, pool: str = "") -> str:
+    """CANSLIM 成长股扫描（欧奈尔七要素）。"""
+    try:
+        from pa_mcp.research.canslim import get_canslim_scanner, format_scan
+        pool_list = [s.strip() for s in pool.replace("，", ",").split(",")
+                     if s.strip()] or None
+        results = get_canslim_scanner().scan(pool=pool_list, top_n=top_n)
+        return format_scan(results)
+    except Exception as e:
+        return f"CANSLIM 扫描失败：{str(e)[:200]}"
+
+
 def memory_status_ui(days: int = 60) -> str:
     """长期记忆状态：决策胜率/盈亏 + 偏差检测 + 策略权重。"""
     try:
@@ -1985,6 +2072,11 @@ def build_app():
             analyze_btn.click(dragon_tiger_summary_ui, outputs=[lhb_out])
             app.load(dragon_tiger_summary_ui, outputs=[lhb_out])
 
+            chan_btn = gr.Button("🌀 缠论结构分析（分型/笔/中枢/背驰）",
+                                 variant="secondary")
+            chan_btn.click(chan_fig, inputs=[sym_in],
+                           outputs=[kline_out, summary_out])
+
         with gr.Tab("💬 AI 对话"):
             gr.Markdown("**对话**：输入股票代码或问题，例如「分析 000001」「600036 资金流」。\n"
                         "配置 `ANTHROPIC_API_KEY` 后获得完整 AI 分析，否则使用规则分析模式。")
@@ -2025,6 +2117,13 @@ def build_app():
                          outputs=[sm_out])
             gr.Markdown("扫描内置常用股池，输出**当前处于买入信号状态**的股票"
                         "（含该信号历史5日胜率）。基于统计而非预测。")
+            with gr.Row():
+                cs_pool = gr.Textbox(label="CANSLIM 股票池（逗号分隔，空=全库）",
+                                     placeholder="000001,600036,300750", scale=2)
+                cs_btn = gr.Button("🧬 CANSLIM 成长股扫描（欧奈尔）",
+                                   variant="secondary", scale=1)
+            cs_out = gr.Markdown()
+            cs_btn.click(canslim_ui, inputs=[cs_pool], outputs=[cs_out])
 
         with gr.Tab("🧪 研究评估"):
             wf_sym = gr.Textbox(label="股票代码", value="000001")

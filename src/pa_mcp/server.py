@@ -1835,6 +1835,78 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def scan_canslim(top_n: int = 20, pool: str = "") -> dict[str, Any]:
+    """CANSLIM 成长股扫描（欧奈尔《笑傲股市》七要素选股法）。
+
+    七要素（A股适配）：C当季盈利(净利同比≥20%) / A年度增长(4期均值≥25%
+    或ROE≥17%) / N新高(250日) / S突破放量(量比≥1.5) / L领军股(池内RS
+    前20%) / M市场方向(高潮/发酵/启动通过，冰点否决)；I机构数据暂缺。
+    纯确定性规则，无 LLM 依赖。
+
+    Args:
+        top_n: 返回数量（按总分排序）
+        pool: 股票池（逗号分隔），空 = 数据库内有行情的全部股票
+    """
+    try:
+        from pa_mcp.research.canslim import get_canslim_scanner, format_scan
+        pool_list = [s.strip() for s in pool.replace("，", ",").split(",")
+                     if s.strip()] or None
+        scanner = get_canslim_scanner()
+        results = scanner.scan(pool=pool_list, top_n=top_n)
+        return _response(data={
+            "results": [r.to_dict() for r in results],
+            "count": len(results),
+            "market_state": results[0].market_state if results else None,
+            "report": format_scan(results),
+        })
+    except Exception as e:
+        logger.error("scan_canslim failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chan_analysis(symbol: str) -> dict[str, Any]:
+    """缠论结构分析（缠中说禅体系）：分型→笔→中枢→背驰。
+
+    输出：合并K线/分型/笔/中枢数量、最近中枢区间、背驰信号
+    （上涨背驰=涨势衰竭 / 下跌背驰=跌势衰竭）、当前价位相对中枢位置。
+    """
+    try:
+        from pa_mcp.engine.indicators.chan import (
+            chan_analysis as chan_run,
+            format_chan,
+        )
+        from pa_mcp.data.symbols import get_stock_name
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 200",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=200)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        a = chan_run(kline_df, symbol=symbol)
+        return _response(data={
+            "symbol": symbol,
+            "name": get_stock_name(symbol),
+            "structure": a.to_dict(),
+            "report": format_chan(a),
+        })
+    except Exception as e:
+        logger.error("chan_analysis failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_memory_status(days: int = 60) -> dict[str, Any]:
     """长期记忆状态：决策记录数量/胜率/盈亏比 + 认知偏差检测。
 
