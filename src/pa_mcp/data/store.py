@@ -219,6 +219,46 @@ TABLE_DEFINITIONS: dict[str, str] = {
         )
     """,
 
+    # 板块日线（东财 BK 板块指数，供板块轮动研究）
+    "sector_daily": """
+        CREATE TABLE IF NOT EXISTS sector_daily (
+            sector_code VARCHAR(20) NOT NULL,
+            name VARCHAR(50),
+            date DATE NOT NULL,
+            open DOUBLE,
+            close DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            volume DOUBLE,
+            amount DOUBLE,
+            pct_change DOUBLE,
+            turnover DOUBLE,
+            PRIMARY KEY (sector_code, date)
+        )
+    """,
+
+    # 板块轮动预测日志（LLM/确定性，供周度验证）
+    "sector_prediction": """
+        CREATE SEQUENCE IF NOT EXISTS sector_prediction_seq START 1;
+        CREATE TABLE IF NOT EXISTS sector_prediction (
+            id INTEGER DEFAULT nextval('sector_prediction_seq') PRIMARY KEY,
+            predict_date DATE NOT NULL,
+            mode VARCHAR(10) DEFAULT 'deterministic',
+            top_sectors VARCHAR(500),
+            avoid_sectors VARCHAR(300),
+            rotation_logic VARCHAR(300),
+            confidence DOUBLE,
+            key_drivers VARCHAR(1000),
+            risks VARCHAR(1000),
+            status VARCHAR(10) DEFAULT 'pending',
+            top3_avg_return_pct DOUBLE,
+            market_avg_return_pct DOUBLE,
+            excess_return_pct DOUBLE,
+            evaluated_date DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
+
     # 经验库：AI 分析历史（供检索增强注入 prompt）
     "analysis_history": """
         CREATE TABLE IF NOT EXISTS analysis_history (

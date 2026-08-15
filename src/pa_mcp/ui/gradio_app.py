@@ -1540,6 +1540,32 @@ def turtle_position_ui(symbol: str, account_value: float) -> str:
         return f"海龟仓位计算失败：{str(e)[:200]}"
 
 
+def sector_rotation_ui(load_data: bool = False) -> str:
+    """板块轮动预测：RS 动量 + 资金流 + LLM（无 LLM 动量延续降级）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.sector_rotation import (
+            get_sector_rotation_analyzer, format_rotation)
+        analyzer = get_sector_rotation_analyzer()
+
+        async def _go():
+            if load_data:
+                info = await analyzer.load_sector_data(top_n=60, days=120)
+                if info.get("loaded", 0) == 0:
+                    return (f"板块数据装载失败：{info.get('message', '')}\n"
+                            "请检查网络或稍后重试（东财板块接口）")
+            analysis = analyzer.analyze()
+            if "error" in analysis:
+                return analysis["error"]
+            pred = await analyzer.predict(analysis)
+            pid = analyzer.save_prediction(pred)
+            return format_rotation(pred) + f"\n\n*已落盘（#{pid}）*"
+
+        return _asyncio.run(_go())
+    except Exception as e:
+        return f"板块轮动失败：{str(e)[:200]}"
+
+
 def canslim_ui(top_n: int = 20, pool: str = "") -> str:
     """CANSLIM 成长股扫描（欧奈尔七要素）。"""
     try:
@@ -2189,6 +2215,18 @@ def build_app():
                                    variant="secondary", scale=1)
             cs_out = gr.Markdown()
             cs_btn.click(canslim_ui, inputs=[cs_pool], outputs=[cs_out])
+
+            with gr.Row():
+                sr_btn = gr.Button("🔄 板块轮动预测（东财板块+LLM）",
+                                   variant="secondary", scale=1)
+                sr_load_btn = gr.Button("⏬ 先装载板块数据（首次必点，约30-60s）",
+                                        variant="secondary", scale=1)
+            sr_out = gr.Markdown()
+            sr_btn.click(lambda: sector_rotation_ui(False), outputs=[sr_out])
+            sr_load_btn.click(lambda: sector_rotation_ui(True),
+                              outputs=[sr_out])
+            gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
+                        "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
         with gr.Tab("🧪 研究评估"):
             wf_sym = gr.Textbox(label="股票代码", value="000001")

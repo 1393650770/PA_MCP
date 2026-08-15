@@ -1835,6 +1835,76 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def predict_sector_rotation(load_data: bool = False,
+                                  board_type: str = "industry") -> dict[str, Any]:
+    """板块轮动预测：RS 动量排名 + 资金流 + LLM 解读 → 未来一周强势板块。
+
+    流程：板块相对强度（20 日涨幅排名）+ 动量加速（5日 vs 20日日均差）+
+    轮动信号（新进/退出 top10）→ LLM 预测强势板块候选（结构化 JSON，
+    无 LLM 时动量延续规则降级）→ 落盘 sector_prediction 供周度验证
+    （5 交易日后回填 top3 超额收益）。
+
+    Args:
+        load_data: True = 先拉取东财板块行情（首次使用需 True，约 30-60s）
+        board_type: 'industry'（行业板块）或 'concept'（概念板块）
+    """
+    try:
+        from pa_mcp.research.sector_rotation import (
+            get_sector_rotation_analyzer, format_rotation,
+        )
+        analyzer = get_sector_rotation_analyzer()
+        analyzer.board_type = board_type
+
+        if load_data:
+            load_info = await analyzer.load_sector_data(top_n=60, days=120)
+            if load_info.get("loaded", 0) == 0:
+                return _response(success=False, error=load_info.get(
+                    "message", "板块数据装载失败（东财接口不可达？）"),
+                    error_type="DATA_UNAVAILABLE")
+
+        analysis = analyzer.analyze()
+        if "error" in analysis:
+            return _response(success=False, error=analysis["error"],
+                             error_type="DATA_UNAVAILABLE")
+        pred = await analyzer.predict(analysis)
+        pred_id = analyzer.save_prediction(pred)
+        return _response(data={
+            **pred,
+            "prediction_id": pred_id,
+            "report": format_rotation(pred),
+        })
+    except Exception as e:
+        logger.error("predict_sector_rotation failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def sector_rotation_status() -> dict[str, Any]:
+    """板块轮动当前状态：RS 排名 / 轮入轮出 / 轮动速度（只读分析，不预测）。"""
+    try:
+        from pa_mcp.research.sector_rotation import (
+            get_sector_rotation_analyzer)
+        analysis = get_sector_rotation_analyzer().analyze()
+        if "error" in analysis:
+            return _response(success=False, error=analysis["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data=analysis)
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def evaluate_sector_predictions() -> dict[str, Any]:
+    """板块轮动预测验证：回填已到期预测的 top3 超额收益（vs 全板块平均）。"""
+    try:
+        from pa_mcp.research.sector_rotation import (
+            get_sector_rotation_analyzer)
+        return _response(data=get_sector_rotation_analyzer().evaluate_predictions())
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def turtle_position_size(symbol: str, account_value: float = 100000.0,
                                risk_pct: float = 1.0) -> dict[str, Any]:
     """海龟交易仓位计算（ATR 波动率目标）。

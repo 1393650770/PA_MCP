@@ -305,3 +305,142 @@ class EastMoneyAdapter:
                 continue
 
         return pd.DataFrame(rows)
+
+    # ---- 板块行情/资金流（东财独有，供板块轮动研究） ----
+
+    async def get_sector_boards(self, board_type: str = "industry",
+                                top_n: int = 100) -> pd.DataFrame:
+        """板块列表与实时快照（push2 clist）。
+
+        Args:
+            board_type: 'industry'（行业板块，m:90+t:2）或 'concept'（概念，m:90+t:3）
+            top_n: 返回数量
+        """
+        fs = "m:90+t:2" if board_type == "industry" else "m:90+t:3"
+        url = (
+            "https://push2.eastmoney.com/api/qt/clist/get"
+            f"?pn=1&pz={top_n}&po=1&np=1"
+            f"&fltt=2&invt=2&fid=f3&fs={fs}"
+            "&fields=f2,f3,f8,f12,f14,f62,f66,f72"
+        )
+        client = await self._get_client()
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logger.error("EastMoney sector boards failed", error=str(e))
+            raise
+
+        rows = data.get("data", {}).get("diff") or []
+        out = []
+        for r in rows:
+            try:
+                out.append({
+                    "sector_code": str(r.get("f12", "")),
+                    "name": str(r.get("f14", "")),
+                    "pct_change": float(r.get("f3") or 0),
+                    "turnover": float(r.get("f8") or 0),
+                    "main_net_inflow": float(r.get("f62") or 0),
+                    "main_net_inflow_pct": float(r.get("f66") or 0),
+                    "up_stock_count": int(r.get("f72") or 0),
+                    "board_type": board_type,
+                })
+            except (ValueError, TypeError):
+                continue
+        return pd.DataFrame(out)
+
+    async def get_sector_kline(self, sector_code: str,
+                               days: int = 120) -> pd.DataFrame:
+        """板块指数历史日线（push2his，secid=90.BKxxxx）。
+
+        Args:
+            sector_code: 板块代码（如 BK0475 银行），须带 BK 前缀
+        """
+        if not sector_code.upper().startswith("BK"):
+            raise ValueError(f"板块代码须为 BK 前缀：{sector_code}")
+        url = (
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+            f"?secid=90.{sector_code.upper()}"
+            "&fields1=f1,f2,f3,f4,f5,f6"
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+            f"&klt=101&fqt=1&lmt={days}"
+        )
+        client = await self._get_client()
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logger.error("EastMoney sector kline failed",
+                         sector=sector_code, error=str(e))
+            raise
+
+        klines = data.get("data", {}).get("klines") or []
+        rows = []
+        for line in klines:
+            parts = str(line).split(",")
+            if len(parts) < 7:
+                continue
+            try:
+                rows.append({
+                    "sector_code": sector_code.upper(),
+                    "name": str(data.get("data", {}).get("name", "")),
+                    "date": parts[0],
+                    "open": float(parts[1]), "close": float(parts[2]),
+                    "high": float(parts[3]), "low": float(parts[4]),
+                    "volume": float(parts[5]), "amount": float(parts[6]),
+                    # 部分字段可选
+                    "amplitude": float(parts[8]) if len(parts) > 8 else 0.0,
+                    "pct_change": float(parts[9]) if len(parts) > 9 else 0.0,
+                    "turnover": float(parts[10]) if len(parts) > 10 else 0.0,
+                    "source": "eastmoney",
+                })
+            except (ValueError, TypeError, IndexError):
+                continue
+        return pd.DataFrame(rows)
+
+    async def get_sector_fund_flow(self, sector_code: str,
+                                   days: int = 20) -> pd.DataFrame:
+        """板块主力资金流（push2 fflow，secid=90.BKxxxx）。
+
+        字段：trade_date, main_net_inflow, small/mid/large/super_large, main_net_pct
+        """
+        url = (
+            "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
+            f"?secid=90.{sector_code.upper()}"
+            "&fields1=f1,f2,f3,f7"
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
+            f"&klt=101&lmt={days}"
+        )
+        client = await self._get_client()
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logger.error("EastMoney sector fund flow failed",
+                         sector=sector_code, error=str(e))
+            raise
+
+        klines = data.get("data", {}).get("klines") or []
+        rows = []
+        for line in klines:
+            parts = str(line).split(",")
+            if len(parts) < 7:
+                continue
+            try:
+                rows.append({
+                    "sector_code": sector_code.upper(),
+                    "trade_date": parts[0],
+                    "main_net_inflow": float(parts[1]),
+                    "small_net_inflow": float(parts[2]),
+                    "mid_net_inflow": float(parts[3]),
+                    "large_net_inflow": float(parts[4]),
+                    "super_large_net_inflow": float(parts[5]),
+                    "main_net_inflow_pct": float(parts[6]) if len(parts) > 6 else 0.0,
+                    "source": "eastmoney",
+                })
+            except (ValueError, TypeError):
+                continue
+        return pd.DataFrame(rows)
