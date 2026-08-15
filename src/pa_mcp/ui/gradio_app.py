@@ -1958,6 +1958,7 @@ STRATEGY_OPTIONS = [
     "ma_golden_cross", "platform_breakout", "first_board_breakout",
     "bollinger_mean_reversion", "volume_price_momentum", "oversold_bounce",
     "range_grid", "roe_pb_value", "dragon_second_wave", "turtle",
+    "livermore_pivot",
 ]
 
 def detect_best_strategy() -> str:

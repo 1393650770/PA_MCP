@@ -7,6 +7,12 @@ from __future__ import annotations
 from typing import Optional
 
 STRATEGY_TIPS: dict[str, str] = {
+    "livermore_pivot": (
+        "**利弗莫尔关键点**：突破前 20 日枢轴高点（最小阻力线）+ 站稳 MA60"
+        "（只在上升趋势做多，不抄底）+ 放量确认。\n"
+        "适用：趋势确立阶段（发酵/启动期）。\n"
+        "风险：震荡市假突破；需趋势确认均线配合，信号偏少。"
+    ),
     "turtle": (
         "**海龟交易**：唐奇安 20 日新高突破入场 + ATR 波动率目标仓位\n"
         "（1 单位 = 账户 × 1% 风险 ÷ ATR；10 日通道跌破离场）。\n"
