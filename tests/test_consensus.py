@@ -1,0 +1,60 @@
+# [AI:BEGIN]
+# PA_MCP - 综合决策信号测试
+# [AI:END]
+
+from __future__ import annotations
+
+import asyncio
+
+import numpy as np
+import pandas as pd
+
+from pa_mcp.research.consensus import (
+    ConsensusAnalyzer,
+    format_consensus,
+)
+
+
+def _df(n=200, seed=3, trend=0.004):
+    rng = np.random.default_rng(seed)
+    close = 10.0
+    rows = []
+    for i in range(n):
+        close *= 1 + trend + rng.normal(0, 0.01)
+        rows.append({"date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6,
+                     "symbol": "000001"})
+    return pd.DataFrame(rows)
+
+
+def test_consensus_structure():
+    """综合信号：多源聚合 + 投票 + 强度/一致度。"""
+    df = _df()
+    r = asyncio.run(ConsensusAnalyzer().analyze("000001", kline_df=df))
+    assert "error" not in r
+    assert r["sources"], "至少一个信号源"
+    assert r["signal"] in ("up", "down", "sideways")
+    assert 0 <= r["strength"] <= 1
+    assert 0 <= r["agreement"] <= 1
+    assert r["level"] in ("强", "中", "弱")
+    # 强趋势 → 共振+预测+策略大概率看涨
+    if r["sources"].get("resonance"):
+        assert r["sources"]["resonance"]["signal"] in ("up", "down", "sideways")
+    text = format_consensus(r)
+    assert "综合决策信号" in text and "投票" in text
+
+
+def test_consensus_up_bias():
+    """强上涨趋势 → 综合信号偏涨。"""
+    df = _df(trend=0.007)
+    r = asyncio.run(ConsensusAnalyzer().analyze("000001", kline_df=df))
+    assert "error" not in r
+    votes = r["votes"]
+    assert votes["up"] >= votes["down"]
+
+
+def test_consensus_no_data():
+    r = asyncio.run(ConsensusAnalyzer(
+        store_path=":memory:").analyze("000001", kline_df=pd.DataFrame()))
+    assert "error" in r

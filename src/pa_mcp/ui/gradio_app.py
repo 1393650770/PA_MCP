@@ -1356,6 +1356,23 @@ def calibration_fig_ui() -> tuple[Any, str]:
         return None, f"校准图生成失败：{str(e)[:200]}"
 
 
+def signal_consensus_ui(symbol: str) -> str:
+    """综合决策信号（多信号源加权投票）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.consensus import (
+            get_consensus_analyzer, format_consensus)
+        result = _asyncio.run(get_consensus_analyzer().analyze(symbol))
+        if "error" in result:
+            return result["error"]
+        return format_consensus(result)
+    except Exception as e:
+        return f"综合信号失败：{str(e)[:200]}"
+
+
 def watchlist_resonance_ui(symbols: str) -> str:
     """自选股共振扫描（批量强共振清单）。"""
     try:
@@ -3452,6 +3469,11 @@ def build_app():
                                        scale=1)
             wl_res_btn.click(watchlist_resonance_ui, inputs=[wl_res_in],
                              outputs=[res_out])
+
+            cons_btn = gr.Button("🧮 综合决策信号（多信号源投票）",
+                                 variant="secondary")
+            cons_btn.click(signal_consensus_ui, inputs=[pred_sym],
+                           outputs=[res_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")

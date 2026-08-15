@@ -1672,6 +1672,31 @@ async def agent_market_state() -> dict[str, Any]:
 # ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def signal_consensus(symbol: str) -> dict[str, Any]:
+    """综合决策信号：多信号源加权投票融合。
+
+    共振（×3）/ 预测5d（×2）/ 策略信号（×2）/ 缠论背驰（×1）/
+    市场结构（×2）→ 加权投票 → 综合方向/强度/一致度 + 各源明细。
+    「所有信号源同台投票，多数一致才可信」。
+
+    Args:
+        symbol: 股票代码
+    """
+    try:
+        from pa_mcp.research.consensus import (
+            get_consensus_analyzer, format_consensus)
+        result = await get_consensus_analyzer().analyze(symbol)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result,
+                               "report": format_consensus(result)})
+    except Exception as e:
+        logger.error("signal_consensus failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def watchlist_resonance(symbols: str) -> dict[str, Any]:
     """自选股共振扫描：批量三周期共振 → 强共振看涨/看跌/分歧清单。
 
