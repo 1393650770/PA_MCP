@@ -1,0 +1,47 @@
+{
+  "_comment": "OpenClaw 定时任务配置（适配 PA_MCP MCP 工具）",
+  "_usage": "1) 将 scheduler 段合并到 openclaw 配置文件；或 2) 用下方 CLI 命令逐条添加",
+  "scheduler": {
+    "tasks": [
+      {
+        "name": "pamcp-morning-brief",
+        "_description": "盘前晨报：市场状态+昨日复盘+当日信号候选",
+        "cron": "0 8 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具生成今日盘前简报：\n1. 调 get_data_source_health() 确认数据源健康\n2. 调 agent_market_state() 获取市场状态与仓位建议\n3. 调 scan_market(strategy='bollinger_mean_reversion', top_n=10) 获取当前买入信号候选\n4. 调 get_market_sentiment() 获取情绪\n输出：市场状态/昨日要点/今日信号候选清单/风险提示。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-close-review",
+        "_description": "收盘复盘：涨停/龙虎榜/板块轮动+策略信号更新",
+        "cron": "15 15 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具做 A 股收盘复盘：\n1. 调 scan_limit_up() 查看今日涨停梯队\n2. 调 review_dragon_tiger() 查看龙虎榜席位动向\n3. 调 agent_sector_analysis() 查看板块轮动\n4. 调 scan_market(strategy='bollinger_mean_reversion', top_n=10) 更新信号候选\n输出：涨停复盘/龙虎榜/板块轮动/明日关注候选。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-weekly-research",
+        "_description": "每周五：策略研究评估（walk-forward + 事件研究）",
+        "cron": "30 15 * * 5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具做周度策略研究：\n1. 调 research_walk_forward(symbol='000001', strategy='bollinger_mean_reversion') 评估策略OOS表现\n2. 调 research_event_study(symbol='000001', strategy='bollinger_mean_reversion') 检验信号预测力\n3. 调 get_strategy_info() 查看全部策略说明\n输出：本周策略评估结论/是否仍值得关注/下周观察计划。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-portfolio-check",
+        "_description": "每日持仓体检：集中度/估值/风险告警",
+        "cron": "45 14 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具做持仓体检：\n1. 调 agent_portfolio_review() 获取持仓诊断\n2. 对告警标的调 get_valuation_snapshot() 看实时估值\n3. 调 get_data_source_health() 确认数据源\n输出：持仓健康度/集中度检查/风险告警/调整建议。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      }
+    ]
+  },
+  "_cli_commands": "逐条添加示例（替代配置文件合并）：\nopenclaw cron add --name pamcp-morning-brief --cron '0 8 * * 1-5' --tz Asia/Shanghai --session isolated --message '使用 PA_MCP 生成盘前简报：调 agent_market_state()、scan_market()、get_market_sentiment()'",
+  "_note": "依赖：OpenClaw 已配置 PA_MCP MCP server（venv\\Scripts\\python.exe -m pa_mcp.server）。",
+  "_timezone": "全部使用 Asia/Shanghai（A股交易时区）。A股交易时段 9:30-11:30, 13:00-15:00；复盘任务设在收盘后。"
+}
