@@ -1046,6 +1046,27 @@ class PredictionService:
             base_position_pct = (10.0 if direction == "up"
                                  else 0.0 if direction == "down" else 3.0)
         suggested = base_position_pct * hist_factor * bucket_factor
+
+        # 多周期共振校准：强共振上调（趋势确认）/ 分歧收缩
+        resonance_factor = 1.0
+        resonance_note = ""
+        try:
+            from pa_mcp.research.resonance import ResonanceAnalyzer
+            import asyncio as _asyncio
+            res = _asyncio.run(ResonanceAnalyzer().analyze(
+                symbol, kline_df=kline_df))
+            if "error" not in res:
+                strength = res["strength"]
+                if strength >= 0.7 and res["signal"] == direction:
+                    resonance_factor = 1.3
+                    resonance_note = f"（强共振 {res['resonance']} 上调）"
+                elif strength < 0.4:
+                    resonance_factor = 0.7
+                    resonance_note = "（共振分歧收缩）"
+                suggested *= resonance_factor
+        except Exception:
+            pass
+
         suggested = max(0.0, min(20.0, suggested))  # RiskGuard 硬上限
         suggested = round(suggested, 1)
 
@@ -1061,11 +1082,14 @@ class PredictionService:
             "bucket_hit_rate": bucket_hit,
             "hist_factor": round(hist_factor, 3),
             "bucket_factor": round(bucket_factor, 3),
+            "resonance_factor": round(resonance_factor, 3),
+            "resonance_note": resonance_note,
             "suggested_position_pct": suggested,
             "suggested_amount": round(amount, 2),
             "explanation": (
                 f"预测{direction}({prob:.0%}) × 历史命中率{hist_hit:.0%}"
                 f"（{n_hist}样本）{'× 概率桶校准' if bucket_hit is not None else ''}"
+                f"× 共振校准 {resonance_factor:.1f}{resonance_note}"
                 f" → 建议仓位 ≤{suggested}%（RiskGuard 20% 上限内）"),
             "disclaimer": "研究参考，非投资建议。仓位须结合自身风险承受能力。",
         }

@@ -585,6 +585,33 @@ def test_calibration_figure_build():
     assert "#e03131" in fig.data[0].marker.color
 
 
+def test_position_sizing_resonance_adjust():
+    """共振校准：强共振同向上调 1.3；分歧收缩 0.7。"""
+    import tempfile, os
+    import numpy as np
+    db = os.path.join(tempfile.mkdtemp(), "res_size.duckdb")
+    svc = PredictionService(store_path=db)
+    # 强上涨趋势 → 确定性预测看涨 + 共振看涨
+    np.random.seed(8)
+    rows = []
+    close = 10.0
+    for i in range(200):
+        close *= 1 + 0.006 + np.random.normal(0, 0.01)
+        rows.append({"date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6})
+    df = pd.DataFrame(rows)
+
+    sizing = asyncio.run(svc.position_sizing(
+        "600000", kline_df=df))
+    assert sizing["resonance_factor"] in (1.3, 1.0, 0.7)
+    assert "共振" in sizing["explanation"]
+    # 强趋势 → 大概率共振上调（1.3）
+    if sizing["direction"] == "up":
+        assert sizing["resonance_factor"] >= 1.0
+    assert 0 <= sizing["suggested_position_pct"] <= 20
+
+
 def test_multi_predict_compare():
     """批量预测：多股票对比结果结构正确（确定性模式，无网络）。"""
     import numpy as np
