@@ -6,8 +6,8 @@
 
 A 股量化研究 + 理财分析一体化系统：**多源数据容灾 · 策略研究闭环 · 组合回测 · 理财 Agent 界面**。
 
-- **Web UI（Gradio）**：数据看板 / AI 对话 / 多股对比 / 研究评估 / 组合构建 / 策略回测 / 持仓管理
-- **MCP Server**：32+ 工具供 Claude 等 Agent 调用
+- **Web UI（Gradio）**：数据看板 / AI 对话 / 多股对比 / 研究评估 / 组合构建 / 策略回测 / 持仓管理 / **🔮 市场预测**
+- **MCP Server**：49 工具供 Claude 等 Agent 调用
 - **数据管线**：8-phase 全自动调度 + 4 源容灾（熔断/缓存/限流）
 - **研究层**：事件研究 / Walk-Forward OOS / 参数优化 / 成本敏感性
 
@@ -64,6 +64,7 @@ python scripts/bootstrap_universe.py --limit 100
 | 🧪 研究评估 | Walk-Forward OOS（15 folds）+ 信号事件研究（预测力检验） |
 | 📦 组合构建 | 多票信号 → 共享账本组合回测（真实现金约束 + 止盈止损） |
 | 🛠️ 策略回测 | 9 策略 + 沪深300 基准对比（事件驱动引擎，延迟一天执行） |
+| 🔮 市场预测 | AI 未来走势预测（方向概率/区间/周期/多场景，落盘可验证命中率）+ 市场诊断与策略路由 |
 | 💼 组合管理 | 持仓增删查 + 体检（集中度/估值/风险告警） |
 
 ---
@@ -118,7 +119,11 @@ python scripts/bootstrap_universe.py --limit 100
 
 ### Agent / 界面
 
-- **LLM Ports & Adapters**：Anthropic 官方 SDK（Messages API）、OpenAI-compatible、DeepSeek、智谱、通义
+- **LLM Ports & Adapters**：Anthropic 官方 SDK（Messages API）、OpenAI-compatible（doubao/ark 通用回退）、DeepSeek、智谱、通义
+- **多 Agent 深度分析**（借鉴 ai-hedge-fund）：5 分析师并行（技术/资金/情绪/基本面/事件）+ 组合经理合成 + RiskGuard 仓位上限
+- **两阶段分析**：市场诊断（高潮/发酵/启动/低迷/冰点）→ 策略路由 → 决策；JSON 校验失败自动重试
+- **🔮 市场预测**（借鉴 PA_Agent 未来走势预期）：周期位置 + 方向概率分布 + 期望收益区间 + 多场景推演；预测落盘可验证命中率（命中/未中/Brier）——预测可检验，非算命
+- **经验库（RAG）**（借鉴 PA_Agent 经验库）：每次分析自动沉淀，后续分析自动参考相似历史案例（含事后验证）
 - **理财专业 prompts**：估值分析 / 持仓体检 / 财报解读 / 投资备忘录
 - **QMT BrokerPort 骨架**：券商确认后接入实盘（风控 ID 不可绕过、订单幂等）
 
@@ -135,13 +140,13 @@ src/pa_mcp/
   portfolio/          # 组合（backtest 共享账本 / pipeline 信号→组合）
   engine/             # 策略（13 策略注册 / 指标 / 市场状态）
   risk/               # 风控（RiskGuard 纯函数 + 回撤分级）
-  agent/              # LLM（llm_port / anthropic / orchestrator）
+  agent/              # LLM（llm_port / anthropic / orchestrator / prediction / experience）
   execution/          # 交易（brokers 端口 + QMT 骨架）
   ui/                 # Web 界面（gradio_app）
-  server.py           # MCP Server（32+ 工具）
+  server.py           # MCP Server（49 工具）
 docs/capability-matrix.md   # 能力矩阵（真实状态）
 scripts/              # 工具脚本（bootstrap_universe 等）
-tests/                # 116 项测试
+tests/                # 146 项测试
 ```
 
 ---

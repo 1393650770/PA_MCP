@@ -1044,6 +1044,200 @@ def event_study_ui(symbol: str, strategy: str) -> str:
         return f"事件研究失败：{str(e)[:200]}"
 
 
+# ---- Tab: 市场预测（LLM 未来走势预测，借鉴 PA_Agent 机制） ----
+
+DIRECTION_ZH = {"up": "📈 看涨", "down": "📉 看跌", "sideways": "➡️ 震荡"}
+
+
+def predict_market_ui(symbol: str, horizon: str) -> str:
+    """市场预测：方向/概率/期望收益/关键价位/多场景 + 落盘验证。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        import asyncio
+        from pa_mcp.agent.prediction import get_prediction_service
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+
+        svc = get_prediction_service()
+        result = asyncio.run(svc.predict(symbol, df, horizon=horizon))
+        payload = result.to_dict()
+        pred_id = svc.save_prediction(result)  # 落盘供日后验证
+
+        dist = payload["probability_distribution"]
+        rng = payload["expected_range_pct"]
+        levels = payload["key_levels"]
+        scenarios = payload.get("scenarios") or []
+
+        lines = [
+            f"## 🔮 {symbol} 未来 {horizon} 走势预测",
+            f"**方向：{DIRECTION_ZH.get(payload['direction'], payload['direction'])}"
+            f"（概率 {payload['probability']:.0%}）**",
+            f"| 方向 | 概率 |",
+            "|---|---|",
+            f"| 📈 上涨 | {dist['up']:.0%} |",
+            f"| 📉 下跌 | {dist['down']:.0%} |",
+            f"| ➡️ 震荡 | {dist['sideways']:.0%} |",
+            "",
+            f"- **期望收益**：{payload['expected_return_pct']:+.1f}%"
+            f"（区间 {rng[0]:+.1f}% ~ {rng[1]:+.1f}%）",
+            f"- **周期位置**：{payload['cycle_position_zh']}"
+            f" → 预测 {payload['cycle_forecast_zh']}",
+            f"- **关键位**：支撑 {levels['support']} / 压力 {levels['resistance']}",
+            f"- **置信度**：{payload['confidence']:.0%}"
+            f"（模式：{'AI 解读' if payload['mode'] == 'llm' else '统计降级'}）",
+            "",
+            "### 情景推演",
+        ]
+        for s in scenarios:
+            lines.append(
+                f"- **{s.get('name', '情景')}**（{s.get('probability', 0):.0%}）："
+                f"{s.get('description', '')}（目标 {s.get('target_pct', 0):+.1f}%）")
+        lines.append("")
+        if payload.get("key_reasons"):
+            lines.append("**依据**：" + "；".join(payload["key_reasons"]))
+        if payload.get("key_risks"):
+            lines.append("**风险**：" + "；".join(payload["key_risks"]))
+        lines.append(
+            f"\n*已落盘（记录 #{pred_id}），到期后可在「预测验证」查看命中率。"
+            f"{payload['disclaimer']}*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"预测失败：{str(e)[:200]}"
+
+
+def prediction_history_ui(symbol: str) -> str:
+    """历史预测记录 + 验证状态。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        rows = get_prediction_service().prediction_history(symbol, limit=20)
+        if not rows:
+            return f"{symbol} 暂无预测记录"
+        lines = [f"## 📜 {symbol} 预测记录（最新 {len(rows)} 条）",
+                 "| 日期 | 周期 | 方向 | 概率 | 期望% | 模式 | 状态 | 实际% |",
+                 "|---|---|---|---|---|---|---|---|"]
+        status_zh = {"pending": "⏳ 待验证", "hit": "✅ 命中",
+                     "miss": "❌ 未中", "ambiguous": "⚠️ 模糊"}
+        for r in rows:
+            lines.append(
+                f"| {r['predict_date']} | {r['cycle_position']} | "
+                f"{DIRECTION_ZH.get(r['direction'], r['direction'])} | "
+                f"{r['probability']:.0%} | {r['expected_return_pct']:+.1f} | "
+                f"{'AI' if r['mode'] == 'llm' else '统计'} | "
+                f"{status_zh.get(r['status'], r['status'])} | "
+                f"{f'{r['actual_return_pct']:+.1f}%' if r['actual_return_pct'] is not None else '—'} |")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"查询失败：{str(e)[:200]}"
+
+
+def evaluate_predictions_ui() -> str:
+    """预测验证成绩单：命中率/方向一致率/分方向表现。"""
+    try:
+        import asyncio
+        from pa_mcp.agent.prediction import get_prediction_service
+        svc = get_prediction_service()
+
+        # 用数据库行情回填（无网络依赖）
+        summary = asyncio.run(svc.evaluate_predictions())
+        if summary["total_predictions"] == 0:
+            return "暂无预测记录。先在「预测」输入股票代码生成预测，到期后回来验证。"
+        lines = [f"## 🎯 预测验证成绩单（共 {summary['total_predictions']} 条，"
+                 f"已评估 {summary['evaluated']} 条）"]
+        if summary["evaluated"] == 0:
+            lines.append("\n尚无到期预测，请等待预测周期结束或生成更早的预测。")
+            return "\n".join(lines)
+        lines.extend([
+            f"- **总体命中率**：**{summary['hit_rate']:.0%}**",
+            f"- **方向一致率**（涨跌预测 vs 实际符号）："
+            f"{f'{summary['direction_agreement_pct']:.0%}' if summary['direction_agreement_pct'] is not None else '—'}",
+            f"- **平均实际收益**："
+            f"{f'{summary['avg_actual_return_pct']:+.2f}%' if summary['avg_actual_return_pct'] is not None else '—'}",
+            "",
+            "### 分方向表现",
+            "| 方向 | 数量 | 命中率 | 平均收益% |",
+            "|---|---|---|---|",
+        ])
+        for d, label in (("up", "看涨"), ("down", "看跌"), ("sideways", "震荡")):
+            info = summary["by_direction"].get(d)
+            if info:
+                lines.append(
+                    f"| {label} | {info['count']} | {info['hit_rate']:.0%} | "
+                    f"{info['avg_return_pct']:+.2f} |")
+        lines.append("\n*命中判定：看涨→实际涨、看跌→实际跌、震荡→|涨跌|≤1.5%。"
+                     "研究参考，非投资建议。*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"验证失败：{str(e)[:200]}"
+
+
+def market_diagnosis_ui() -> str:
+    """两阶段 Stage 1：市场诊断 + 策略路由（LLM 优先，确定性兜底）。"""
+    try:
+        import asyncio
+        from pa_mcp.agent.orchestrator import get_orchestrator
+
+        # 从数据库汇总市场指标（与 agent_market_state 一致）
+        market_context = {}
+        from pa_mcp.data.store import DuckDBStore
+        from pa_mcp.config import get_settings
+        store = DuckDBStore(get_settings().database.path)
+        store.connect()
+        try:
+            latest = store.get_latest_date("kline_daily")
+            if latest:
+                df = store.query_df("""
+                    SELECT
+                        COUNT(CASE WHEN pct_change >= 9.5 THEN 1 END) as limit_up,
+                        COUNT(CASE WHEN pct_change <= -9.5 THEN 1 END) as limit_down,
+                        COUNT(CASE WHEN pct_change > 0 THEN 1 END) as up_count,
+                        COUNT(CASE WHEN pct_change < 0 THEN 1 END) as down_count,
+                        SUM(amount) / 100000000.0 as turnover
+                    FROM kline_daily WHERE date = ?
+                """, [latest])
+                row = df.iloc[0]
+                market_context = {
+                    "limit_up_count": int(row["limit_up"]),
+                    "limit_down_count": int(row["limit_down"]),
+                    "up_count": int(row["up_count"]),
+                    "down_count": int(row["down_count"]),
+                    "turnover_billion": round(float(row["turnover"]), 1),
+                    "date": latest,
+                }
+        finally:
+            store.close()
+
+        orch = get_orchestrator()
+        d = asyncio.run(orch.market_diagnosis(market_context or None))
+        routing = d.get("strategy_routing", {})
+        lines = [
+            f"## 🧭 市场诊断（{d.get('market_state_zh', d.get('market_state', ''))}）",
+            f"- **风险等级**：{d.get('risk_level', '—')}"
+            f"（建议总仓位上限 {d.get('suggested_max_position_pct', '—')}%）",
+            f"- **判定依据**：{'；'.join(d.get('key_observations', [])) or '—'}",
+            "",
+            f"### 策略路由（{routing.get('label', '')}）",
+        ]
+        for s in routing.get("strategies", []):
+            from pa_mcp.engine.strategies.tips import get_strategy_tip
+            tip = get_strategy_tip(s) or ""
+            first_line = tip.split("\n")[0][:60] if tip else ""
+            lines.append(f"- **{s}**：{first_line}")
+        if routing.get("risk_notes"):
+            lines.append(f"\n**风险提示**：{routing['risk_notes']}")
+        mode = "（LLM 诊断）" if d.get("mode") != "deterministic" else "（确定性诊断，未配置 LLM）"
+        lines.append(f"\n*{mode}。研究参考，非投资建议。*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"诊断失败：{str(e)[:200]}"
+
+
 # ---- Tab 3: 策略回测 ----
 
 STRATEGY_OPTIONS = [
@@ -1616,6 +1810,35 @@ def build_app():
             bt_btn.click(run_backtest_ui,
                          inputs=[bt_sym, bt_strategy, bt_cash],
                          outputs=[bt_fig, bt_summary])
+
+        with gr.Tab("🔮 市场预测"):
+            gr.Markdown("**AI 未来走势预测**：基于 K 线技术特征预测方向/概率/关键价位，"
+                        "预测落盘可验证命中率（不做纯算命）。")
+            with gr.Row():
+                pred_sym = gr.Textbox(label="股票代码", value="000001", scale=2)
+                pred_horizon = gr.Radio(["5d", "20d"], value="5d",
+                                        label="预测周期", scale=1)
+                pred_btn = gr.Button("预测", variant="primary", scale=1)
+            pred_out = gr.Markdown()
+            pred_btn.click(predict_market_ui, inputs=[pred_sym, pred_horizon],
+                           outputs=[pred_out])
+            pred_sym.submit(predict_market_ui, inputs=[pred_sym, pred_horizon],
+                            outputs=[pred_out])
+
+            with gr.Row():
+                diag_btn = gr.Button("🧭 市场诊断 + 策略路由", variant="secondary")
+                evp_btn = gr.Button("🎯 预测验证成绩单", variant="secondary")
+            diag_out = gr.Markdown()
+            evp_out = gr.Markdown()
+            diag_btn.click(market_diagnosis_ui, outputs=[diag_out])
+            evp_btn.click(evaluate_predictions_ui, outputs=[evp_out])
+
+            hist_btn = gr.Button("📜 历史预测记录", variant="secondary")
+            hist_out = gr.Markdown()
+            hist_btn.click(prediction_history_ui, inputs=[pred_sym],
+                           outputs=[hist_out])
+            gr.Markdown("经验库说明：每次 AI 分析自动沉淀到经验库，"
+                        "后续分析自动参考相似历史案例（RAG）。")
 
         with gr.Tab("💼 组合管理"):
             with gr.Row():

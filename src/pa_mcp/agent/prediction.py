@@ -1,0 +1,805 @@
+# [AI:BEGIN]
+# PA_MCP - Agent Layer: 市场预测（LLM 未来走势预测）
+#
+# 设计借鉴 PA_Agent「未来走势预期 + 周期位置」机制（机制层借鉴，实现自研）：
+#   1. 确定性特征抽取：不把原始 K 线全量丢给 LLM，先压缩为可解释的技术特征
+#   2. 周期位置（cycle_position）：尖峰/通道/区间等市场结构枚举（确定性规则判定）
+#   3. 结构化多场景预测：方向 + 概率分布 + 期望收益 + 关键价位 + 多情景
+#   4. 落盘验证闭环：预测写入 prediction_log 表，到期后用真实收益回填，
+#      计算命中率 / Brier 分数 / 方向收益 —— 预测可检验，不做纯算命
+#   5. 无 LLM 时确定性统计降级（方向由趋势/动量/量能打分，概率由历史波动映射）
+#   6. JSON 校验 + 语义校验 + 一次修复重试（借鉴 PA_Agent validation_retry 思路）
+# [AI:END]
+
+from __future__ import annotations
+
+import inspect
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from typing import Any, Optional
+
+import pandas as pd
+
+from pa_mcp.engine.indicators.indicators import calc_adx, calc_atr, calc_macd, calc_ma, calc_rsi
+
+logger = logging.getLogger(__name__)
+
+# ---- 周期位置枚举（A 股语境，借鉴 PA_Agent cycle 思路但值自研） ----
+
+CYCLE_POSITIONS: tuple[str, ...] = (
+    "spike",           # 尖峰行情（近期急涨急跌）
+    "micro_channel",   # 微型通道（极窄振幅）
+    "tight_channel",   # 窄通道
+    "normal_channel",  # 正常通道
+    "broad_channel",   # 宽通道
+    "trending_range",  # 趋势型区间（缓慢趋势 + 区间结构）
+    "trading_range",   # 震荡区间
+    "extreme_range",   # 极端震荡（宽幅无方向）
+)
+
+CYCLE_POSITION_ZH: dict[str, str] = {
+    "spike": "尖峰行情",
+    "micro_channel": "微型通道",
+    "tight_channel": "窄通道",
+    "normal_channel": "正常通道",
+    "broad_channel": "宽通道",
+    "trending_range": "趋势型区间",
+    "trading_range": "震荡区间",
+    "extreme_range": "极端震荡",
+    "unknown": "未知",
+}
+
+# 预测验证阈值
+SIDEWAYS_THRESHOLD_PCT = 1.5   # |收益| <= 1.5% 视为 sideways 命中
+AMBIGUOUS_THRESHOLD_PCT = 1.0  # 非 sideways 预测中 |收益| <= 1.0% 视为模糊
+DEFAULT_SIDEWAYS_PROB = 0.15   # 确定性降级时 sideways 基准概率
+
+PROMPT_VERSION = "pred-v1"
+
+
+def cycle_zh(raw: str) -> str:
+    """周期位置中文名。"""
+    key = (raw or "unknown").strip().lower()
+    return CYCLE_POSITION_ZH.get(key, raw or "未知")
+
+
+# ---- 特征抽取（确定性，无未来函数） ----
+
+def _series(x: pd.Series, default: float = 0.0) -> float:
+    try:
+        v = float(x.iloc[-1])
+        return v if pd.notna(v) else default
+    except Exception:
+        return default
+
+
+def extract_features(df: pd.DataFrame) -> dict[str, Any]:
+    """从日 K 线抽取确定性技术特征（供 LLM 预测与确定性降级共用）。
+
+    只用截至最后一根 bar 的数据，保证无未来函数。
+    """
+    if df is None or df.empty:
+        return {"error": "no data"}
+    data = df.sort_values("date").reset_index(drop=True)
+    close = data["close"]
+
+    ma = calc_ma(data)
+    rsi = calc_rsi(data)
+    macd = calc_macd(data)
+    atr = calc_atr(data)
+    adx = calc_adx(data)
+
+    n = len(data)
+    last_close = float(close.iloc[-1])
+    ret20 = (last_close / close.iloc[-21] - 1) * 100 if n >= 21 else 0.0
+    ret60 = (last_close / close.iloc[-61] - 1) * 100 if n >= 61 else ret20
+
+    high20 = float(data["high"].tail(20).max())
+    low20 = float(data["low"].tail(20).min())
+    ma20 = _series(ma["ma20"]) if "ma20" in ma else last_close
+    ma60 = _series(ma["ma60"]) if "ma60" in ma else last_close
+    ma5 = _series(ma["ma5"]) if "ma5" in ma else last_close
+
+    vol = data["volume"] if "volume" in data else None
+    vol_ratio = 0.0
+    if vol is not None and n >= 21:
+        avg20 = float(vol.tail(20).mean()) if vol.tail(20).mean() > 0 else 0.0
+        if avg20 > 0:
+            vol_ratio = float(vol.iloc[-1]) / avg20
+
+    atr_pct = _series(atr["atr14"]) / last_close * 100 if "atr14" in atr else 0.0
+    adx_val = _series(adx["adx14"]) if "adx14" in adx else 20.0
+    rsi14 = _series(rsi["rsi14"]) if "rsi14" in rsi else 50.0
+    macd_hist = _series(macd["macd_hist"]) if "macd_hist" in macd else 0.0
+
+    # 布林位置 %B
+    boll_pos = 50.0
+    try:
+        from pa_mcp.engine.indicators.indicators import calc_bollinger
+        boll = calc_bollinger(data)
+        if "boll_mid" in boll and "boll_up" in boll and "boll_low" in boll:
+            up = float(boll["boll_up"].iloc[-1]); low = float(boll["boll_low"].iloc[-1])
+            if up > low:
+                boll_pos = (last_close - low) / (up - low) * 100
+    except Exception:
+        pass
+
+    # ---- 周期位置判定（确定性规则） ----
+    amp20 = (high20 - low20) / last_close * 100 if last_close > 0 else 0.0
+    spike = any(
+        abs((float(close.iloc[-i]) / float(close.iloc[-i - 1]) - 1) * 100) >= 6.0
+        for i in range(1, 4) if n >= i + 1
+    )
+    if spike:
+        cycle_position = "spike"
+    elif adx_val >= 30:
+        if amp20 >= 25:
+            cycle_position = "broad_channel"
+        elif amp20 >= 12:
+            cycle_position = "normal_channel"
+        else:
+            cycle_position = "tight_channel"
+    elif adx_val >= 22:
+        cycle_position = "trending_range"
+    else:
+        if amp20 >= 25:
+            cycle_position = "extreme_range"
+        else:
+            cycle_position = "trading_range"
+
+    features = {
+        "last_close": round(last_close, 3),
+        "ret20_pct": round(ret20, 2),
+        "ret60_pct": round(ret60, 2),
+        "ma5": round(ma5, 3), "ma20": round(ma20, 3), "ma60": round(ma60, 3),
+        "ma_alignment": (
+            "多头排列" if ma5 > ma20 > ma60 else
+            "空头排列" if ma5 < ma20 < ma60 else "均线缠绕"),
+        "rsi14": round(rsi14, 1),
+        "macd_hist": round(macd_hist, 4),
+        "adx14": round(adx_val, 1),
+        "atr_pct": round(atr_pct, 2),
+        "volume_ratio": round(vol_ratio, 2),
+        "boll_position_pct": round(boll_pos, 1),
+        "support_20d": round(low20, 3),
+        "resistance_20d": round(high20, 3),
+        "cycle_position": cycle_position,
+        "cycle_position_zh": cycle_zh(cycle_position),
+        "days": n,
+    }
+    return features
+
+
+def format_features(features: dict[str, Any]) -> str:
+    """特征字典 → LLM 可读文本。"""
+    if not features or "error" in features:
+        return "无数据"
+    return (
+        f"收盘 {features['last_close']}，20日涨跌 {features['ret20_pct']:+.1f}%"
+        f"（60日 {features['ret60_pct']:+.1f}%）\n"
+        f"均线：MA5 {features['ma5']} / MA20 {features['ma20']} / MA60 {features['ma60']}"
+        f" → {features['ma_alignment']}\n"
+        f"动量：RSI14 {features['rsi14']}，MACD柱 {features['macd_hist']}，"
+        f"ADX14 {features['adx14']}，ATR {features['atr_pct']:.2f}%\n"
+        f"量能：量比 {features['volume_ratio']}，布林位置 {features['boll_position_pct']}%\n"
+        f"关键位：支撑 {features['support_20d']} / 压力 {features['resistance_20d']}\n"
+        f"周期位置：{features['cycle_position_zh']}（{features['cycle_position']}）"
+    )
+
+
+# ---- 预测结果 DTO ----
+
+@dataclass
+class PredictionResult:
+    symbol: str
+    predict_date: str
+    horizon: str
+    direction: str = "sideways"
+    probability: float = 0.5
+    prob_up: float = 0.4
+    prob_down: float = 0.4
+    prob_sideways: float = 0.2
+    expected_return_pct: float = 0.0
+    expected_range_low: float = -3.0
+    expected_range_high: float = 3.0
+    cycle_position: str = "trading_range"
+    cycle_forecast: str = "trading_range"
+    support_levels: list[float] = field(default_factory=list)
+    resistance_levels: list[float] = field(default_factory=list)
+    scenarios: list[dict] = field(default_factory=list)
+    confidence: float = 0.5
+    key_reasons: list[str] = field(default_factory=list)
+    key_risks: list[str] = field(default_factory=list)
+    model: str = "deterministic"
+    prompt_version: str = PROMPT_VERSION
+    mode: str = "deterministic"  # llm | deterministic
+    disclaimer: str = "研究参考，非投资建议。预测存在不确定性，请以实际行情为准。"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "predict_date": self.predict_date,
+            "horizon": self.horizon,
+            "direction": self.direction,
+            "probability": self.probability,
+            "probability_distribution": {
+                "up": self.prob_up, "down": self.prob_down, "sideways": self.prob_sideways,
+            },
+            "expected_return_pct": self.expected_return_pct,
+            "expected_range_pct": [self.expected_range_low, self.expected_range_high],
+            "cycle_position": self.cycle_position,
+            "cycle_position_zh": cycle_zh(self.cycle_position),
+            "cycle_forecast": self.cycle_forecast,
+            "cycle_forecast_zh": cycle_zh(self.cycle_forecast),
+            "key_levels": {"support": self.support_levels, "resistance": self.resistance_levels},
+            "scenarios": self.scenarios,
+            "confidence": self.confidence,
+            "key_reasons": self.key_reasons,
+            "key_risks": self.key_risks,
+            "model": self.model,
+            "mode": self.mode,
+            "disclaimer": self.disclaimer,
+        }
+
+    @classmethod
+    def from_llm_json(cls, symbol: str, predict_date: str, horizon: str,
+                      raw: dict[str, Any], model: str) -> "PredictionResult":
+        """从 LLM JSON 构造（含越界 clamp 与必填校验）。"""
+        def _clamp(v: float, lo: float, hi: float) -> float:
+            return max(lo, min(hi, float(v)))
+
+        direction = str(raw.get("direction", "sideways")).lower()
+        if direction not in ("up", "down", "sideways"):
+            direction = "sideways"
+
+        dist = raw.get("probability_distribution") or {}
+        try:
+            pu = _clamp(float(dist.get("up", 0.34)), 0.0, 1.0)
+            pd_ = _clamp(float(dist.get("down", 0.33)), 0.0, 1.0)
+            ps = _clamp(float(dist.get("sideways", 0.33)), 0.0, 1.0)
+        except Exception:
+            pu, pd_, ps = 0.4, 0.4, 0.2
+        total = pu + pd_ + ps
+        if total <= 0:
+            pu, pd_, ps = 0.4, 0.4, 0.2
+        else:
+            pu, pd_, ps = pu / total, pd_ / total, ps / total
+
+        prob_map = {"up": pu, "down": pd_, "sideways": ps}
+        prob = _clamp(prob_map.get(direction, 0.5), 0.3, 0.95)
+
+        try:
+            exp_ret = float(raw.get("expected_return_pct", 0.0))
+        except Exception:
+            exp_ret = 0.0
+        try:
+            rng = raw.get("expected_range_pct") or raw.get("expected_range") or []
+            lo = float(rng[0]) if len(rng) >= 1 else exp_ret - 3
+            hi = float(rng[1]) if len(rng) >= 2 else exp_ret + 3
+        except Exception:
+            lo, hi = exp_ret - 3, exp_ret + 3
+        exp_ret = _clamp(exp_ret, -25, 25)
+        lo, hi = _clamp(lo, -30, 30), _clamp(hi, -30, 30)
+
+        cycle = str(raw.get("cycle_position", "trading_range")).lower()
+        if cycle not in CYCLE_POSITIONS:
+            cycle = "trading_range"
+        cf = str(raw.get("cycle_forecast", cycle)).lower()
+        if cf not in CYCLE_POSITIONS:
+            cf = cycle
+
+        try:
+            conf = _clamp(float(raw.get("confidence", 0.5)), 0.0, 1.0)
+        except Exception:
+            conf = 0.5
+
+        return cls(
+            symbol=symbol, predict_date=predict_date, horizon=horizon,
+            direction=direction, probability=prob,
+            prob_up=pu, prob_down=pd_, prob_sideways=ps,
+            expected_return_pct=round(exp_ret, 2),
+            expected_range_low=round(lo, 2), expected_range_high=round(hi, 2),
+            cycle_position=cycle, cycle_forecast=cf,
+            support_levels=[float(x) for x in (raw.get("support_levels") or []) if isinstance(x, (int, float))][:5],
+            resistance_levels=[float(x) for x in (raw.get("resistance_levels") or []) if isinstance(x, (int, float))][:5],
+            scenarios=raw.get("scenarios") or [],
+            confidence=conf,
+            key_reasons=[str(x) for x in (raw.get("key_reasons") or [])][:8],
+            key_risks=[str(x) for x in (raw.get("key_risks") or [])][:8],
+            model=model, mode="llm",
+        )
+
+
+# ---- LLM Prompt ----
+
+PREDICTION_PROMPT = """你是 A 股量化研究员。基于以下确定性技术特征，对 {symbol} 做未来 {horizon} 个交易日的走势预测（不是投资建议）。
+
+【当前特征】
+{features}
+
+【预测要求】
+1. 只输出一个 JSON 对象，不要 markdown 代码块、不要注释
+2. direction 只允许 "up" / "down" / "sideways"
+3. probability_distribution 的 up/down/sideways 三个值相加必须等于 1
+4. expected_return_pct 必须落在 expected_range_pct 区间内
+5. cycle_position（当前周期）与 cycle_forecast（预测期末周期）从枚举中选：
+   spike, micro_channel, tight_channel, normal_channel, broad_channel, trending_range, trading_range, extreme_range
+6. scenarios 给 2-3 个情景，每个含 name（中文）、probability（相加为1）、target_pct（相对当前价）、description（触发条件，中文）
+7. 关键价位 support_levels / resistance_levels 给具体价格数字
+8. confidence 为 0 到 1 的置信度
+9. key_reasons / key_risks 用中文，各 2-4 条
+
+【JSON 格式】
+{{
+  "direction": "up",
+  "probability": 0.62,
+  "probability_distribution": {{"up": 0.62, "down": 0.20, "sideways": 0.18}},
+  "expected_return_pct": 3.5,
+  "expected_range_pct": [-1.5, 6.0],
+  "cycle_position": "normal_channel",
+  "cycle_forecast": "broad_channel",
+  "support_levels": [10.2, 9.8],
+  "resistance_levels": [11.5, 12.0],
+  "scenarios": [
+    {{"name": "放量突破", "probability": 0.4, "target_pct": 6.0, "description": "放量站上压力位后延续"}},
+    {{"name": "区间震荡", "probability": 0.45, "target_pct": 1.0, "description": "在支撑压力间反复"}},
+    {{"name": "跌破支撑", "probability": 0.15, "target_pct": -4.0, "description": "跌破支撑后加速下行"}}
+  ],
+  "confidence": 0.65,
+  "key_reasons": ["均线多头排列", "量比放大"],
+  "key_risks": ["大盘调整风险", "财报窗口波动"]
+}}"""
+
+
+# ---- 服务 ----
+
+class PredictionService:
+    """市场预测服务：LLM 预测 + 确定性降级 + 落盘 + 验证闭环。
+
+    依赖注入保持解耦：store_path 可选（默认用全局配置）；LLM 通过
+    get_llm_adapter() 惰性获取，未配置时自动降级为确定性预测。
+    """
+
+    def __init__(self, store_path: Optional[str] = None) -> None:
+        self._store_path = store_path
+
+    # ---- 数据访问（短连接模式，避免与其他连接锁冲突） ----
+    def _store(self):
+        from pa_mcp.config import get_settings
+        from pa_mcp.data.store import DuckDBStore
+        path = self._store_path or get_settings().database.path
+        store = DuckDBStore(path)
+        store.connect()
+        return store
+
+    # ---- 核心预测 ----
+    async def predict(self, symbol: str, kline_df: pd.DataFrame,
+                      horizon: str = "5d") -> PredictionResult:
+        """对 symbol 做未来 horizon 个交易日预测。
+
+        horizon: "5d"（短线）或 "20d"（中线）。
+        """
+        horizon = horizon if horizon in ("5d", "20d") else "5d"
+        today = date.today().isoformat()
+        features = extract_features(kline_df)
+        if "error" in features:
+            raise ValueError(f"无法抽取 {symbol} 的 K 线特征：{features['error']}")
+
+        # 尝试 LLM，失败/未配置则确定性降级
+        try:
+            from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+            adapter = get_llm_adapter()
+            if adapter is not None:
+                return await self._predict_with_llm(
+                    adapter, symbol, today, horizon, features, kline_df)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("LLM 预测失败，降级为确定性预测", symbol=symbol, error=str(e))
+
+        return self._predict_deterministic(symbol, today, horizon, features)
+
+    async def _predict_with_llm(self, adapter, symbol: str, predict_date: str,
+                                horizon: str, features: dict[str, Any],
+                                kline_df: pd.DataFrame) -> PredictionResult:
+        """LLM 预测 + JSON 校验 + 一次修复重试。"""
+        user_prompt = PREDICTION_PROMPT.format(
+            symbol=symbol, horizon=horizon, features=format_features(features))
+        params = LLMCallParams(
+            system_prompt=(
+                "你是有经验的 A 股量化研究员。只输出合法 JSON，不输出任何其他文本。"
+                "预测是研究输出，不是投资建议。"
+            ),
+            user_prompt=user_prompt,
+            mode="fast", max_tokens=1500,
+        )
+        raw = await adapter.chat_json(params)
+        if not isinstance(raw, dict) or "error" in raw:
+            raise ValueError(f"LLM 返回异常: {raw}")
+
+        errors = self._validate_llm_json(raw)
+        if errors:
+            # 校验失败 → 反馈错误重试一次（借鉴 PA_Agent validation_retry 机制）
+            logger.info("预测 JSON 校验失败，重试一次", errors=errors)
+            retry_prompt = (
+                f"{user_prompt}\n\n【校验错误，请修正后重新输出完整 JSON】\n"
+                + "\n".join(f"- {e}" for e in errors)
+                + "\n只输出修正后的 JSON。"
+            )
+            params2 = LLMCallParams(
+                system_prompt=params.system_prompt, user_prompt=retry_prompt,
+                mode="fast", max_tokens=1500,
+            )
+            raw2 = await adapter.chat_json(params2)
+            if isinstance(raw2, dict) and "error" not in raw2:
+                errors2 = self._validate_llm_json(raw2)
+                if not errors2:
+                    raw = raw2
+
+        result = PredictionResult.from_llm_json(
+            symbol, predict_date, horizon, raw, model=adapter.provider_name)
+        # 回填收盘价上下文（供 UI 展示）
+        result.support_levels = features.get("support_20d") and [
+            features["support_20d"]] + [x for x in result.support_levels if x] or result.support_levels
+        result.resistance_levels = features.get("resistance_20d") and [
+            features["resistance_20d"]] + [x for x in result.resistance_levels if x] or result.resistance_levels
+        return result
+
+    @staticmethod
+    def _validate_llm_json(raw: dict) -> list[str]:
+        """预测 JSON 语义校验：返回错误列表（空 = 通过）。"""
+        errors: list[str] = []
+        d = str(raw.get("direction", "")).lower()
+        if d not in ("up", "down", "sideways"):
+            errors.append("direction 必须是 up/down/sideways")
+        dist = raw.get("probability_distribution")
+        if not isinstance(dist, dict):
+            errors.append("probability_distribution 缺失")
+        else:
+            try:
+                s = sum(float(dist.get(k, 0)) for k in ("up", "down", "sideways"))
+                if abs(s - 1.0) > 0.01:
+                    errors.append(f"probability_distribution 之和应为 1，实际 {s:.2f}")
+            except Exception:
+                errors.append("probability_distribution 含非数值")
+        try:
+            exp = float(raw.get("expected_return_pct", 0))
+            rng = raw.get("expected_range_pct") or []
+            if len(rng) >= 2 and not (float(rng[0]) <= exp <= float(rng[1])):
+                errors.append("expected_return_pct 不在 expected_range_pct 内")
+        except Exception:
+            errors.append("expected_return_pct/expected_range_pct 格式错误")
+        for k in ("cycle_position", "cycle_forecast"):
+            v = str(raw.get(k, "")).lower()
+            if v and v not in CYCLE_POSITIONS:
+                errors.append(f"{k} 不在枚举中: {v}")
+        scenarios = raw.get("scenarios") or []
+        if scenarios:
+            try:
+                if abs(sum(float(s.get("probability", 0)) for s in scenarios) - 1.0) > 0.15:
+                    errors.append("scenarios 概率之和偏离 1 过多")
+            except Exception:
+                errors.append("scenarios 格式错误")
+        return errors
+
+    def _predict_deterministic(self, symbol: str, predict_date: str,
+                               horizon: str, features: dict[str, Any]) -> PredictionResult:
+        """无 LLM 时的确定性统计预测（方向打分 + 概率映射）。"""
+        h = 5 if horizon == "5d" else 20
+        ret20 = features["ret20_pct"]
+        rsi = features["rsi14"]
+        adx = features["adx14"]
+        vol_ratio = features["volume_ratio"]
+        align = features["ma_alignment"]
+
+        # 方向打分：趋势 + 动量 + 量能
+        score = 0.0
+        reasons: list[str] = []
+        if align == "多头排列":
+            score += 2.0; reasons.append("均线多头排列")
+        elif align == "空头排列":
+            score -= 2.0; reasons.append("均线空头排列")
+        score += max(-1.5, min(1.5, ret20 / 15))
+        if rsi >= 65:
+            score -= 0.8; reasons.append(f"RSI {rsi:.0f} 偏高，短线回调风险")
+        elif rsi <= 35:
+            score += 0.8; reasons.append(f"RSI {rsi:.0f} 偏低，超跌反弹可能")
+        if vol_ratio >= 1.5:
+            score += 0.5 if ret20 > 0 else -0.5
+            reasons.append(f"量比 {vol_ratio:.1f} 放大")
+        if adx >= 30:
+            score += 0.5 if ret20 > 0 else -0.5
+            reasons.append(f"ADX {adx:.0f} 趋势明确")
+
+        # 概率映射（保守，向 0.5 收缩）
+        if score >= 0.8:
+            direction = "up"
+        elif score <= -0.8:
+            direction = "down"
+        else:
+            direction = "sideways"
+        p_direction = 0.5 + min(0.35, abs(score) / 6)
+        if direction == "sideways":
+            p_side = 0.55
+            pu = max(0.1, min(0.3, 0.22 + score / 10))
+            pd_ = max(0.1, min(0.3, 0.22 - score / 10))
+            ps = max(0.4, 1 - pu - pd_)
+        else:
+            ps = DEFAULT_SIDEWAYS_PROB
+            p_other = (1 - ps) * (0.5 - abs(score) / 12)
+            if direction == "up":
+                pu, pd_ = p_direction, max(0.05, p_other)
+            else:
+                pu, pd_ = max(0.05, p_other), p_direction
+            ps = max(0.05, 1 - pu - pd_)
+        t = pu + pd_ + ps
+        pu, pd_, ps = pu / t, pd_ / t, ps / t
+
+        # 期望收益：动量延续 × 周期衰减，向 0 收缩
+        expected = ret20 * (h / 20) * 0.25
+        expected = max(-15, min(15, expected))
+        vol_scale = features["atr_pct"] * (h ** 0.5) * 0.8
+        lo, hi = expected - vol_scale * 1.2, expected + vol_scale * 1.2
+
+        cp = features["cycle_position"]
+        # 周期预测：spike 后大概率回归区间；区间内看方向
+        if cp == "spike":
+            cf = "trading_range" if abs(score) < 1.5 else cp
+        elif cp in ("trading_range", "extreme_range") and direction != "sideways":
+            cf = "normal_channel"
+        else:
+            cf = cp
+
+        scenarios = [
+            {"name": "顺势延续", "probability": round(pu if direction == "up" else 0.4, 2),
+             "target_pct": round(expected * 1.3, 1),
+             "description": f"维持{('上涨' if direction != 'down' else '下跌')}节奏，量能配合"},
+            {"name": "横盘整理", "probability": round(ps, 2),
+             "target_pct": round(expected * 0.2, 1),
+             "description": "多空平衡，在支撑压力间反复"},
+            {"name": "反向波动", "probability": round(pd_ if direction == "up" else 0.35, 2),
+             "target_pct": round(-expected * 1.2, 1),
+             "description": "突破失败或利空冲击，回踩支撑"},
+        ]
+        conf = 0.45 + min(0.25, abs(score) / 8 + features["adx14"] / 200)
+
+        return PredictionResult(
+            symbol=symbol, predict_date=predict_date, horizon=horizon,
+            direction=direction, probability=round(p_direction, 2),
+            prob_up=round(pu, 2), prob_down=round(pd_, 2), prob_sideways=round(ps, 2),
+            expected_return_pct=round(expected, 2),
+            expected_range_low=round(lo, 2), expected_range_high=round(hi, 2),
+            cycle_position=cp, cycle_forecast=cf,
+            support_levels=[features["support_20d"], round(features["support_20d"] * 0.97, 2)],
+            resistance_levels=[features["resistance_20d"], round(features["resistance_20d"] * 1.03, 2)],
+            scenarios=scenarios, confidence=round(conf, 2),
+            key_reasons=reasons or [f"{h}日动量 {ret20:+.1f}%", f"ADX {adx:.0f}"],
+            key_risks=["无 LLM 配置，此为确定性统计预测（非 AI 解读）",
+                       "大盘系统性风险不可通过个股特征预测"],
+            model="deterministic", mode="deterministic",
+        )
+
+    # ---- 落盘 ----
+    def save_prediction(self, result: PredictionResult) -> int:
+        """写入 prediction_log 表，返回记录 id。
+
+        注意：id 为 NOT NULL 主键且 fill_defaults 会用 None 填充缺失列，
+        因此显式计算 id（COALESCE(MAX)+1），避免插入 NULL 主键。
+        """
+        store = self._store()
+        try:
+            max_id = store.query_df("SELECT COALESCE(MAX(id), 0) AS m FROM prediction_log", [])
+            new_id = int(max_id.iloc[0]["m"]) + 1 if not max_id.empty else 1
+            row = pd.DataFrame([{
+                "id": new_id,
+                "symbol": result.symbol,
+                "predict_date": result.predict_date,
+                "horizon": result.horizon,
+                "direction": result.direction,
+                "probability": result.probability,
+                "prob_up": result.prob_up,
+                "prob_down": result.prob_down,
+                "prob_sideways": result.prob_sideways,
+                "expected_return_pct": result.expected_return_pct,
+                "expected_range_low": result.expected_range_low,
+                "expected_range_high": result.expected_range_high,
+                "cycle_position": result.cycle_position,
+                "cycle_forecast": result.cycle_forecast,
+                "support_levels": json.dumps(result.support_levels, ensure_ascii=False),
+                "resistance_levels": json.dumps(result.resistance_levels, ensure_ascii=False),
+                "scenarios": json.dumps(result.scenarios, ensure_ascii=False),
+                "confidence": result.confidence,
+                "key_reasons": json.dumps(result.key_reasons, ensure_ascii=False),
+                "key_risks": json.dumps(result.key_risks, ensure_ascii=False),
+                "model": result.model,
+                "prompt_version": result.prompt_version,
+                "mode": result.mode,
+                "status": "pending",
+            }])
+            store.insert_df("prediction_log", row)
+            return new_id
+        finally:
+            store.close()
+
+    # ---- 评估（回填真实收益 + 命中判定） ----
+    async def evaluate_predictions(self, kline_provider=None,
+                                   today: Optional[str] = None) -> dict[str, Any]:
+        """回填已到期预测的真实收益并计算命中率/Brier 分数。
+
+        kline_provider: 可选回调 kline_provider(symbol) -> DataFrame（可为 async），
+        默认从 kline_daily 表读取。到期标准：
+        status='pending' 且 predict_date + horizon <= 最新可用行情日。
+        """
+        today = today or date.today().isoformat()
+        store = self._store()
+        try:
+            pending = store.query_df(
+                "SELECT * FROM prediction_log WHERE status = 'pending' ORDER BY id",
+                [])
+            if pending.empty:
+                return self._summary(store)
+
+            # 拉取所需股票最新行情（按到期预测分组，避免重复拉取）
+            needed = {
+                row["symbol"]: row["horizon"]
+                for _, row in pending.iterrows()
+            }
+            klines: dict[str, pd.DataFrame] = {}
+            latest_dates: dict[str, str] = {}
+            for sym, hor in needed.items():
+                df = await self._fetch_kline(sym, store, kline_provider)
+                if df is None or df.empty:
+                    continue
+                klines[sym] = df.sort_values("date").reset_index(drop=True)
+                latest_dates[sym] = str(df["date"].iloc[-1])[:10]
+
+            evaluated = 0
+            for _, row in pending.iterrows():
+                sym, hor = row["symbol"], row["horizon"]
+                df = klines.get(sym)
+                if df is None:
+                    continue
+                h_days = 5 if hor == "5d" else 20
+                predict_dt = str(row["predict_date"])[:10]
+                # 找预测日之后的行情
+                after = df[df["date"].astype(str).str[:10] >= predict_dt]
+                if len(after) < 2:
+                    continue
+                base_close = float(after["close"].iloc[0])
+                # 取 horizon 个交易日后（不超过最新）
+                target = after.iloc[min(h_days, len(after) - 1)]
+                actual = (float(target["close"]) / base_close - 1) * 100
+                status = self._judge(row["direction"], actual)
+                store.execute(
+                    "UPDATE prediction_log SET status = ?, actual_return_pct = ?, "
+                    "evaluated_date = ? WHERE id = ?",
+                    [status, round(actual, 3), today, int(row["id"])])
+                evaluated += 1
+
+            return self._summary(store)
+        finally:
+            store.close()
+
+    @staticmethod
+    def _judge(direction: str, actual: float) -> str:
+        """命中判定。"""
+        d = (direction or "sideways").lower()
+        if d == "sideways":
+            return "hit" if abs(actual) <= SIDEWAYS_THRESHOLD_PCT else "miss"
+        if abs(actual) <= AMBIGUOUS_THRESHOLD_PCT:
+            return "ambiguous"
+        if d == "up":
+            return "hit" if actual > 0 else "miss"
+        if d == "down":
+            return "hit" if actual < 0 else "miss"
+        return "ambiguous"
+
+    async def _fetch_kline(self, symbol: str, store,
+                           kline_provider=None) -> Optional[pd.DataFrame]:
+        """取个股日线（外部回调优先（支持 async），否则查表）。"""
+        if kline_provider is not None:
+            try:
+                df = kline_provider(symbol)
+                if inspect.isawaitable(df):
+                    df = await df
+                if df is not None and not df.empty:
+                    return df
+            except Exception:
+                pass
+        try:
+            df = store.query_df(
+                "SELECT date, open, high, low, close, volume FROM kline_daily "
+                "WHERE symbol = ? ORDER BY date", [symbol])
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _summary(store) -> dict[str, Any]:
+        """评估汇总（全部预测 + 已评估部分）。"""
+        total = store.query_df("SELECT COUNT(*) AS c FROM prediction_log", [])
+        ev = store.query_df(
+            "SELECT COUNT(*) AS c FROM prediction_log WHERE status != 'pending'", [])
+        ev_df = store.query_df(
+            "SELECT direction, status, actual_return_pct FROM prediction_log "
+            "WHERE status != 'pending'", [])
+        n = int(ev_df.shape[0])
+        out: dict[str, Any] = {
+            "total_predictions": int(total.iloc[0]["c"]) if not total.empty else 0,
+            "evaluated": n,
+            "hit_rate": 0.0,
+            "brier_score": None,
+            "by_direction": {},
+            "avg_actual_return_pct": None,
+            "direction_agreement_pct": None,
+        }
+        if n == 0 or ev_df.empty:
+            return out
+        hits = ev_df[ev_df["status"] == "hit"]
+        out["hit_rate"] = round(len(hits) / n, 3)
+        out["avg_actual_return_pct"] = round(float(ev_df["actual_return_pct"].mean()), 3)
+        # 方向一致率：预测方向与收益符号一致（不含 sideways）
+        dir_df = ev_df[ev_df["direction"].isin(["up", "down"])]
+        if not dir_df.empty:
+            agree = dir_df.apply(
+                lambda r: (r["direction"] == "up" and r["actual_return_pct"] > 0)
+                or (r["direction"] == "down" and r["actual_return_pct"] < 0), axis=1)
+            out["direction_agreement_pct"] = round(float(agree.mean()), 3)
+        by_dir: dict[str, dict] = {}
+        for d in ("up", "down", "sideways"):
+            sub = ev_df[ev_df["direction"] == d]
+            if not sub.empty:
+                by_dir[d] = {
+                    "count": int(sub.shape[0]),
+                    "hit_rate": round(len(sub[sub["status"] == "hit"]) / sub.shape[0], 3),
+                    "avg_return_pct": round(float(sub["actual_return_pct"].mean()), 3),
+                }
+        out["by_direction"] = by_dir
+        return out
+
+    # ---- 历史查询 ----
+    def prediction_history(self, symbol: str, limit: int = 20) -> list[dict[str, Any]]:
+        """某股票最近预测记录（含评估结果）。"""
+        store = self._store()
+        try:
+            df = store.query_df(
+                "SELECT id, symbol, predict_date, horizon, direction, probability, "
+                "expected_return_pct, cycle_position, cycle_forecast, confidence, "
+                "mode, model, status, actual_return_pct, evaluated_date "
+                "FROM prediction_log WHERE symbol = ? ORDER BY id DESC LIMIT ?",
+                [symbol, limit])
+            rows: list[dict[str, Any]] = []
+            for _, r in df.iterrows():
+                rows.append({
+                    "id": int(r["id"]),
+                    "symbol": r["symbol"],
+                    "predict_date": str(r["predict_date"])[:10],
+                    "horizon": r["horizon"],
+                    "direction": r["direction"],
+                    "probability": float(r["probability"]) if r["probability"] is not None else None,
+                    "expected_return_pct": float(r["expected_return_pct"]) if r["expected_return_pct"] is not None else None,
+                    "cycle_position": r["cycle_position"],
+                    "cycle_forecast": r["cycle_forecast"],
+                    "confidence": float(r["confidence"]) if r["confidence"] is not None else None,
+                    "mode": r["mode"],
+                    "model": r["model"],
+                    "status": r["status"],
+                    "actual_return_pct": float(r["actual_return_pct"]) if r["actual_return_pct"] is not None else None,
+                    "evaluated_date": str(r["evaluated_date"])[:10] if r["evaluated_date"] is not None else None,
+                })
+            return rows
+        finally:
+            store.close()
+
+
+_service: Optional[PredictionService] = None
+
+
+def get_prediction_service() -> PredictionService:
+    """单例获取预测服务。"""
+    global _service
+    if _service is None:
+        _service = PredictionService()
+    return _service

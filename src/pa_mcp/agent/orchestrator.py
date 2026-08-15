@@ -139,6 +139,53 @@ Output JSON:
 }"""
 
 
+# ---- 市场状态 → 策略路由（两阶段：诊断 → 路由 → 决策） ----
+
+MARKET_STATE_STRATEGY_ROUTING: dict[str, dict[str, list[str]]] = {
+    "climax": {
+        "label": "高潮期——情绪亢奋，跟随强势，注意止盈",
+        "strategies": ["volume_price_momentum", "first_board_breakout",
+                       "platform_breakout", "dragon_second_wave"],
+        "risk_notes": "追高风险大，仓位上限收紧，避免追最后一棒",
+    },
+    "fermenting": {
+        "label": "发酵期——赚钱效应扩散，趋势与波段并重",
+        "strategies": ["ma_golden_cross", "volume_price_momentum",
+                       "platform_breakout", "macd_divergence_swing"],
+        "risk_notes": "参与度高，注意板块轮动节奏",
+    },
+    "starting": {
+        "label": "启动期——底部回暖，左侧布局与反转为主",
+        "strategies": ["oversold_bounce", "bollinger_mean_reversion",
+                       "macd_divergence_swing"],
+        "risk_notes": "确认信号再进场，避免过早重仓",
+    },
+    "dull": {
+        "label": "低迷期——量能萎缩，防御优先",
+        "strategies": ["roe_pb_value", "range_grid", "bollinger_mean_reversion"],
+        "risk_notes": "降低仓位，以低波动标的为主",
+    },
+    "frozen": {
+        "label": "冰点期——空头主导，空仓观望",
+        "strategies": ["roe_pb_value", "oversold_bounce"],
+        "risk_notes": "严格限制仓位，等待情绪修复信号",
+    },
+}
+
+MARKET_STATE_ZH: dict[str, str] = {
+    "climax": "高潮期", "fermenting": "发酵期", "starting": "启动期",
+    "dull": "低迷期", "frozen": "冰点期",
+}
+
+
+def route_strategy_by_market_state(market_state: str) -> dict[str, Any]:
+    """市场状态 → 策略路由建议（确定性规则，供诊断/UI/MCP 复用）。"""
+    return MARKET_STATE_STRATEGY_ROUTING.get(
+        market_state,
+        MARKET_STATE_STRATEGY_ROUTING["dull"] | {"_unknown_state": market_state},
+    )
+
+
 # ---- Aggregated Analysis Prompt (Fast Mode) ----
 
 FAST_ANALYSIS_PROMPT = """You are a seasoned A-share quantitative analyst.
@@ -203,6 +250,8 @@ class AnalysisResult:
     analysis_time_ms: float = 0.0
     token_used: int = 0
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    # 两阶段分析：市场诊断结果（Stage 1 输出，注入分析 prompt）
+    market_diagnosis: Optional[dict] = None
 
 
 class AgentOrchestrator:
@@ -228,6 +277,9 @@ class AgentOrchestrator:
         # Compress kline data into a text summary
         kline_summary = self._summarize_kline(kline_df)
 
+        # RAG 增强：注入历史参考案例（同标的最近分析结论 + 事后验证）
+        history_text = self._build_experience_context(symbol)
+
         # Build the prompt
         user_prompt = FAST_ANALYSIS_PROMPT.format(
             symbol=symbol,
@@ -238,6 +290,8 @@ class AgentOrchestrator:
             event_summary=fundamental_data.get("events", "No major events") if fundamental_data else "No major events",
             market_state=market_state or "unknown",
         )
+        if history_text:
+            user_prompt += f"\n\n{history_text}"
 
         # Try new adapter first, fall back to legacy client
         from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
@@ -277,7 +331,178 @@ class AgentOrchestrator:
             result.risk_reward_assessment = response.get("risk_reward_assessment", "neutral")
             result.suggested_max_position_pct = response.get("suggested_max_position_pct", 0)
 
+        # 自动写入经验库（best-effort，不影响主流程）
+        self._save_to_experience(symbol, result)
         return result
+
+    # ---- 两阶段：市场诊断（Stage 1） ----
+
+    async def market_diagnosis(self, market_context: Optional[dict] = None) -> Optional[dict]:
+        """Stage 1 市场诊断：判断市场状态 + 给出策略路由建议。
+
+        market_context: 可选的市场观测（涨停数/成交额/北向/指数均线等原始数据），
+        由调用方提供（如 agent_market_state 的上下文）。无 LLM 时返回确定性诊断。
+        """
+        from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+        adapter = get_llm_adapter()
+        if adapter is None:
+            return self._diagnosis_deterministic(market_context)
+
+        ctx = "未提供市场观测数据" if not market_context else str(market_context)[:1500]
+        params = LLMCallParams(
+            system_prompt=(
+                "你是有经验的 A 股市场策略师。只输出合法 JSON。"
+                "输出是研究参考，不是投资建议。"
+            ),
+            user_prompt=(
+                f"{MARKET_STATE_ANALYST_PROMPT}\n\n【市场观测】\n{ctx}"
+            ),
+            mode="fast", max_tokens=600,
+        )
+        raw = await self._chat_json_with_retry(
+            adapter, params, self._validate_diagnosis_json)
+        if raw is None:
+            return self._diagnosis_deterministic(market_context)
+
+        state = str(raw.get("market_state", "dull")).lower()
+        if state not in MARKET_STATE_STRATEGY_ROUTING:
+            state = "dull"
+        routing = route_strategy_by_market_state(state)
+        diagnosis = {
+            "market_state": state,
+            "market_state_zh": MARKET_STATE_ZH[state],
+            "confidence": raw.get("confidence", 60),
+            "suggested_max_position_pct": raw.get("suggested_max_position_pct", 50),
+            "risk_level": raw.get("risk_level", "medium"),
+            "key_observations": raw.get("key_observations", []),
+            "strategy_routing": routing,
+        }
+        return diagnosis
+
+    @staticmethod
+    def _diagnosis_deterministic(market_context: Optional[dict]) -> dict:
+        """无 LLM 时的确定性诊断（基于成交额/涨跌统计，不编造）。"""
+        state, notes = "dull", []
+        try:
+            if isinstance(market_context, dict):
+                turnover = float(market_context.get("turnover_billion", 0) or 0)
+                limit_up = int(market_context.get("limit_up_count", 0) or 0)
+                limit_down = int(market_context.get("limit_down_count", 0) or 0)
+                if limit_down > 30 or turnover < 400:
+                    state = "frozen"
+                    notes = [f"跌停 {limit_down} 家/成交额 {turnover:.0f} 亿，冰点特征"]
+                elif turnover >= 1500 or limit_up > 80:
+                    state = "climax"
+                    notes = [f"成交额 {turnover:.0f} 亿/涨停 {limit_up} 家，情绪亢奋"]
+                elif limit_up >= 40 or turnover >= 800:
+                    state = "fermenting"
+                    notes = [f"成交额 {turnover:.0f} 亿/涨停 {limit_up} 家，赚钱效应扩散"]
+                elif limit_up >= 15:
+                    state = "starting"
+                    notes = [f"涨停 {limit_up} 家，局部回暖"]
+                else:
+                    notes = [f"成交额 {turnover:.0f} 亿/涨停 {limit_up} 家，市场低迷"]
+        except Exception:
+            notes = ["无可靠市场观测数据，保守判定低迷期"]
+        return {
+            "market_state": state,
+            "market_state_zh": MARKET_STATE_ZH[state],
+            "confidence": 55,
+            "suggested_max_position_pct": 30 if state == "dull" else 50,
+            "risk_level": "high" if state in ("frozen", "climax") else "medium",
+            "key_observations": notes,
+            "strategy_routing": route_strategy_by_market_state(state),
+            "mode": "deterministic",
+        }
+
+    @staticmethod
+    def _validate_diagnosis_json(raw: dict) -> list[str]:
+        errors = []
+        if str(raw.get("market_state", "")).lower() not in MARKET_STATE_STRATEGY_ROUTING:
+            errors.append("market_state 必须是 climax/fermenting/starting/dull/frozen")
+        try:
+            conf = float(raw.get("confidence", -1))
+            if not (0 <= conf <= 100):
+                errors.append("confidence 应为 0-100")
+        except Exception:
+            errors.append("confidence 非数值")
+        return errors
+
+    # ---- JSON 校验 + 重试（借鉴 PA_Agent validation_retry 机制） ----
+
+    @staticmethod
+    async def _chat_json_with_retry(adapter, params: Any,
+                                     validate_fn, max_retries: int = 1) -> Optional[dict]:
+        """chat_json + 校验；校验失败把错误反馈给 LLM 重试。
+
+        返回 None 表示最终失败（调用方自行降级）。
+        """
+        from pa_mcp.agent.llm_port import LLMCallParams
+        raw = await adapter.chat_json(params)
+        if not isinstance(raw, dict) or "error" in raw:
+            return None
+        errors = validate_fn(raw)
+        if not errors:
+            return raw
+        retry = 0
+        while retry < max_retries:
+            retry += 1
+            retry_params = LLMCallParams(
+                system_prompt=params.system_prompt,
+                user_prompt=(
+                    f"{params.user_prompt}\n\n【校验失败，请修正后重新输出完整 JSON】\n"
+                    + "\n".join(f"- {e}" for e in errors)
+                    + "\n只输出修正后的 JSON。"
+                ),
+                mode=params.mode, max_tokens=params.max_tokens,
+            )
+            raw2 = await adapter.chat_json(retry_params)
+            if not isinstance(raw2, dict) or "error" in raw2:
+                continue
+            errors2 = validate_fn(raw2)
+            if not errors2:
+                return raw2
+        return None
+
+    @staticmethod
+    def _validate_analyst_json(raw: dict) -> list[str]:
+        errors = []
+        try:
+            s = float(raw.get("strength_score", -1))
+            if not (0 <= s <= 100):
+                errors.append("strength_score 应为 0-100")
+        except Exception:
+            errors.append("strength_score 非数值")
+        return errors
+
+    @staticmethod
+    def _validate_pm_json(raw: dict) -> list[str]:
+        errors = []
+        if str(raw.get("direction", "")).lower() not in ("bullish", "bearish", "neutral"):
+            errors.append("direction 必须是 bullish/bearish/neutral")
+        try:
+            s = float(raw.get("overall_strength_score", -1))
+            if not (0 <= s <= 100):
+                errors.append("overall_strength_score 应为 0-100")
+        except Exception:
+            errors.append("overall_strength_score 非数值")
+        return errors
+
+    # ---- 两阶段组合入口：诊断 → 深度分析 ----
+
+    async def analyze_with_diagnosis(
+        self, symbol: str, kline_df: pd.DataFrame,
+        market_context: Optional[dict] = None,
+        **kwargs,
+    ) -> AnalysisResult:
+        """两阶段分析：Stage 1 市场诊断 → Stage 2 深度分析（诊断注入）。
+
+        诊断结论（市场状态 + 策略路由）写入 AnalysisResult.market_diagnosis，
+        并注入 5 位分析师的 prompt 作为市场环境上下文。
+        """
+        diagnosis = await self.market_diagnosis(market_context)
+        kwargs["diagnosis"] = diagnosis
+        return await self.deep_analyze(symbol, kline_df, **kwargs)
 
     # 分析师角色配置（借鉴 ai-hedge-fund 的多 agent 模式）
     ANALYSTS = [
@@ -324,12 +549,13 @@ DO NOT output buy/sell. Output scores and evidence only."""
         fundamental_data: Optional[dict] = None,
         event_data: Optional[dict] = None,
         market_state: Optional[str] = None,
+        diagnosis: Optional[dict] = None,
     ) -> AnalysisResult:
         """Deep mode: 5 parallel LLM analysts + portfolio manager synthesis.
 
-        Stage 1: Parallel data summary (deterministic)
-        Stage 2: 5 analysts in parallel (asyncio.gather)
-        Stage 3: Portfolio manager synthesis
+        Stage 1: Market diagnosis (optional, via analyze_with_diagnosis)
+        Stage 2: 5 analysts in parallel (asyncio.gather) with JSON retry
+        Stage 3: Portfolio manager synthesis (with JSON retry)
         Stage 4: RiskGuard clamp (position cap)
         """
         t0 = datetime.now()
@@ -339,21 +565,35 @@ DO NOT output buy/sell. Output scores and evidence only."""
         adapter = _get_adapter()
         if adapter is None:
             # 无 LLM → 降级为确定性规则分析（不返回空占位）
-            return self._rule_based_deep(symbol, kline_df, market_state, fundamental_data)
+            result = self._rule_based_deep(symbol, kline_df, market_state, fundamental_data)
+            result.market_diagnosis = diagnosis
+            return result
 
         from pa_mcp.agent.llm_port import LLMCallParams
 
         kline_summary = self._summarize_kline(kline_df)
 
-        # Stage 2: 5 分析师并行
+        # 市场环境上下文（诊断注入：市场状态 + 策略路由）
+        env_context = ""
+        if diagnosis:
+            env_context = (
+                f"【市场环境】状态：{diagnosis.get('market_state_zh', diagnosis.get('market_state', ''))}"
+                f"，风险等级：{diagnosis.get('risk_level', '')}"
+                f"，建议总仓位上限：{diagnosis.get('suggested_max_position_pct', '')}%"
+            )
+
+        # Stage 2: 5 分析师并行（JSON 校验 + 一次重试）
         async def run_analyst(dim: str, prompt: str, data_builder) -> tuple[str, dict]:
             user_data = data_builder(kline_summary, capital_flow, dragon_tiger,
                                      fundamental_data, event_data, market_state)
+            if env_context:
+                user_data = f"{env_context}\n{user_data}"
             params = LLMCallParams(
                 system_prompt=prompt, user_prompt=user_data,
                 mode="fast", max_tokens=800,
             )
-            resp = await adapter.chat_json(params)
+            resp = await self._chat_json_with_retry(
+                adapter, params, self._validate_analyst_json)
             return dim, resp
 
         results = await asyncio.gather(*[
@@ -372,19 +612,24 @@ DO NOT output buy/sell. Output scores and evidence only."""
         if not analyst_results:
             return self._rule_based_deep(symbol, kline_df, market_state, fundamental_data)
 
-        # Stage 3: 组合经理汇总
+        # Stage 3: 组合经理汇总（RAG 增强：注入历史参考案例）
         analyst_text = "\n".join(
             f"[{dim}] 分数={data.get('strength_score', 50)} "
             f"风险={data.get('risks', [])}"
             for dim, data in analyst_results.items()
         )
+        history_text = self._build_experience_context(symbol)
+        pm_user = f"请对 {symbol} 做综合决策"
+        if history_text:
+            pm_user += f"\n\n{history_text}"
         pm_params = LLMCallParams(
             system_prompt=self.PORTFOLIO_MANAGER_PROMPT.format(
                 symbol=symbol, analyst_results=analyst_text),
-            user_prompt=f"请对 {symbol} 做综合决策",
+            user_prompt=pm_user,
             mode="deep", max_tokens=1200,
         )
-        pm_resp = await adapter.chat_json(pm_params)
+        pm_resp = await self._chat_json_with_retry(
+            adapter, pm_params, self._validate_pm_json)
 
         result = AnalysisResult(
             symbol=symbol,
@@ -394,6 +639,7 @@ DO NOT output buy/sell. Output scores and evidence only."""
             ) if analyst_results else 0,
             analysis_time_ms=(datetime.now() - t0).total_seconds() * 1000,
         )
+        result.market_diagnosis = diagnosis
 
         if isinstance(pm_resp, dict) and "error" not in pm_resp:
             result.overall_strength_score = float(pm_resp.get("overall_strength_score", 50))
@@ -416,6 +662,9 @@ DO NOT output buy/sell. Output scores and evidence only."""
             result.direction = "bullish" if result.overall_strength_score >= 60 else (
                 "bearish" if result.overall_strength_score <= 40 else "neutral")
             result.suggested_max_position_pct = 5.0
+
+        # 自动写入经验库（best-effort）
+        self._save_to_experience(symbol, result)
 
         logger.info(
             "Deep analysis complete",
@@ -489,6 +738,32 @@ DO NOT output buy/sell. Output scores and evidence only."""
             f"Trend: {'up' if close[-1] > ma20 else 'down'}."
         )
         return summary
+
+    # ---- 经验库（RAG 增强） ----
+
+    @staticmethod
+    def _build_experience_context(symbol: str) -> str:
+        """检索同标的历史分析案例，格式化为 prompt 注入文本。"""
+        try:
+            from pa_mcp.agent.experience import get_experience_service
+            entries = get_experience_service().search_experience(symbol=symbol, limit=5)
+            if not entries:
+                return ""
+            # 优先展示已有事后验证的案例
+            entries.sort(key=lambda e: e.outcome != "pending")
+            return get_experience_service().format_experience(entries, limit=5)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("experience context unavailable", error=str(e))
+            return ""
+
+    @staticmethod
+    def _save_to_experience(symbol: str, result) -> None:
+        """分析完成后自动落盘经验库（best-effort，异常不影响主流程）。"""
+        try:
+            from pa_mcp.agent.experience import get_experience_service
+            get_experience_service().save_analysis(symbol, result)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("save to experience failed", symbol=symbol, error=str(e))
 
 
 # Global orchestrator instance

@@ -83,10 +83,16 @@ class LLMPort(abc.ABC):
 _adapter: Optional[LLMPort] = None
 
 
-def register_adapter(adapter: LLMPort) -> None:
-    """Set the global LLM adapter (called once at startup)."""
+def register_adapter(adapter: Optional[LLMPort]) -> None:
+    """Set the global LLM adapter (called once at startup).
+
+    None 会清除当前 adapter（测试隔离/热切换时使用）。
+    """
     global _adapter
     _adapter = adapter
+    if adapter is None:
+        logger.info("LLM adapter cleared")
+        return
     logger.info("LLM adapter registered", provider=adapter.provider_name)
 
 

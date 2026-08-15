@@ -1639,6 +1639,162 @@ async def agent_market_state() -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
+# ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def predict_market(symbol: str, horizon: Literal["5d", "20d"] = "5d",
+                         save: bool = True) -> dict[str, Any]:
+    """AI 市场预测：基于 K 线技术特征预测未来走势方向与概率。
+
+    借鉴 PA_Agent「未来走势预期」机制：周期位置 + 方向概率 + 期望收益 +
+    关键价位 + 多场景。有 LLM 配置时由 LLM 预测（JSON 校验+重试），
+    无 LLM 时降级为确定性统计预测。预测写入 prediction_log 表，
+    到期后可用 evaluate_predictions() 验证命中率——预测可检验，非算命。
+
+    Args:
+        symbol: 股票代码（如 '000001'）
+        horizon: 预测周期 '5d'（短线）或 '20d'（中线）
+        save: 是否落盘以便日后验证
+    """
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 160",
+                    [symbol],
+                )
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            # 尝试多源实时抓取兜底
+            df, _ = await _get_kline_fallback(symbol, days=160)
+            if df is not None and not df.empty:
+                kline_df = df
+
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        svc = get_prediction_service()
+        result = await svc.predict(symbol, kline_df, horizon=horizon)
+        payload = result.to_dict()
+        if save:
+            payload["prediction_id"] = svc.save_prediction(result)
+        return _response(data=payload)
+    except Exception as e:
+        logger.error("predict_market failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def prediction_history(symbol: str, limit: int = 20) -> dict[str, Any]:
+    """查看某股票的历史预测记录与验证结果（方向/概率/实际收益/命中状态）。"""
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        rows = get_prediction_service().prediction_history(symbol, limit=limit)
+        return _response(data={"symbol": symbol, "predictions": rows, "count": len(rows)})
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def evaluate_predictions() -> dict[str, Any]:
+    """验证历史预测：回填已到期预测的真实收益，计算命中率/Brier/方向一致率。
+
+    这是预测功能的「成绩单」——检验 AI 预测是否优于随机。
+    """
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        svc = get_prediction_service()
+
+        # 用真实数据库 + 多源 router 兜底拉行情
+        async def _provider(symbol: str):
+            try:
+                df, _ = await _get_kline_fallback(symbol, days=60)
+                return df
+            except Exception:
+                return None
+
+        summary = svc.evaluate_predictions(kline_provider=_provider)
+        return _response(data=summary)
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def agent_market_diagnosis() -> dict[str, Any]:
+    """两阶段分析 Stage 1：LLM 市场诊断 + 策略路由。
+
+    用真实市场指标（涨停/跌停/成交额/涨跌家数）驱动 LLM 判定市场状态
+    （高潮/发酵/启动/低迷/冰点），并给出对应策略路由与仓位上限。
+    无 LLM 时使用确定性诊断。
+    """
+    try:
+        from pa_mcp.agent.orchestrator import get_orchestrator
+
+        market_context: dict[str, Any] = {}
+        if _store:
+            try:
+                latest = _store.get_latest_date("kline_daily")
+                if latest:
+                    df = _store.query_df("""
+                        SELECT
+                            COUNT(CASE WHEN pct_change >= 9.5 THEN 1 END) as limit_up,
+                            COUNT(CASE WHEN pct_change <= -9.5 THEN 1 END) as limit_down,
+                            COUNT(CASE WHEN pct_change > 0 THEN 1 END) as up_count,
+                            COUNT(CASE WHEN pct_change < 0 THEN 1 END) as down_count,
+                            SUM(amount) / 100000000.0 as turnover
+                        FROM kline_daily WHERE date = ?
+                    """, [latest])
+                    row = df.iloc[0]
+                    market_context = {
+                        "limit_up_count": int(row["limit_up"]),
+                        "limit_down_count": int(row["limit_down"]),
+                        "up_count": int(row["up_count"]),
+                        "down_count": int(row["down_count"]),
+                        "turnover_billion": round(float(row["turnover"]), 1),
+                        "date": latest,
+                    }
+            except Exception:
+                pass
+
+        orch = get_orchestrator()
+        diagnosis = await orch.market_diagnosis(market_context or None)
+        return _response(data=diagnosis)
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def agent_experience_search(symbol: str = "", cycle_position: str = "",
+                                  direction: str = "", limit: int = 5) -> dict[str, Any]:
+    """经验库检索（RAG）：按符号/周期位置/方向检索历史 AI 分析案例。
+
+    案例含事后验证（hit/miss/实际收益），可注入其他分析 prompt 作参考。
+    周期位置枚举：spike/micro_channel/tight_channel/normal_channel/
+    broad_channel/trending_range/trading_range/extreme_range
+    """
+    try:
+        from pa_mcp.agent.experience import get_experience_service
+        svc = get_experience_service()
+        entries = svc.search_experience(
+            symbol=symbol or None,
+            cycle_position=cycle_position or None,
+            direction=direction or None,
+            limit=limit,
+        )
+        return _response(data={
+            "entries": [e.__dict__ for e in entries],
+            "count": len(entries),
+            "prompt_text": svc.format_experience(entries, limit=limit),
+        })
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
 # ---- MCP Tools: Comprehensive Analysis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})

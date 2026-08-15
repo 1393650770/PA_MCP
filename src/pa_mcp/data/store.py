@@ -218,6 +218,60 @@ TABLE_DEFINITIONS: dict[str, str] = {
             PRIMARY KEY (symbol, trade_date)
         )
     """,
+
+    # 经验库：AI 分析历史（供检索增强注入 prompt）
+    "analysis_history": """
+        CREATE TABLE IF NOT EXISTS analysis_history (
+            id INTEGER PRIMARY KEY,
+            symbol VARCHAR(10) NOT NULL,
+            analyzed_date DATE NOT NULL,
+            cycle_position VARCHAR(20) DEFAULT 'unknown',
+            direction VARCHAR(10) DEFAULT 'neutral',
+            strength_score DOUBLE DEFAULT 50,
+            summary VARCHAR(1000),
+            conclusion VARCHAR(500),
+            dimension_scores VARCHAR(500),
+            key_risks VARCHAR(1000),
+            outcome VARCHAR(10) DEFAULT 'pending',
+            actual_return_5d DOUBLE,
+            actual_return_20d DOUBLE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
+
+    # 市场预测日志（LLM/确定性预测落盘，供命中率验证）
+    "prediction_log": """
+        CREATE SEQUENCE IF NOT EXISTS prediction_log_seq START 1;
+        CREATE TABLE IF NOT EXISTS prediction_log (
+            id INTEGER DEFAULT nextval('prediction_log_seq') PRIMARY KEY,
+            symbol VARCHAR(10) NOT NULL,
+            predict_date DATE NOT NULL,
+            horizon VARCHAR(5) NOT NULL,
+            direction VARCHAR(10) NOT NULL,
+            probability DOUBLE,
+            prob_up DOUBLE,
+            prob_down DOUBLE,
+            prob_sideways DOUBLE,
+            expected_return_pct DOUBLE,
+            expected_range_low DOUBLE,
+            expected_range_high DOUBLE,
+            cycle_position VARCHAR(20),
+            cycle_forecast VARCHAR(20),
+            support_levels VARCHAR(500),
+            resistance_levels VARCHAR(500),
+            scenarios VARCHAR(2000),
+            confidence DOUBLE,
+            key_reasons VARCHAR(2000),
+            key_risks VARCHAR(2000),
+            model VARCHAR(100),
+            prompt_version VARCHAR(20),
+            mode VARCHAR(10) DEFAULT 'deterministic',
+            status VARCHAR(10) DEFAULT 'pending',
+            actual_return_pct DOUBLE,
+            evaluated_date DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """,
 }
 
 

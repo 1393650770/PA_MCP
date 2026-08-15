@@ -81,11 +81,16 @@
 
 | 能力 | 状态 | 入口 | 数据范围 | 测试 | 限制 |
 |---|---|---|---|---|---|
-| Agent 快速分析 (fast) | prototype | `orchestrator.fast_analyze()`, `agent_analyze_stock()` | 单LLM调用，K线压缩为文本摘要 | 无 | 依赖LLM adapter |
-| Agent 深度分析 (deep) | stub | `orchestrator.deep_analyze()` | 返回占位结果，非真正5分析师+辩论 | 无 | 标注为stub/unavailable |
+| Agent 快速分析 (fast) | prototype | `orchestrator.fast_analyze()`, `agent_analyze_stock()` | 单LLM调用，K线压缩为文本摘要 + 经验库RAG注入 | 无 | 依赖LLM adapter |
+| Agent 深度分析 (deep) | implemented_verified | `orchestrator.deep_analyze()` | **真实5分析师并行(技术/资金/情绪/基本面/事件) + 组合经理合成 + RiskGuard仓位上限**，借鉴ai-hedge-fund多agent模式 | `tests/test_orchestrator_two_stage.py` 11项(mock adapter) | 无LLM时降级确定性规则分析(不编造) |
+| 两阶段分析 (诊断→路由→决策) | implemented_verified | `orchestrator.market_diagnosis()` / `analyze_with_diagnosis()`, MCP `agent_market_diagnosis`, UI「市场诊断」 | Stage1市场诊断(高潮/发酵/启动/低迷/冰点，LLM或确定性) → 策略路由(5状态→策略清单) → 注入5分析师prompt | 诊断/路由/注入11项测试 | 诊断依赖市场指标数据(涨停数/成交额) |
+| JSON校验+重试 | implemented_verified | `orchestrator._chat_json_with_retry()` | 分析师/PM/诊断/预测输出字段校验，失败反馈LLM重试1次（借鉴PA_Agent validation_retry） | retry成功/放弃/error 3项测试 | 重试消耗额外token |
+| 市场预测 (LLM未来走势) | implemented_verified | `agent/prediction.py` PredictionService, MCP `predict_market`, UI「市场预测」Tab | 确定性特征抽取(趋势/动量/波动/量能/周期位置) → LLM预测(方向+概率分布+期望收益+关键价位+多场景) → 落盘prediction_log → 到期回填验证 | `tests/test_prediction.py` 14项 + 真实行情冒烟(哈药股份→看涨0.85) | 无LLM降级确定性统计预测；预测可验证不等于保证收益 |
+| 预测验证闭环 | implemented_verified | `agent/prediction.py evaluate_predictions()`, MCP `evaluate_predictions`, UI「预测验证成绩单」 | 回填到期预测真实收益：命中率/方向一致率/分方向表现/平均收益 | 命中/未中/震荡阈值/模糊判定测试 | 需K线数据覆盖预测期 |
+| 经验库 (RAG) | implemented_verified | `agent/experience.py` ExperienceService, MCP `agent_experience_search`, 分析后自动落盘 | 每次AI分析自动沉淀(方向/周期/分数/风险) → 按符号/周期/方向检索top-N → 注入后续分析prompt → 事后回填5d/20d收益标记hit/miss（借鉴PA_Agent experience_reader） | `tests/test_experience.py` 5项 | 周期位置来自确定性特征(分析结果未含特征时标unknown) |
 | Anthropic provider | broken → fixed | `llm_anthropic.py` (新增) | 官方SDK + Messages API | 无 | 原实现走/chat/completions shim; 新adapter修复但待测试 |
-| OpenAI-compatible provider | prototype | `llm_openai_compat.py` (新增) | /chat/completions协议 | 无 | |
-| 多provider端口 (LLMPort) | prototype | `llm_port.py` (新增) | 统一接口 | 无 | |
+| OpenAI-compatible provider | prototype | `llm_openai_compat.py` (新增) | /chat/completions协议（doubao/ark等通用回退） | 无 | |
+| 多provider端口 (LLMPort) | prototype | `llm_port.py` (新增) | 统一接口，支持adapter热切换(register None清除) | 无 | |
 | 策略自动发现 | implemented_unwired | `base.py:auto_discover()` | 存在但server未调用→已修复 | 无 | 待server启动集成测试 |
 | 盘前简报 (morning_brief) | prototype | `agent_morning_brief()` | 市场状态+涨停+资金+龙虎榜+信号 | 无 | |
 | 多股票对比 | prototype | `agent_compare_stocks()` | 技术/资金/事件维度 | 无 | |
@@ -117,7 +122,9 @@
 | DuckDBStore (显式列映射) | fixed | `store.py` | 待测试 | 批次A.1修复，INSERT改显式列映射+类型校验 |
 | 数据调度器 | fixed | `scheduler.py` | 待测试 | 批次A.2修复：__main__入口+PhaseStatus枚举+stub标记+全量游标 |
 | MCP Server (FastMCP) | implemented_unverified | `server.py` | 无 | 76个legacy测试不覆盖核心链路 |
-| Web UI (Gradio) | implemented_verified | `ui/gradio_app.py`, `pa-mcp-ui` 启动命令 | 5 Tab + 数据源健康面板 + 多股对比 + 批量装载演练 | 对话需 ANTHROPIC_API_KEY，无key时规则工具降级 |
+| Web UI (Gradio) | implemented_verified | `ui/gradio_app.py`, `pa-mcp-ui` 启动命令 | **9 Tab**（数据看板/AI对话/多股对比/市场扫描/研究评估/组合构建/策略回测/组合管理/**市场预测🔮**）+ 数据源健康面板 | 对话需 LLM key，无key时规则工具降级 |
+| 市场预测UI | implemented_verified | `predict_market_ui()`/`prediction_history_ui()`/`evaluate_predictions_ui()`/`market_diagnosis_ui()` | 预测Tab：方向概率+区间+周期+场景+关键位；市场诊断+策略路由；预测验证成绩单；历史记录 | 真实行情冒烟通过 | 预测落盘prediction_log表 |
+| MCP工具数 | implemented_verified | `server.py` | **49个工具**（新增predict_market/prediction_history/evaluate_predictions/agent_market_diagnosis/agent_experience_search） | UI功能与MCP工具对等 | — |
 | 批量装载 | implemented_verified | `scheduler` + `scripts/bootstrap_universe.py` | 100只/2222行/19.5s/99%覆盖 + 断点续传0开销 | AKShare全市场快照当前网络不可达时用种子池 |
 | 完整调度 | implemented_verified | `python -m pa_mcp.data.scheduler` | 30只种子池端到端113s，8-phase全部成功（日线660/分钟7200/财报240/龙虎榜49） | 需要种子池或AKShare快照 |
 | Walk-Forward研究 | implemented_verified | `research/strategy_eval.py` + UI「研究评估」Tab | 15 folds真实OOS评估（长历史分页1000+根），晋级门槛=多数fold正收益 | 实测9策略×3股筛选0达标（真实结论：单票规则策略无稳定alpha） |
