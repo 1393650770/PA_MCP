@@ -1948,6 +1948,64 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def chan_beichi_event_study(symbol: str) -> dict[str, Any]:
+    """缠论背驰信号事件研究（大牛方法可检验性）。
+
+    滑动窗口（60 日/步长 3）扫描背驰信号（上涨背驰=涨势衰竭/下跌背驰=
+    跌势衰竭）→ 复用事件研究验证信号后 5/10/20 日收益 vs 无条件基准，
+    判定缠论背驰是否有预测力（has_edge）。
+
+    Args:
+        symbol: 股票代码
+    """
+    try:
+        from pa_mcp.engine.indicators.chan import scan_beichi_signals
+        from pa_mcp.research.event_study import signal_forward_returns
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 400",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=400)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        sig_df = scan_beichi_signals(kline_df, symbol=symbol, window=60, step=3)
+        if sig_df.empty:
+            return _response(data={"symbol": symbol, "n_signals": 0,
+                                   "message": "未检出背驰信号（窗口内无动能衰竭结构）"})
+
+        results = signal_forward_returns(kline_df, sig_df, [5, 10, 20])
+        return _response(data={
+            "symbol": symbol,
+            "n_signals": len(sig_df),
+            "bullish_signals": int((sig_df["direction"] == "bullish").sum()),
+            "bearish_signals": int((sig_df["direction"] == "bearish").sum()),
+            "signal_range": [sig_df["date"].iloc[0], sig_df["date"].iloc[-1]],
+            "results": [
+                {"horizon": r.horizon, "n_events": r.n_events,
+                 "win_rate_pct": r.win_rate_pct,
+                 "avg_return_pct": r.avg_return_pct,
+                 "benchmark_avg_return_pct": r.benchmark_avg_return_pct,
+                 "excess_return_pct": r.excess_return_pct,
+                 "has_edge": r.has_edge}
+                for r in results],
+            "has_edge": any(r.has_edge for r in results),
+        })
+    except Exception as e:
+        logger.error("chan_beichi_event_study failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def factor_neutralize(symbols: str, lookback: int = 120) -> dict[str, Any]:
     """因子正交化（风格中性化，借鉴 factor-orthogonalize）。
 

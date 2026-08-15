@@ -215,12 +215,11 @@ def detect_beichi(bi_list: list[Bi], zones: list[Zhongshu],
         且该笔 MACD 柱面积 < 中枢前的向上笔面积 → bearish（涨势衰竭）
       - 下跌背驰：反之 → bullish（跌势衰竭）
     macd_hist 为 None 时用笔长度（笔幅度/笔内K数）近似动能。
+
+    遍历所有中枢（窗口末尾中枢可能无后续笔），取首个可判定的。
     """
     if len(zones) < 1 or len(bi_list) < 5:
         return "none", "笔/中枢不足，无法判定背驰"
-    z = zones[-1]
-    if z.end_idx + 2 >= len(bi_list):
-        return "none", "中枢后无足够笔"
 
     def _energy(bi: Bi, macd_hist) -> float:
         """笔动能：MACD 面积；无 MACD 时用幅度（保守近似）。"""
@@ -230,32 +229,40 @@ def detect_beichi(bi_list: list[Bi], zones: list[Zhongshu],
                 return float(seg.sum())
         return abs(bi.end_price - bi.start_price)
 
-    # 中枢前的同向笔（b1 是下笔起点）：中枢前向上笔 = bi_list[z.start_idx - 1]（若存在）
-    after_bi = bi_list[z.end_idx + 1]   # 中枢后第一笔（延续方向）
-    before_idx = z.start_idx - 1
-    if before_idx < 0:
-        return "none", "中枢前无对比笔"
-    before_bi = bi_list[before_idx]
+    checked = 0
+    for z in zones:
+        # 中枢后需有足够笔（后段笔 + 前段对比笔）
+        if z.end_idx + 2 >= len(bi_list):
+            continue
+        if z.start_idx - 1 < 0:
+            continue
+        after_bi = bi_list[z.end_idx + 1]
+        before_bi = bi_list[z.start_idx - 1]
+        if after_bi.direction != before_bi.direction:
+            continue
+        checked += 1
 
-    if after_bi.direction != before_bi.direction:
-        return "none", "前后笔方向不一致，无法对比"
+        e_before = _energy(before_bi, macd_hist)
+        e_after = _energy(after_bi, macd_hist)
 
-    e_before = _energy(before_bi, macd_hist)
-    e_after = _energy(after_bi, macd_hist)
+        if after_bi.direction == "up":
+            new_high = after_bi.end_price > before_bi.end_price * 0.999
+            if new_high and e_after < e_before * 0.8:
+                return ("bearish",
+                        f"上涨背驰：中枢后笔创新高（{after_bi.end_price:.2f}）"
+                        f"但动能衰减（面积 {e_after:.4f} < 前段 {e_before:.4f} "
+                        f"× 0.8），涨势衰竭")
+        else:
+            new_low = after_bi.end_price < before_bi.end_price * 1.001
+            if new_low and e_after < e_before * 0.8:
+                return ("bullish",
+                        f"下跌背驰：中枢后笔创新低（{after_bi.end_price:.2f}）"
+                        f"但动能衰减（面积 {e_after:.4f} < 前段 {e_before:.4f} "
+                        f"× 0.8），跌势衰竭")
 
-    if after_bi.direction == "up":
-        new_high = after_bi.end_price > before_bi.end_price * 0.999
-        if new_high and e_after < e_before * 0.8:
-            return ("bearish",
-                    f"上涨背驰：中枢后笔创新高（{after_bi.end_price:.2f}）但动能衰减"
-                    f"（面积 {e_after:.4f} < 前段 {e_before:.4f} × 0.8），涨势衰竭")
-    else:
-        new_low = after_bi.end_price < before_bi.end_price * 1.001
-        if new_low and e_after < e_before * 0.8:
-            return ("bullish",
-                    f"下跌背驰：中枢后笔创新低（{after_bi.end_price:.2f}）但动能衰减"
-                    f"（面积 {e_after:.4f} < 前段 {e_before:.4f} × 0.8），跌势衰竭")
-    return "none", f"无背驰（后段动能 {e_after:.4f} vs 前段 {e_before:.4f}）"
+    if checked == 0:
+        return "none", "中枢后无足够笔可对比"
+    return "none", f"无背驰（检查 {checked} 个中枢，动能均未衰减至 0.8 阈值）"
 
 
 def chan_analysis(df: pd.DataFrame, symbol: str = "",
@@ -297,6 +304,45 @@ def chan_analysis(df: pd.DataFrame, symbol: str = "",
                         fractals=fractals, bi_list=bi_list,
                         zhongshu_list=zones, beichi_signal=signal,
                         beichi_detail=detail, position=position)
+
+
+def scan_beichi_signals(df: pd.DataFrame, symbol: str = "",
+                        window: int = 60, step: int = 3) -> pd.DataFrame:
+    """滑动窗口扫描背驰信号（供事件研究验证预测力）。
+
+    在历史全窗口上滚动调用 chan_analysis，收集背驰信号：
+      - bullish（下跌背驰：跌势衰竭）→ 方向 bullish
+      - bearish（上涨背驰：涨势衰竭）→ 方向 bearish
+    返回 sig_df：[symbol, date(信号日), direction, strategy_name]
+
+    Args:
+        df: 日 K 线（≥ window 根）
+        window: 窗口大小（根）
+        step: 扫描步长（交易日，步长小更全但更慢）
+    """
+    if df is None or df.empty or len(df) < window:
+        return pd.DataFrame()
+    data = df.sort_values("date").reset_index(drop=True)
+    n = len(data)
+    rows = []
+    for i in range(window - 1, n, step):
+        win = data.iloc[i - window + 1:i + 1]
+        try:
+            a = chan_analysis(win, with_macd=True)
+        except Exception:
+            continue
+        if a.beichi_signal in ("bullish", "bearish"):
+            rows.append({
+                "symbol": symbol or str(win["symbol"].iloc[0])
+                          if "symbol" in win.columns else "",
+                "date": str(data["date"].iloc[i])[:10],
+                "direction": "bullish" if a.beichi_signal == "bullish"
+                             else "bearish",
+                "strategy_name": "chan_beichi",
+                "strength_score": 65.0 if a.beichi_signal == "bullish" else 45.0,
+                "beichi_detail": a.beichi_detail,
+            })
+    return pd.DataFrame(rows)
 
 
 def format_chan(a: ChanAnalysis) -> str:

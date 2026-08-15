@@ -1714,6 +1714,51 @@ def sentiment_cycle_ui() -> str:
         return f"情绪周期失败：{str(e)[:200]}"
 
 
+def chan_event_study_ui(symbol: str) -> str:
+    """缠论背驰信号事件研究：检验背驰信号是否真有预测力。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.engine.indicators.chan import scan_beichi_signals
+        from pa_mcp.research.event_study import signal_forward_returns
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+
+        sig_df = scan_beichi_signals(df, symbol=symbol, window=60, step=3)
+        if sig_df.empty:
+            return (f"{symbol}：滑动窗口未检出背驰信号（窗口 60 日/步长 3）。\n"
+                    f"背驰需要「中枢前后笔动能对比」，若样本期过短或趋势过强可能无信号。")
+
+        results = signal_forward_returns(df, sig_df, [5, 10, 20])
+        if not results:
+            return f"{symbol}：背驰信号 {len(sig_df)} 个，但无法定位到行情（检查日期）"
+
+        lines = [
+            f"## 🌀 缠论背驰信号事件研究：{symbol}",
+            f"扫描到 **{len(sig_df)} 个背驰信号**"
+            f"（看多 {int((sig_df['direction'] == 'bullish').sum())} / "
+            f"看空 {int((sig_df['direction'] == 'bearish').sum())}），"
+            f"信号日期：{sig_df['date'].iloc[0]} ~ {sig_df['date'].iloc[-1]}",
+            "",
+            "| 前瞻日 | 信号数 | 胜率% | 平均收益% | 基准胜率% | 基准收益% | 超额% |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for r in results:
+            lines.append(
+                f"| {r.horizon} | {r.n_events} | {r.win_rate_pct:.1f} | "
+                f"{r.avg_return_pct:+.2f} | {r.benchmark_win_rate_pct:.1f} | "
+                f"{r.benchmark_avg_return_pct:+.2f} | {r.excess_return_pct:+.2f} |")
+        verdict = "✅ 有预测力" if any(r.has_edge for r in results) else "❌ 无显著预测力"
+        lines.append(f"\n**结论：{verdict}**")
+        lines.append("\n*背驰 = 中枢前后笔动能对比（MACD 面积衰减）。研究参考，非投资建议。*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"背驰事件研究失败：{str(e)[:200]}"
+
+
 def canslim_ui(top_n: int = 20, pool: str = "") -> str:
     """CANSLIM 成长股扫描（欧奈尔七要素）。"""
     try:
@@ -2315,6 +2360,11 @@ def build_app():
                                  variant="secondary")
             chan_btn.click(chan_fig, inputs=[sym_in],
                            outputs=[kline_out, summary_out])
+
+            chan_es_btn = gr.Button("🎯 缠论背驰信号事件研究（预测力检验）",
+                                    variant="secondary")
+            chan_es_btn.click(chan_event_study_ui, inputs=[sym_in],
+                              outputs=[summary_out])
 
         with gr.Tab("💬 AI 对话"):
             gr.Markdown("**对话**：输入股票代码或问题，例如「分析 000001」「600036 资金流」。\n"

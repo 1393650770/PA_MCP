@@ -99,6 +99,62 @@ def test_zhongshu_overlap():
     assert z.low == 11 and z.high == 12
 
 
+def _zigzag_df():
+    """锯齿行情：上涨→回踩→上涨→回落 循环（易形成中枢与背驰）。"""
+    np.random.seed(13)
+    close = 10.0
+    rows = []
+    for i in range(160):
+        # 锯齿：每 30 根一个波段，振幅递减（动能衰竭 → 背驰结构）
+        phase = (i // 30) % 4
+        if phase in (0, 2):
+            close *= 1 + 0.006 + np.random.normal(0, 0.004)
+        else:
+            close *= 1 - 0.005 + np.random.normal(0, 0.004)
+        rows.append({
+            "date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+            "open": close * 0.995, "high": close * 1.01,
+            "low": close * 0.99, "close": close, "volume": 1e6,
+            "symbol": "000001",
+        })
+    return pd.DataFrame(rows)
+
+
+def test_scan_beichi_signals():
+    """滑动窗口能检出背驰信号（锯齿行情动能衰竭）。"""
+    from pa_mcp.engine.indicators.chan import scan_beichi_signals
+    df = _zigzag_df()
+    sig = scan_beichi_signals(df, symbol="000001", window=60, step=3)
+    assert not sig.empty, "锯齿衰减行情应检出背驰"
+    assert {"symbol", "date", "direction", "strategy_name"} <= set(sig.columns)
+    assert sig["direction"].isin(["bullish", "bearish"]).all()
+    assert sig["strategy_name"].eq("chan_beichi").all()
+    # 信号日递增
+    assert list(sig["date"]) == sorted(sig["date"])
+
+
+def test_scan_beichi_short_data():
+    from pa_mcp.engine.indicators.chan import scan_beichi_signals
+    df = pd.DataFrame({"date": pd.date_range("2026-01-01", periods=30),
+                       "open": [10] * 30, "high": [10.5] * 30,
+                       "low": [9.5] * 30, "close": [10] * 30,
+                       "volume": [1e6] * 30})
+    assert scan_beichi_signals(df, window=60).empty  # 不足窗口
+
+
+def test_chan_beichi_event_study_end_to_end():
+    """背驰信号 → 事件研究（复用 signal_forward_returns）。"""
+    from pa_mcp.engine.indicators.chan import scan_beichi_signals
+    from pa_mcp.research.event_study import signal_forward_returns
+    df = _zigzag_df()
+    sig = scan_beichi_signals(df, symbol="000001", window=60, step=3)
+    results = signal_forward_returns(df, sig, [5, 10])
+    assert results
+    for r in results:
+        assert r.n_events >= 1
+        assert isinstance(r.has_edge, bool)
+
+
 def test_chan_analysis_full():
     """端到端：合成 V 型反转数据 → 结构分析可用。"""
     np.random.seed(9)
