@@ -1067,6 +1067,26 @@ class PredictionService:
         except Exception:
             pass
 
+        # 综合信号校准（优先级高于共振）：强融合上调 / 弱融合收缩
+        consensus_factor = 1.0
+        consensus_note = ""
+        try:
+            from pa_mcp.research.consensus import ConsensusAnalyzer
+            import asyncio as _asyncio
+            con = _asyncio.run(ConsensusAnalyzer().analyze(
+                symbol, kline_df=kline_df))
+            if "error" not in con:
+                strength = con["strength"]
+                if strength >= 0.6 and con["signal"] == direction:
+                    consensus_factor = 1.4
+                    consensus_note = f"（综合信号{con['level']}强度上调）"
+                elif strength < 0.4:
+                    consensus_factor = 0.6
+                    consensus_note = "（综合信号分歧收缩）"
+                suggested *= consensus_factor
+        except Exception:
+            pass
+
         suggested = max(0.0, min(20.0, suggested))  # RiskGuard 硬上限
         suggested = round(suggested, 1)
 
@@ -1084,12 +1104,15 @@ class PredictionService:
             "bucket_factor": round(bucket_factor, 3),
             "resonance_factor": round(resonance_factor, 3),
             "resonance_note": resonance_note,
+            "consensus_factor": round(consensus_factor, 3),
+            "consensus_note": consensus_note,
             "suggested_position_pct": suggested,
             "suggested_amount": round(amount, 2),
             "explanation": (
                 f"预测{direction}({prob:.0%}) × 历史命中率{hist_hit:.0%}"
                 f"（{n_hist}样本）{'× 概率桶校准' if bucket_hit is not None else ''}"
                 f"× 共振校准 {resonance_factor:.1f}{resonance_note}"
+                f"× 综合信号校准 {consensus_factor:.1f}{consensus_note}"
                 f" → 建议仓位 ≤{suggested}%（RiskGuard 20% 上限内）"),
             "disclaimer": "研究参考，非投资建议。仓位须结合自身风险承受能力。",
         }

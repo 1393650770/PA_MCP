@@ -606,6 +606,9 @@ def test_position_sizing_resonance_adjust():
         "600000", kline_df=df))
     assert sizing["resonance_factor"] in (1.3, 1.0, 0.7)
     assert "共振" in sizing["explanation"]
+    # 综合信号校准字段存在（1.4/1.0/0.6）
+    assert sizing["consensus_factor"] in (1.4, 1.0, 0.6)
+    assert "综合信号" in sizing["explanation"]
     # 强趋势 → 大概率共振上调（1.3）
     if sizing["direction"] == "up":
         assert sizing["resonance_factor"] >= 1.0
