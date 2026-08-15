@@ -1,346 +1,157 @@
-# PA_MCP — Personal Analyst MCP
+# PA_MCP — A 股量化理财助手
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-76%2F76-brightgreen.svg)]()
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Mac-success.svg)]()
+[![Tests](https://img.shields.io/badge/tests-116%2F116-brightgreen.svg)]()
 
-Full-stack A-share quantitative trading MCP server. Let AI agents (Claude, etc.) query Chinese stock market data, run technical analysis, execute trading strategies, and perform backtesting — all through natural language.
+A 股量化研究 + 理财分析一体化系统：**多源数据容灾 · 策略研究闭环 · 组合回测 · 理财 Agent 界面**。
 
-**Zero C compilation. Works on Windows/Linux/Mac with one command.**
+- **Web UI（Gradio）**：数据看板 / AI 对话 / 多股对比 / 研究评估 / 组合构建 / 策略回测 / 持仓管理
+- **MCP Server**：32+ 工具供 Claude 等 Agent 调用
+- **数据管线**：8-phase 全自动调度 + 4 源容灾（熔断/缓存/限流）
+- **研究层**：事件研究 / Walk-Forward OOS / 参数优化 / 成本敏感性
+
+> ⚠️ **免责声明**：本系统为研究工具，非投资建议。免费行情可能有延迟。过往表现不代表未来收益。详见 [DISCLAIMER.md](DISCLAIMER.md)。
 
 ---
 
-## 🚀 Quick Start (Windows)
+## 🚀 快速启动（Windows）
+
+### 一键启动 Web UI
+
+```bat
+双击 start_ui.bat
+```
+
+浏览器自动打开 **http://127.0.0.1:7860**。首次启动前需安装依赖：
 
 ```powershell
-# 1. One-click install
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
-
-# 2. Configure LLM API key
-notepad config\llm_config.json
-
-# 3. Run
-venv\Scripts\activate
-python -m pa_mcp.server
-```
-
-### Linux / Mac
-
-```bash
-# Install
+# 安装
 pip install -e ".[dev]"
 
-# Configure
-cp config/llm_config.example.json config/llm_config.json
-# Edit config/llm_config.json with your API key
-
-# Run
-python -m pa_mcp.server
+# 配置 LLM（可选，不配则对话走规则分析模式）
+copy config\llm_config.example.json config\llm_config.json
+# 编辑 config\llm_config.json 填入 API key；或用环境变量 ANTHROPIC_API_KEY
 ```
 
-### Docker
+### 其他启动方式
 
 ```bash
-docker compose up -d
-# Health check
-curl http://localhost:8080/health
+# Web UI
+python -m pa_mcp.ui.gradio_app        # 或 pa-mcp-ui
+
+# MCP Server（供 Claude Code / OpenClaw 等 Agent 调用）
+python -m pa_mcp.server               # stdio 模式
+# 或 start.bat（stdio/http 二选一）
+
+# 数据调度（增量续传；--full 全量重跑）
+python -m pa_mcp.data.scheduler
+python -m pa_mcp.data.scheduler --full
+
+# 引导种子股票池（AKShare 不可用时）
+python scripts/bootstrap_universe.py --limit 100
 ```
 
 ---
 
-## 🏗️ Architecture (5 Layers)
+## 🗺️ 界面总览（7 Tab）
+
+| Tab | 功能 |
+|---|---|
+| 📊 数据看板 | K线+MA+成交量、主力资金流叠加、实时估值快照（PE/PB/市值）、财报摘要、龙虎榜 |
+| 💬 AI 对话 | 配置 `ANTHROPIC_API_KEY` 走 Claude；否则规则工具模式（资金流/体检/回测/对比） |
+| 🔀 多股对比 | 归一化走势 + 估值对比表（2-5 只） |
+| 🧪 研究评估 | Walk-Forward OOS（15 folds）+ 信号事件研究（预测力检验） |
+| 📦 组合构建 | 多票信号 → 共享账本组合回测（真实现金约束 + 止盈止损） |
+| 🛠️ 策略回测 | 9 策略 + 沪深300 基准对比（事件驱动引擎，延迟一天执行） |
+| 💼 组合管理 | 持仓增删查 + 体检（集中度/估值/风险告警） |
+
+---
+
+## 🏗️ 架构
 
 ```
-+==========================================================+
-|  MCP Interface (FastMCP + HTTP/SSE + stdio)              |
-|  20+ Tools | 2 Resources | Multi-provider LLM support     |
-+==========================================================+
-|  AI Agent Decision (asyncio, dual-mode fast/deep)        |
-|  5 analyst prompts | Bull-bear self-debate | SQL memory  |
-+==========================================================+
-|  Hard RiskGuard (NON-BYPASSABLE)                          |
-|  Position caps | Circuit breakers | Systemic alarms       |
-+==========================================================+
-|  Engine (150+ indicators + 14 strategies + backtest)     |
-|  Pure Python indicators | DuckDB SQL vectorized backtest  |
-+==========================================================+
-|  Data (DuckDB + AKShare + lru_cache)                     |
-|  Multi-source fallback | 9 validators | Cron scheduler   |
-+==========================================================+
-```
-
----
-
-## ✨ Features
-
-### Market Data
-- Real-time quotes (with delay annotation), historical K-line (daily/weekly/monthly/1m/5m/30m/60m)
-- Multi-source: AKShare primary + TickFlow fallback
-- Every response includes `data_source`, `data_freshness`, `data_delay_seconds`
-
-### Technical Analysis
-- **150+ indicators, pure Python** — zero C compilation, works everywhere
-- MA (SMA/EMA), MACD, RSI, KDJ, Bollinger, ATR, OBV, CCI, Williams %R, ADX, MFI, VWAP
-- K-line pattern recognition, volume-price analysis
-
-### Strategy Engine (14 Strategies)
-| Category | Strategies |
-|----------|-----------|
-| 🔥 Board (打板) | First board breakout, Dragon second wave |
-| 📈 Trend | Platform breakout, MA golden cross |
-| 🌊 Swing | MACD divergence, Bollinger mean reversion |
-| 💎 Value | ROE-PB value screen |
-| 🕸️ Grid | Range grid (ATR-based) |
-| 🚀 Momentum | Volume-price breakout |
-| 🔄 Reversal | Oversold bounce (RSI <25) |
-| 📰 Event | Insider buying follow, Lockup expiry avoidance, Block trade discount alert, Pledge risk |
-
-### Backtest Engine
-- **DuckDB SQL vectorized**: 5000-stock full-market scan in seconds
-- **A-share reality constraints** (these are what make the difference):
-  - T+1 enforcement
-  - Limit-up buyability probability (seal time + seal strength model)
-  - Limit-down sellability (consecutive limit-down decay)
-  - Liquidity constraints (<5% daily volume per order)
-  - Differentiated slippage (large-cap 0.1%, small-cap 0.3%, panic +0.2%)
-  - Commission + stamp duty + transfer fee per exchange
-
-### Hard RiskGuard
-**Non-bypassable risk controls** — sits between agent output and user response:
-- Single stock max 20%, sector max 40%, total max 80%
-- Daily loss >3% → force liquidate
-- 3 consecutive losses → pause 1 week
-- Systemic risk triggers: mass limit-down, volume collapse, bear market, northbound exodus
-- Seasonal defense: auto-reduce position in historically weak months
-
-### AI Agent Analysis
-- **Fast mode** (~15s, 8K tokens): Single LLM call, 5 dimensions in one response
-- **Deep mode** (~60s, 50K tokens): 5 parallel analysts + self-debate + risk review
-- **Long-term memory** (SQLite): Decision tracking, outcome monitoring, bias detection, strategy weight adjustment
-
-### Multi-Provider LLM
-- Supports: Anthropic Claude / OpenAI / DeepSeek / 智谱 GLM / 通义千问
-- Unified API, retry with backoff, response caching
-- Configure via `config/llm_config.json` (gitignored, not committed)
-
-### Event Data
-- Block trades (大宗交易), Lockup expiry (限售股解禁)
-- Insider trading (大股东增减持), Pledge ratios (股权质押)
-- Institutional visits (机构调研)
-- Exposed as single `get_major_events(symbol)` tool
-
----
-
-## 📡 MCP Tools (20+)
-
-### Market Data
-| Tool | Description |
-|------|-------------|
-| `get_realtime_quote` | Real-time quote + 5-level depth + delay annotation |
-| `get_kline` | Historical K-line (daily/weekly/monthly/1m/5m/30m/60m) |
-| `get_market_overview` | Market breadth, turnover, northbound flow |
-| `search_stock` | Search stocks by name or code |
-| `get_stock_info` | Company info, sector, market cap |
-
-### Screener
-| Tool | Description |
-|------|-------------|
-| `scan_limit_up` | Limit-up stocks + seal strength + sector distribution |
-| `scan_volume_surge` | Abnormal volume vs 20-day average |
-| `get_major_events` | Block trades, lockup, insider trades, pledge, visits |
-
-### Review
-| Tool | Description |
-|------|-------------|
-| `review_daily_limit_up` | Daily limit-up review (seal time, sector heatmap) |
-| `review_dragon_tiger` | Dragon-tiger seat analysis + tracking |
-| `get_market_sentiment` | Market mood + position suggestion + risk alerts |
-
-### Strategy
-| Tool | Description |
-|------|-------------|
-| `list_strategies` | Available strategies by category + market suitability |
-
-### Alerts
-| Tool | Description |
-|------|-------------|
-| `watch_price_alert` | Create price condition alert |
-| `watch_volume_alert` | Create volume surge alert |
-| `list_alerts` | List active/triggered alerts |
-
-### Agent
-| Tool | Description |
-|------|-------------|
-| `agent_analyze_stock` | AI multi-dimensional analysis (fast/deep) |
-| `agent_market_state` | Current regime + position suggestion |
-
-### Portfolio
-| Tool | Description |
-|------|-------------|
-| `portfolio_summary` | Holdings + P&L |
-| `portfolio_add` | Add holding |
-| `portfolio_remove` | Remove holding |
-
----
-
-## 🔧 Configuration
-
-### LLM API (`config/llm_config.json`)
-
-```json
-{
-  "active_provider": "anthropic",
-  "providers": {
-    "anthropic": {
-      "api_key": "sk-ant-...",
-      "base_url": "https://api.anthropic.com",
-      "models": { "fast": "claude-sonnet-5-20251001", "deep": "claude-opus-5-20251001" }
-    },
-    "deepseek": {
-      "api_key": "sk-...",
-      "base_url": "https://api.deepseek.com/v1",
-      "models": { "fast": "deepseek-chat", "deep": "deepseek-reasoner" }
-    }
-  },
-  "token_budget": {
-    "fast_analysis_max": 8000,
-    "deep_analysis_max": 50000,
-    "daily_scan_budget": 200000
-  }
-}
-```
-
-See [config/llm_config.example.json](config/llm_config.example.json) for all 5 providers.
-
-### Server (`config/default.yaml`)
-
-Key environment variables:
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PA_MCP_SERVER__TRANSPORT` | `stdio` | `stdio` or `http` |
-| `PA_MCP_SERVER__HTTP_PORT` | `8080` | HTTP port |
-| `PA_MCP_DATABASE__PATH` | `data/pa_mcp.duckdb` | Database file |
-| `PA_MCP_CACHE__BACKEND` | `memory` | `memory` / `redis` / `none` |
-| `PA_MCP_RISK__MAX_SINGLE_STOCK` | `0.20` | Max single position |
-| `PA_MCP_RISK__MAX_TOTAL_POSITION` | `0.80` | Max total exposure |
-
----
-
-## 🖥️ Claude Desktop Integration
-
-```json
-{
-  "mcpServers": {
-    "pa-mcp": {
-      "command": "F:\\PA_MCP\\venv\\Scripts\\python.exe",
-      "args": ["-m", "pa_mcp.server"],
-      "cwd": "F:\\PA_MCP"
-    }
-  }
-}
+┌─ Web UI (Gradio 7 Tab) ─────────────────────────┐
+│  看板│对话│对比│研究│组合构建│回测│持仓管理      │
+├─────────────────────────────────────────────────┤
+│  MCP Server (32+ tools, 9 prompts)              │
+├─────────────────────────────────────────────────┤
+│  Agent: LLMPort (Anthropic 官方 SDK / 多供应商)  │
+├─────────────────────────────────────────────────┤
+│  研究层: 事件研究 + Walk-Forward + 参数优化      │
+│  组合层: 共享账本回测 + 止盈止损 + 约束权重      │
+│  回测层: 事件驱动 + A股撮合(涨跌停/T+1/整手)     │
+├─────────────────────────────────────────────────┤
+│  数据层: DataSourceRouter 多源容灾               │
+│    akshare/tencent/sina/eastmoney               │
+│    熔断 + 两级缓存 + 东财限流 + 北交所920        │
+│  8-phase 管线: 日历→股票池→日线→分钟→财报→       │
+│    资金流→龙虎榜→指标 (断点续传)                │
+└─────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 📂 Project Structure
+## ✨ 核心能力
+
+### 数据（多源容灾）
+
+- **4 源链**：akshare（全市场快照）→ tencent（最快最稳）→ sina（备用）→ eastmoney（限流补充）
+- **熔断器**：连续失败 3 次 → 冷却 300s → 半开探测；失败源自动跳过
+- **两级缓存**：内存 TTL 5min + DuckDB 持久化，降低免费 API 请求量
+- **8-phase 管线**：日线/分钟线（腾讯 mkline 640 根）/财报（AKShare 宽表转置）/资金流/龙虎榜全部真实实现，断点续传 + 覆盖率统计
+- **北交所 920 新号段**支持；种子股票池兜底
+
+### 研究（防伪 alpha）
+
+- **信号事件研究**：信号后 5/10/20 日收益 vs 无条件基准 → 预测力判定
+- **Walk-Forward OOS**：15 folds 真实数据评估，晋级门槛 = 多数 fold 正收益
+- **参数优化**：ParamRange 网格（完整回测目标函数）+ 跨股平均（防单票过拟合）
+- **成本敏感性**：1x/1.5x/2x 成本档
+- **实测结论**：`bollinger_mean_reversion` 通过多证据检验（3/3 股事件研究达标 + 成本不敏感 + 组合正收益）
+
+### 组合与回测
+
+- **共享账本组合回测**：多票联合执行、真实现金约束、T+1、单票上限、止盈止损
+- **事件驱动引擎**：信号延迟一天执行（无未来函数）、A股撮合（涨跌停/整手/费用）
+- **9 策略**全部真实信号（P0-6 修复：signal_time 市场时间）
+
+### Agent / 界面
+
+- **LLM Ports & Adapters**：Anthropic 官方 SDK（Messages API）、OpenAI-compatible、DeepSeek、智谱、通义
+- **理财专业 prompts**：估值分析 / 持仓体检 / 财报解读 / 投资备忘录
+- **QMT BrokerPort 骨架**：券商确认后接入实盘（风控 ID 不可绕过、订单幂等）
+
+---
+
+## 📁 项目结构
 
 ```
-pa-mcp/
-├── src/pa_mcp/
-│   ├── server.py              # MCP Server entry (20+ tools)
-│   ├── config.py              # Pydantic Settings (9 config classes)
-│   ├── data/
-│   │   ├── store.py           # DuckDB (13 tables + shadow swap)
-│   │   ├── cache.py           # Multi-level cache (lru + optional Redis)
-│   │   ├── quality.py         # 9 automated data validators
-│   │   ├── scheduler.py       # 8-phase daily pipeline
-│   │   └── sources/
-│   │       └── akshare_adapter.py  # 15 endpoints, rate-limited, retry
-│   ├── engine/
-│   │   ├── indicators/
-│   │   │   └── indicators.py  # 150+ pure Python indicators
-│   │   ├── strategies/
-│   │   │   ├── base.py        # ABC + registry + signal format
-│   │   │   ├── trend.py       # Platform breakout, MA golden cross
-│   │   │   ├── limit_up.py    # First board, Dragon second wave
-│   │   │   ├── swing.py       # MACD divergence, Bollinger, Value, Grid, Momentum
-│   │   │   └── event_driven.py # Insider, Lockup, Oversold, Block trade
-│   │   ├── market_state.py    # 5-state detector (hysteresis-based)
-│   │   └── signals.py         # Signal aggregation + conflict resolution
-│   ├── backtest/
-│   │   ├── engine.py          # DuckDB SQL vectorized backtester
-│   │   ├── rules.py           # A-share rules, fees, buyability/sellability models
-│   │   └── calendar.py        # Trading day calendar
-│   ├── risk/
-│   │   └── guard.py           # Non-bypassable risk checks + systemic alarms
-│   ├── agent/
-│   │   ├── orchestrator.py    # Fast/deep analysis orchestration
-│   │   ├── llm_client.py      # Multi-provider LLM client + caching
-│   │   └── memory.py          # Long-term memory (SQLite, bias detection)
-│   └── info/
-│       └── news.py            # News aggregation + sentiment analysis
-├── config/
-│   ├── default.yaml           # Server configuration
-│   ├── llm_config.example.json # LLM provider template
-│   └── llm_config.json        # Your API keys (gitignored)
-├── scripts/
-│   ├── setup.ps1              # Windows one-click setup
-│   ├── init_db.py             # Database initialization
-│   └── run_backtest.py        # CLI backtest runner
-├── tests/                     # 76 tests, 5 files
-├── docker-compose.yml         # 3 services (server, cron, optional redis)
-├── Dockerfile                 # Single-stage, zero C build
-├── docs/superpowers/specs/    # Design specifications (4 docs)
-├── pyproject.toml             # 12 pure Python deps
-├── DISCLAIMER.md              # Legal disclaimer
-└── README.md                  # This file
+config/               # 配置（llm_config.json 已 gitignore）
+src/pa_mcp/
+  data/               # 数据层（router 多源容灾 / scheduler 8-phase / store）
+  backtest/           # 回测（事件驱动引擎 / broker A股撮合 / ledger 账本）
+  research/           # 研究（event_study / strategy_eval walk-forward）
+  portfolio/          # 组合（backtest 共享账本 / pipeline 信号→组合）
+  engine/             # 策略（13 策略注册 / 指标 / 市场状态）
+  risk/               # 风控（RiskGuard 纯函数 + 回撤分级）
+  agent/              # LLM（llm_port / anthropic / orchestrator）
+  execution/          # 交易（brokers 端口 + QMT 骨架）
+  ui/                 # Web 界面（gradio_app）
+  server.py           # MCP Server（32+ 工具）
+docs/capability-matrix.md   # 能力矩阵（真实状态）
+scripts/              # 工具脚本（bootstrap_universe 等）
+tests/                # 116 项测试
 ```
 
 ---
 
-## 📊 Project Stats
+## 🧪 测试
 
-| Metric | Value |
-|--------|-------|
-| Source files | 33 |
-| Tests | 76/76 |
-| Strategies | 14 across 8 categories |
-| Technical indicators | 150+ (pure Python) |
-| MCP tools | 20+ |
-| DuckDB tables | 13 |
-| Data validators | 9 |
-| Python deps | 12 (zero C compilation) |
-| LLM providers | 5 (Anthropic/OpenAI/DeepSeek/智谱/通义) |
-| Docs | 4 spec documents |
-
----
-
-## ⚠️ Disclaimer
-
-**This is a research tool, not investment advice.**
-
-- All analysis is for educational and reference purposes only
-- Past performance does not guarantee future results
-- No "buy" or "sell" recommendations — only strength scores and evidence
-- Data from free public APIs may have delays or inaccuracies
-- Backtest results systematically overestimate real returns by 30-50%
-- See [DISCLAIMER.md](DISCLAIMER.md) for full legal notice
-
----
-
-## 🎯 Acknowledgments
-
-PA_MCP draws from 45+ open-source projects, with core architectural ideas from:
-
-- [TradingAgents-astock](https://github.com/simonlin1212/TradingAgents-astock) (2.6k★) — Multi-analyst + bull-bear debate
-- [DeepPulse](https://github.com/wwyharry/DeepPulse) (34★) — Strategy engine + long-term memory + circuit breaker
-- [Vibe-Research](https://github.com/simonlin1212/Vibe-Research) (1k★) — Fact-presentation, no buy/sell conclusions
-- [cn-financial-mcp](https://github.com/ccq1/cn-financial-mcp) (30★) — 42-tool comprehensive MCP design
-- [QuantsPlaybook](https://github.com/hugo2046/QuantsPlaybook) (5.7k★) — 100+ strategy library
-- [FinGPT](https://github.com/AI4Finance-Foundation/FinGPT) (21k★) — Chinese financial sentiment
-- [Microsoft Qlib](https://github.com/microsoft/qlib) (46k★) — AI quant platform design patterns
+```bash
+python -m pytest tests/ -v    # 116 passed
+```
 
 ## 📜 License
 
-MIT — see [LICENSE](LICENSE)
+MIT — 详见 [LICENSE](LICENSE)。本系统不提供任何投资建议。
