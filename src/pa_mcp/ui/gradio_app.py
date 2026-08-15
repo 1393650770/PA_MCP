@@ -2206,6 +2206,95 @@ def canslim_ui(top_n: int = 20, pool: str = "") -> str:
         return f"CANSLIM 扫描失败：{str(e)[:200]}"
 
 
+def export_csv_ui(symbols: str, what: str) -> str:
+    """研究结果导出 CSV（选股/预测/持仓/格雷厄姆）。"""
+    try:
+        import io
+        import asyncio as _asyncio
+        import pandas as pd
+        from pa_mcp.config import get_settings
+        from pa_mcp.data.store import DuckDBStore
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+
+        async def _go():
+            store = DuckDBStore(get_settings().database.path)
+            store.connect()
+            try:
+                if what == "selection":
+                    from pa_mcp.research.factors import select_stocks_by_factors
+                    klines = {}
+                    for sym in pool:
+                        df = store.query_df(
+                            "SELECT * FROM kline_daily WHERE symbol = ? "
+                            "ORDER BY date DESC LIMIT 150", [sym])
+                        if not df.empty:
+                            klines[sym] = df
+                    if len(klines) < 5:
+                        return f"仅 {len(klines)} 只股票有数据（需 ≥5）"
+                    r = select_stocks_by_factors(klines, top_n=len(klines))
+                    if "error" in r:
+                        return r["error"]
+                    rows = []
+                    for i, x in enumerate(r["selection"], 1):
+                        rows.append({"rank": i, "symbol": x["symbol"],
+                                     "score": x["score"],
+                                     **x["factor_details"]})
+                    return pd.DataFrame(rows).to_csv(index=False)
+                elif what == "prediction":
+                    from pa_mcp.agent.prediction import get_prediction_service
+                    svc = get_prediction_service()
+                    rows = []
+                    for sym in pool[:10]:
+                        df = store.query_df(
+                            "SELECT * FROM kline_daily WHERE symbol = ? "
+                            "ORDER BY date DESC LIMIT 160", [sym])
+                        if df.empty:
+                            continue
+                        p = (await svc.predict(sym, df, horizon="5d",
+                                               use_llm=False)).to_dict()
+                        rows.append({
+                            "symbol": sym, "direction": p["direction"],
+                            "probability": p["probability"],
+                            "expected_return_pct": p["expected_return_pct"],
+                            "cycle": p["cycle_position"],
+                            "mode": p["mode"]})
+                    if not rows:
+                        return "无预测数据"
+                    return pd.DataFrame(rows).to_csv(index=False)
+                elif what == "portfolio":
+                    from pa_mcp.research.portfolio_risk import (
+                        PortfolioRiskDashboard)
+                    r = await PortfolioRiskDashboard().analyze(use_llm=False)
+                    if "error" in r:
+                        return r["error"]
+                    rows = [{
+                        "symbol": h["symbol"], "cost": h["cost"],
+                        "price": h["price"], "pnl_pct": h["pnl_pct"],
+                        "weight_pct": h["weight_pct"], "sector": h["sector"],
+                        "pred_direction": (h.get("prediction") or {}).get(
+                            "direction", "")}
+                        for h in r["holdings"]]
+                    return pd.DataFrame(rows).to_csv(index=False)
+                elif what == "graham":
+                    from pa_mcp.research.graham import get_graham_screener
+                    result = get_graham_screener().screen(pool)
+                    if not result:
+                        return "无格雷厄姆结果"
+                    return pd.DataFrame([{
+                        "symbol": x.symbol, "name": x.name,
+                        "score": x.score, "rating": x.rating,
+                        "margin_of_safety_pct": x.margin_of_safety_pct}
+                        for x in result]).to_csv(index=False)
+                return "未知导出类型"
+            finally:
+                store.close()
+
+        return "```csv\n" + _asyncio.run(_go()) + "\n```"
+    except Exception as e:
+        return f"导出失败：{str(e)[:200]}"
+
+
 def market_structure_ui() -> str:
     """市场结构联合分析（指数缠论 × 情绪矩阵）。"""
     try:
@@ -3099,6 +3188,16 @@ def build_app():
             ov_mp.click(predict_multi_ui, inputs=[ov_pool],
                         outputs=[ov_out])
             ov_sent.click(sentiment_cycle_ui, outputs=[ov_out])
+
+            with gr.Row():
+                ov_exp = gr.Dropdown(
+                    ["selection", "prediction", "portfolio", "graham"],
+                    value="selection",
+                    label="导出类型（CSV）", scale=1)
+                ov_exp_btn = gr.Button("📤 导出 CSV", variant="secondary",
+                                       scale=1)
+            ov_exp_btn.click(export_csv_ui, inputs=[ov_pool, ov_exp],
+                             outputs=[ov_out])
             gr.Markdown("全部输出研究参考，非投资建议。详细工具见各专用 Tab。")
 
         with gr.Tab("🔮 市场预测"):

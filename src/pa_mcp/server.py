@@ -2286,6 +2286,157 @@ async def chan_beichi_backtest(symbols: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def export_research_data(what: Literal["selection", "prediction",
+                                             "portfolio", "graham"] = "selection",
+                               symbols: str = "") -> dict[str, Any]:
+    """研究结果导出为 CSV（可复制/Excel 导入）。
+
+    Args:
+        what: 导出类型——
+          selection: 因子选股结果（IC 加权合成）
+          prediction: 多股票预测对比（方向/概率/期望/区间）
+          portfolio: 持仓明细（成本/现价/盈亏/占比/预测）
+          graham: 格雷厄姆筛选（7 条评分/内在价值/安全边际）
+        symbols: 股票池（逗号分隔；selection/prediction/graham 需要，
+            portfolio 忽略）
+    """
+    try:
+        import io
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        csv_text = ""
+
+        if what == "selection":
+            from pa_mcp.research.factors import select_stocks_by_factors
+            klines = {}
+            for sym in pool:
+                try:
+                    df = _store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 150", [sym]) if _store else None
+                    if df is None or df.empty:
+                        kdf, _ = await _get_kline_fallback(sym, days=150)
+                        df = kdf
+                    if df is not None and not df.empty:
+                        klines[sym] = df
+                except Exception:
+                    continue
+            if len(klines) < 5:
+                return _response(success=False,
+                                 error=f"仅 {len(klines)} 只股票有数据（需 ≥5）",
+                                 error_type="DATA_UNAVAILABLE")
+            result = select_stocks_by_factors(klines, top_n=len(klines))
+            if "error" in result:
+                return _response(success=False, error=result["error"],
+                                 error_type="DATA_UNAVAILABLE")
+            rows = []
+            for i, r in enumerate(result["selection"], 1):
+                rows.append({
+                    "rank": i, "symbol": r["symbol"],
+                    "score": r["score"],
+                    **{k: v for k, v in r["factor_details"].items()},
+                })
+            df = pd.DataFrame(rows)
+            buf = io.StringIO()
+            df.to_csv(buf, index=False)
+            csv_text = buf.getvalue()
+
+        elif what == "prediction":
+            from pa_mcp.agent.prediction import get_prediction_service
+            svc = get_prediction_service()
+            rows = []
+            for sym in pool[:10]:
+                try:
+                    kline_df = None
+                    if _store:
+                        try:
+                            kline_df = _store.query_df(
+                                "SELECT * FROM kline_daily WHERE symbol = ? "
+                                "ORDER BY date DESC LIMIT 160", [sym])
+                        except Exception:
+                            pass
+                    if kline_df is None or kline_df.empty:
+                        kdf, _ = await _get_kline_fallback(sym, days=160)
+                        kline_df = kdf
+                    if kline_df is None or kline_df.empty:
+                        continue
+                    p = (await svc.predict(sym, kline_df, horizon="5d",
+                                           use_llm=False)).to_dict()
+                    rows.append({
+                        "symbol": sym, "direction": p["direction"],
+                        "probability": p["probability"],
+                        "prob_up": p["probability_distribution"]["up"],
+                        "prob_down": p["probability_distribution"]["down"],
+                        "expected_return_pct": p["expected_return_pct"],
+                        "range_low": p["expected_range_pct"][0],
+                        "range_high": p["expected_range_pct"][1],
+                        "cycle": p["cycle_position"],
+                        "mode": p["mode"],
+                    })
+                except Exception:
+                    continue
+            if not rows:
+                return _response(success=False, error="无预测数据",
+                                 error_type="DATA_UNAVAILABLE")
+            buf = io.StringIO()
+            pd.DataFrame(rows).to_csv(buf, index=False)
+            csv_text = buf.getvalue()
+
+        elif what == "portfolio":
+            if not _store or not _store.table_exists("portfolio"):
+                return _response(success=False, error="无持仓",
+                                 error_type="DATA_UNAVAILABLE")
+            from pa_mcp.research.portfolio_risk import (
+                PortfolioRiskDashboard)
+            result = await PortfolioRiskDashboard().analyze(use_llm=False)
+            if "error" in result:
+                return _response(success=False, error=result["error"],
+                                 error_type="DATA_UNAVAILABLE")
+            rows = []
+            for h in result["holdings"]:
+                p = h.get("prediction") or {}
+                rows.append({
+                    "symbol": h["symbol"], "cost": h["cost"],
+                    "price": h["price"], "shares": h["shares"],
+                    "value": h["value"], "pnl_pct": h["pnl_pct"],
+                    "weight_pct": h["weight_pct"], "sector": h["sector"],
+                    "pred_direction": p.get("direction", ""),
+                    "pred_prob": p.get("probability", ""),
+                })
+            buf = io.StringIO()
+            pd.DataFrame(rows).to_csv(buf, index=False)
+            csv_text = buf.getvalue()
+
+        elif what == "graham":
+            from pa_mcp.research.graham import get_graham_screener
+            result = get_graham_screener().screen(pool)
+            if not result:
+                return _response(success=False, error="无格雷厄姆结果",
+                                 error_type="DATA_UNAVAILABLE")
+            rows = []
+            for r in result:
+                rows.append({
+                    "symbol": r.symbol, "name": r.name,
+                    "score": r.score, "total_scored": r.total_scored,
+                    "intrinsic_value": r.intrinsic_value,
+                    "margin_of_safety_pct": r.margin_of_safety_pct,
+                    "rating": r.rating,
+                })
+            buf = io.StringIO()
+            pd.DataFrame(rows).to_csv(buf, index=False)
+            csv_text = buf.getvalue()
+
+        if not csv_text:
+            return _response(success=False, error="导出失败",
+                             error_type="INTERNAL_ERROR")
+        return _response(data={"what": what, "csv": csv_text,
+                               "rows": csv_text.count("\n")})
+    except Exception as e:
+        logger.error("export_research_data failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def data_quality_report() -> dict[str, Any]:
     """数据质量体检：表覆盖 + K 线完整性（OHLC 一致性/非正/NaN/缺口）。
 
