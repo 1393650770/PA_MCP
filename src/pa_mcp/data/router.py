@@ -244,6 +244,10 @@ class DataSourceRouter:
             breaker = self._breakers[name]
             if not breaker.allow_request():
                 errors[name] = f"circuit open (tripped {breaker.health.trip_count}x)"
+                logger.debug(
+                    "Source skipped (circuit open)",
+                    source=name, trips=breaker.health.trip_count,
+                )
                 continue
 
             if not hasattr(adapter, "get_daily_kline"):
@@ -278,7 +282,9 @@ class DataSourceRouter:
             except Exception as e:
                 breaker.record_failure(str(e))
                 errors[name] = str(e)[:200]
-                logger.warning(
+                # 501/429 等风控类错误降级为 debug（避免批量请求刷屏）
+                is_ban = any(k in str(e) for k in ("501", "429", "403"))
+                (logger.debug if is_ban else logger.warning)(
                     "Source failed, trying next",
                     source=name, symbol=symbol, error=str(e)[:150],
                 )
