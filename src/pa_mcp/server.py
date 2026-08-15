@@ -1672,6 +1672,30 @@ async def agent_market_state() -> dict[str, Any]:
 # ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def predict_resonance(symbol: str) -> dict[str, Any]:
+    """多周期预测共振：1d/5d/20d 三周期方向一致性。
+
+    三周期同向 = 强共振（趋势确认，强度 100%）；两周期同向 = 共振
+    （70%）；方向分歧 = 观望（趋势不明）。确定性预测模式控成本。
+
+    Args:
+        symbol: 股票代码
+    """
+    try:
+        from pa_mcp.research.resonance import (
+            get_resonance_analyzer, format_resonance)
+        result = await get_resonance_analyzer().analyze(symbol)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result,
+                               "report": format_resonance(result)})
+    except Exception as e:
+        logger.error("predict_resonance failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def predict_market(symbol: str, horizon: Literal["1d", "5d", "20d"] = "5d",
                          save: bool = True) -> dict[str, Any]:
     """AI 市场预测：基于 K 线技术特征预测未来走势方向与概率。

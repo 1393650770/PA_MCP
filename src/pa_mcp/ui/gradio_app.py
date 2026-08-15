@@ -1356,6 +1356,23 @@ def calibration_fig_ui() -> tuple[Any, str]:
         return None, f"校准图生成失败：{str(e)[:200]}"
 
 
+def predict_resonance_ui(symbol: str) -> str:
+    """多周期预测共振（1d/5d/20d 方向一致性）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.resonance import (
+            get_resonance_analyzer, format_resonance)
+        result = _asyncio.run(get_resonance_analyzer().analyze(symbol))
+        if "error" in result:
+            return result["error"]
+        return format_resonance(result)
+    except Exception as e:
+        return f"多周期共振失败：{str(e)[:200]}"
+
+
 def predict_multi_ui(symbols: str) -> str:
     """多股票批量预测对比（方向/概率/区间并排）。"""
     symbols = symbols.strip()
@@ -3363,6 +3380,12 @@ def build_app():
             multi_out = gr.Markdown()
             multi_btn.click(predict_multi_ui, inputs=[multi_in],
                             outputs=[multi_out])
+
+            res_btn = gr.Button("🎯 多周期预测共振（1d/5d/20d 一致性）",
+                                variant="secondary")
+            res_out = gr.Markdown()
+            res_btn.click(predict_resonance_ui, inputs=[pred_sym],
+                          outputs=[res_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")
