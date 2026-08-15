@@ -1962,9 +1962,20 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
         except Exception:
             pass
 
+        # 指数结构方向（库内数据优先，best-effort）
+        market_bias = None
+        try:
+            from pa_mcp.research.market_structure import (
+                MarketStructureAnalyzer)
+            ms = await MarketStructureAnalyzer().analyze(use_network=False)
+            if ms["index"]["rows"] > 0:
+                market_bias = ms["joint"]["bias"]
+        except Exception:
+            pass
+
         tree = build_decision_tree(
             symbol, diagnosis=diagnosis, prediction=prediction,
-            stock_name=get_stock_name(symbol))
+            stock_name=get_stock_name(symbol), market_bias=market_bias)
         return _response(data={
             "symbol": symbol,
             "tree": tree["tree"],
@@ -1974,6 +1985,7 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
             "position_cap_pct": tree["position_cap_pct"],
             "risk_level": tree["risk_level"],
             "observations": tree["observations"],
+            "market_bias": market_bias,
         })
     except Exception as e:
         logger.error("get_decision_tree failed", symbol=symbol, error=str(e))

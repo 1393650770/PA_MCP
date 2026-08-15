@@ -1489,9 +1489,21 @@ def decision_tree_fig(symbol: str) -> tuple[Any, str]:
         except Exception:
             pass
 
+        # 指数结构方向（库内优先，best-effort）
+        market_bias = None
+        try:
+            from pa_mcp.research.market_structure import (
+                MarketStructureAnalyzer)
+            ms = asyncio.run(MarketStructureAnalyzer().analyze(
+                use_network=False))
+            if ms["index"]["rows"] > 0:
+                market_bias = ms["joint"]["bias"]
+        except Exception:
+            pass
+
         tree = build_decision_tree(
             symbol, diagnosis=diagnosis, prediction=prediction,
-            stock_name=get_stock_name(symbol))
+            stock_name=get_stock_name(symbol), market_bias=market_bias)
         summary = tree_summary(tree)
 
         # 布局 + 画图
