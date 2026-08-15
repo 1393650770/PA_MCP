@@ -848,6 +848,40 @@ def scan_market_ui(strategy: str, top_n: int = 10,
                      f"{r['strength']:.0f} | {wr} | {src} | {is_held} |")
     tip = get_strategy_tip(strategy)
     lines.append(f"\n**策略说明**：{tip.splitlines()[0] if tip else ''}")
+
+    # LLM 综合解读（有配置时增强）
+    if rows:
+        try:
+            from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+            adapter = get_llm_adapter()
+            if adapter is not None:
+                cand_text = "\n".join(
+                    f"- {r['symbol']} {r['name']}（板块{r.get('sector','?')}）"
+                    f"信号{r['signal_date']} 强度{r['strength']:.0f} "
+                    f"历史胜率{r['win_rate']:.0f}%"
+                    for r in rows[:10]
+                )
+                env_text = (env_line if "env_line" in dir() else
+                            "板块环境未知")
+                resp = asyncio.run(adapter.chat(LLMCallParams(
+                    system_prompt=(
+                        "你是 A 股市场扫描解读助手。基于候选清单与板块环境给出：\n"
+                        "1) 候选股优先级排序逻辑（哪些更值得先看）\n"
+                        "2) 板块机会解读（结合热门/冷门板块）\n"
+                        "3) 风险提示（信号时效、市场环境）\n"
+                        "仅基于给定数据，禁止编造。简洁中文，标注研究参考非投资建议。"
+                    ),
+                    user_prompt=(
+                        f"市场状态/板块环境：\n{env_text}\n\n"
+                        f"{strategy} 策略信号候选：\n{cand_text}"
+                    ),
+                    mode="fast", max_tokens=600,
+                )))
+                if resp.content and not resp.content.startswith('{"error'):
+                    lines.append("\n---\n💡 **AI 综合解读**：\n" + resp.content)
+        except Exception:
+            pass
+
     lines.append("\n⚠️ **重要说明**：此清单是*当前信号候选*，非预测上涨。"
                  "历史胜率是统计参考；信号可能失效，请结合基本面/资金面自行判断。"
                  "研究参考，非投资建议。")
