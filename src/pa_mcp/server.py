@@ -2016,6 +2016,37 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def graham_screen(symbols: str) -> dict[str, Any]:
+    """格雷厄姆价值筛选（《聪明的投资者》防御性投资标准）。
+
+    7 条标准逐条判定（可追溯）：规模≥50亿 / ROE≥10% / 近4期净利为正 /
+    股息（无数据源不评分）/ 净利同比均值>0 / PE<15 / PB<1.5 或 PE×PB<22.5。
+    + 成长公式内在价值 V = EPS×(8.5+2g) 与安全边际。
+    估值缺省从腾讯快照拉取（网络不可用时标 unavailable）。
+
+    Args:
+        symbols: 股票池（逗号分隔）
+    """
+    try:
+        from pa_mcp.research.graham import (
+            get_graham_screener, format_graham)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if not pool:
+            return _response(success=False, error="请输入股票代码",
+                             error_type="INVALID_ARGUMENT")
+        results = get_graham_screener().screen(pool)
+        return _response(data={
+            "count": len(results),
+            "results": [r.to_dict() for r in results],
+            "report": format_graham(results),
+        })
+    except Exception as e:
+        logger.error("graham_screen failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def strategy_compare(symbols: str = "") -> dict[str, Any]:
     """全策略事件研究对比（多策略同台检验）。
 

@@ -1701,6 +1701,21 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def graham_ui(symbols: str) -> str:
+    """格雷厄姆价值筛选（防御性 7 条 + 安全边际）。"""
+    try:
+        from pa_mcp.research.graham import (
+            get_graham_screener, format_graham)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if not pool:
+            return "请输入股票代码"
+        results = get_graham_screener().screen(pool)
+        return format_graham(results)
+    except Exception as e:
+        return f"格雷厄姆筛选失败：{str(e)[:200]}"
+
+
 def strategy_compare_ui(symbols: str) -> str:
     """全策略事件研究对比（10 策略同台检验预测力）。"""
     try:
@@ -2606,6 +2621,11 @@ def build_app():
             cmp_out = gr.Markdown()
             cmp_btn.click(strategy_compare_ui, inputs=[fs_pool],
                           outputs=[cmp_out])
+
+            gra_btn = gr.Button("📗 格雷厄姆价值筛选（防御性 7 条）",
+                                variant="secondary")
+            gra_out = gr.Markdown()
+            gra_btn.click(graham_ui, inputs=[fs_pool], outputs=[gra_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
