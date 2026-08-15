@@ -935,10 +935,10 @@ def portfolio_table() -> pd.DataFrame:
         return pd.DataFrame(columns=["symbol", "name", "cost", "shares", "added_date"])
 
 
-def portfolio_add_ui(symbol: str, cost: float, shares: int) -> str:
+def portfolio_add_ui(symbol: str, cost: float, shares: int) -> tuple[str, pd.DataFrame]:
     try:
         if shares < 100 or shares % 100 != 0:
-            return "❌ 股数必须 ≥100 且为 100 的整数倍"
+            return "❌ 股数必须 ≥100 且为 100 的整数倍", portfolio_table()
         store = _get_store()
         if not store.table_exists("portfolio"):
             store.execute("""
@@ -953,20 +953,20 @@ def portfolio_add_ui(symbol: str, cost: float, shares: int) -> str:
             "created_at": datetime.now().isoformat(),
         }])
         store.insert_df("portfolio", record, mode="insert")
-        return f"✅ 已添加 {symbol}：{shares} 股 @ {cost:.2f}"
+        return f"✅ 已添加 {symbol}：{shares} 股 @ {cost:.2f}", portfolio_table()
     except Exception as e:
-        return f"❌ 添加失败：{str(e)[:150]}"
+        return f"❌ 添加失败：{str(e)[:150]}", portfolio_table()
 
 
-def portfolio_remove_ui(symbol: str) -> str:
+def portfolio_remove_ui(symbol: str) -> tuple[str, pd.DataFrame]:
     try:
         store = _get_store()
         if not store.table_exists("portfolio"):
-            return "组合为空"
+            return "组合为空", portfolio_table()
         store.execute("DELETE FROM portfolio WHERE symbol = ?", [symbol.strip()])
-        return f"🗑️ 已删除 {symbol}"
+        return f"🗑️ 已删除 {symbol}", portfolio_table()
     except Exception as e:
-        return f"❌ 删除失败：{str(e)[:150]}"
+        return f"❌ 删除失败：{str(e)[:150]}", portfolio_table()
 
 
 def portfolio_review_ui() -> str:
