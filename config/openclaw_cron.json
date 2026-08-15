@@ -18,7 +18,7 @@
         "cron": "15 15 * * 1-5",
         "tz": "Asia/Shanghai",
         "sessionTarget": "isolated",
-        "prompt": "使用 PA_MCP 工具做 A 股收盘复盘：\n1. 调 scan_limit_up() 查看今日涨停梯队\n2. 调 review_dragon_tiger() 查看龙虎榜席位动向\n3. 调 agent_sector_analysis() 查看板块轮动\n4. 调 scan_market(strategy='bollinger_mean_reversion', top_n=10) 更新信号候选\n输出：涨停复盘/龙虎榜/板块轮动/明日关注候选。标注研究参考非投资建议。",
+        "prompt": "使用 PA_MCP 工具做 A 股收盘复盘：\n1. 调 scan_limit_up() 查看今日涨停梯队\n2. 调 sentiment_cycle() 获取游资情绪阶段（连板/晋级率/退潮预警）\n3. 调 regime_matrix() 获取情绪×轮动矩阵（市场状态标签+操作建议）\n4. 调 review_dragon_tiger() 查看龙虎榜席位动向\n5. 调 sector_rotation_status() 查看板块轮动状态\n6. 调 factor_stock_selection(symbols='自选池', prediction_weight=0.5) 获取因子+AI 混合选股\n7. 调 scan_market(strategy='bollinger_mean_reversion', top_n=10) 更新信号候选\n输出：涨停梯队/情绪阶段/矩阵建议/龙虎榜/板块轮动/选股清单/明日关注候选。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
       },
       {
@@ -37,6 +37,15 @@
         "tz": "Asia/Shanghai",
         "sessionTarget": "isolated",
         "prompt": "使用 PA_MCP 工具做持仓体检：\n1. 调 agent_portfolio_review() 获取持仓诊断\n2. 对告警标的调 get_valuation_snapshot() 看实时估值\n3. 调 get_data_source_health() 确认数据源\n输出：持仓健康度/集中度检查/风险告警/调整建议。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-prediction-evaluate",
+        "_description": "每日收盘后：自动回填预测验证（成绩单自动更新）",
+        "cron": "23 15 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具做预测自动验证：\n1. 调 evaluate_predictions() 回填已到期个股预测（命中率/Brier/IC/校准）\n2. 调 evaluate_sector_predictions() 回填板块轮动预测（top3超额）\n3. 调 prediction_history(symbol) 抽查新到期预测的命中状态\n输出：今日新回填预测数量/最新命中率/异常高误差预测提醒。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
       },
       {

@@ -40,9 +40,26 @@ def test_registry_builtin_factors():
     names = {f.name for f in reg.list_all()}
     assert {"ma_gap20", "rsi14", "macd_hist", "atr_pct",
             "boll_position", "vol_ratio", "ret20", "ret60",
-            "high_52w_dist"} <= names
+            "high_52w_dist", "chan_beichi"} <= names
     cats = {f.category for f in reg.list_all()}
     assert "momentum" in cats and "mean_reversion" in cats
+
+
+def test_chan_beichi_factor():
+    """缠论背驰因子：锯齿衰减行情能产生 ±1 信号，值域合法。"""
+    from pa_mcp.research.factors import evaluate_factor
+    from tests.test_canslim_chan import _zigzag_df
+    fd = get_factor_registry().get("chan_beichi")
+    df = _zigzag_df()
+    r = evaluate_factor(fd, df, horizon=5)
+    if "error" in r:
+        # 背驰信号稀疏，样本可能不足——但必须能算因子值
+        d = df.sort_values("date").reset_index(drop=True)
+        vals = fd.fn(d)
+        assert set(vals.unique()) <= {0.0, 1.0, -1.0}
+        assert (vals != 0).sum() >= 1  # 有非零信号
+    else:
+        assert -1.0 <= r["ic"] <= 1.0
 
 
 def test_evaluate_factor_momentum():

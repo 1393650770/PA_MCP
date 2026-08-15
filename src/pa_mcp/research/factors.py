@@ -161,6 +161,35 @@ def _f_high52_dist(df: pd.DataFrame) -> pd.Series:
     return (d["close"] / hi - 1) * 100
 
 
+@_registry.factor("chan_beichi", "mean_reversion",
+                  "缠论背驰信号（+1 下跌背驰看多 / -1 上涨背驰看空 / 0 无）",
+                  lookback=40)
+def _f_chan_beichi(df: pd.DataFrame) -> pd.Series:
+    """缠论背驰编码为因子：滚动窗口检测，信号日置 ±1（NaN 填充 0）。
+
+    性能：窗口 40 根 + 步长 5（背驰需 ≥5 笔，40 根通常足够；
+    全历史重算成本高，步长 5 权衡覆盖率与耗时）。
+    """
+    from pa_mcp.engine.indicators.chan import chan_analysis
+    d = _ensure(df)
+    n = len(d)
+    out = pd.Series(0.0, index=d.index)
+    window = min(40, max(30, n // 4))
+    if n < window + 5:
+        return out
+    for i in range(window - 1, n, 5):
+        win = d.iloc[i - window + 1:i + 1]
+        try:
+            a = chan_analysis(win, with_macd=True)
+        except Exception:
+            continue
+        if a.beichi_signal == "bullish":
+            out.iloc[i] = 1.0
+        elif a.beichi_signal == "bearish":
+            out.iloc[i] = -1.0
+    return out
+
+
 def get_factor_registry() -> FactorRegistry:
     """获取因子注册表（单例）。"""
     return _registry
