@@ -137,6 +137,12 @@
 | 决策树市场偏向 | implemented_verified | `build_decision_tree(market_bias=)`, MCP `get_decision_tree`, UI 🌳 | 指数偏空 → 看涨预测降级中性+仓位上限 30%；偏多 → 看跌降级+上限≥40% | 偏空/偏多修正 2项 | 需指数数据 |
 | 预测周期分组验证 | implemented_verified | `prediction._summary by_horizon`, UI 成绩单 | 1d/5d/20d 命中率/Brier 独立统计（短周期是否更准） | 分组结构/1d 判定 1项 | 需各周期样本 |
 
+| 预测周期分组验证 | implemented_verified | `prediction._summary by_horizon`, UI 成绩单 | 1d/5d/20d 命中率/Brier 独立统计（短周期是否更准） | 分组结构/1d 判定 1项 | 需各周期样本 |
+| 校准曲线可视化 | implemented_verified | `ui._build_calibration_figure`, UI 🎯 | 概率桶 vs 实际命中率柱状图 + 完美校准参考线，过度自信红色标记 | 图构建/参考线/红标 1项 | 需 ≥4 条有方向预测 |
+| 持仓风险可视化 | implemented_verified | `ui.portfolio_risk_fig`, UI 📊 | 持仓权重饼图（预测方向标注）+ 盈亏条形图 + 风险评分标题 | 空持仓降级冒烟 | 复用风险面板数据 |
+| 每日数据自动更新 | implemented_verified | MCP `run_daily_update`, cron `pamcp-data-load` | 调度器 8-phase 全链路 + 数据体检联动（评分<70 告警） | 调度器既有测试覆盖 | 耗时 2 分钟+ |
+| 市场结构×预测联动 | implemented_verified | `prediction._market_bias_context`, 预测 prompt | 指数缠论方向注入个股预测 prompt（个股/板块/大盘三层环境） | 注入文本/无数据空串 1项 | 库内指数数据优先 |
+
 ## 工程基础
 
 | 能力 | 状态 | 入口 | 测试 | 限制 |

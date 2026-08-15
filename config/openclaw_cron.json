@@ -1,6 +1,7 @@
 {
   "_comment": "OpenClaw 定时任务配置（适配 PA_MCP MCP 工具）",
   "_usage": "1) 将 scheduler 段合并到 openclaw 配置文件；或 2) 用下方 CLI 命令逐条添加",
+  "_task_list": "9 任务：pamcp-data-load(15:05 数据更新) / pamcp-prediction-evaluate(15:23 验证回填) / pamcp-portfolio-check(14:45 持仓体检) / pamcp-morning-brief(8:17 盘前研报) / pamcp-prediction-brief(8:17 预测简报) / pamcp-sector-rotation(8:23 板块晨报) / pamcp-close-review(15:15 收盘复盘) / pamcp-prediction-review(周五15:45 预测复盘) / pamcp-weekly-research(周五15:30 周研究) / pamcp-sunday-report(周日16:07 综合周报)",
   "scheduler": {
     "tasks": [
       {
