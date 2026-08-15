@@ -2370,6 +2370,57 @@ def market_structure_ui() -> str:
         return f"市场结构分析失败：{str(e)[:200]}"
 
 
+def portfolio_risk_fig() -> tuple[Any, str]:
+    """持仓风险可视化：权重饼图（含预测方向）+ 盈亏条形图。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.portfolio_risk import get_risk_dashboard
+        r = _asyncio.run(get_risk_dashboard().analyze(use_llm=False))
+        if "error" in r:
+            return None, r["error"]
+        holdings = r["holdings"]
+
+        fig = make_subplots(
+            rows=1, cols=2,
+            specs=[[{"type": "pie"}, {"type": "xy"}]],
+            subplot_titles=("持仓权重（含预测方向）", "持仓盈亏%"))
+        # 饼图
+        labels = []
+        values = []
+        colors = []
+        for h in holdings:
+            p = h.get("prediction") or {}
+            d = p.get("direction", "")
+            mark = {"up": "📈", "down": "📉", "sideways": "➡️"}.get(d, "")
+            labels.append(f"{h['symbol']}{mark}")
+            values.append(h["weight_pct"])
+            colors.append("#e03131" if d == "down" else
+                          "#2b8a3e" if d == "up" else "#868e96")
+        fig.add_trace(go.Pie(
+            labels=labels, values=values, hole=0.4,
+            marker=dict(colors=colors),
+            textinfo="label+percent"), row=1, col=1)
+        # 盈亏条形图
+        syms = [h["symbol"] for h in holdings]
+        pnls = [h["pnl_pct"] for h in holdings]
+        bar_colors = ["#e03131" if p < 0 else "#2b8a3e" for p in pnls]
+        fig.add_trace(go.Bar(
+            x=syms, y=pnls, marker=dict(color=bar_colors),
+            text=[f"{p:+.1f}%" for p in pnls], textposition="outside"),
+            row=1, col=2)
+        fig.update_layout(
+            title=f"🛡️ 持仓风险视图（风险评分 {r['risk_score']}（{r['risk_level']}））",
+            height=420, showlegend=False,
+            margin=dict(l=10, r=10, t=60, b=10))
+        note = ("饼图颜色：绿=预测看涨 / 红=预测看跌 / 灰=震荡。\n"
+                f"集中度 HHI {r['concentration']['hhi']:.3f}，"
+                f"单票最大 {r['concentration']['top_weight_pct']:.1f}%。"
+                "研究参考，非投资建议。")
+        return fig, note
+    except Exception as e:
+        return None, f"持仓风险图失败：{str(e)[:200]}"
+
+
 def portfolio_risk_ui() -> str:
     """持仓风险面板（盈亏×预测×集中度×评分）。"""
     try:
@@ -3332,6 +3383,13 @@ def build_app():
                                  variant="secondary")
             risk_out = gr.Markdown()
             risk_btn.click(portfolio_risk_ui, outputs=[risk_out])
+
+            risk_fig_btn = gr.Button("📊 持仓风险图（权重/盈亏）",
+                                     variant="secondary")
+            risk_fig = gr.Plot()
+            risk_fig_note = gr.Markdown()
+            risk_fig_btn.click(portfolio_risk_fig,
+                               outputs=[risk_fig, risk_fig_note])
 
             ms_btn = gr.Button("🏛️ 市场结构联合分析（指数缠论×情绪）",
                                variant="secondary")
