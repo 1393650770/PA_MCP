@@ -87,6 +87,72 @@ def test_ice_stage(tmp_path):
     assert a["limit_up_count"] < 10
 
 
+def test_sentiment_summary(tmp_path):
+    """摘要方法：关键字段齐全；失败返回空 dict（best-effort）。"""
+    db = _seed_market(tmp_path, {
+        "2026-08-03": {"600001": 10.0, "600002": 10.0},
+        "2026-08-04": {"600001": 10.0, "600002": 10.0, "600003": 10.0},
+    })
+    a = SentimentCycleAnalyzer(store_path=db)
+    s = a.sentiment_summary("2026-08-04")
+    assert s.get("date") == "2026-08-04"
+    assert "stage" in s and "sentiment_score" in s
+    assert "max_board_height" in s and "promotion_rate" in s
+    # 空库 → 空 dict
+    empty = SentimentCycleAnalyzer(store_path=str(tmp_path / "none.db"))
+    assert empty.sentiment_summary() == {}
+
+
+def test_diagnosis_with_sentiment_context(tmp_path):
+    """市场诊断集成：情绪上下文注入 LLM prompt + 确定性冰点降级。"""
+    import asyncio
+    from pa_mcp.agent.orchestrator import AgentOrchestrator
+
+    # 确定性：情绪冰点 → frozen
+    orch = AgentOrchestrator()
+    d = orch._diagnosis_deterministic({
+        "limit_up_count": 5, "turnover_billion": 300,
+        "sentiment": {"stage": "ice", "stage_zh": "冰点期",
+                      "sentiment_score": 12, "max_board_height": 1},
+    })
+    assert d["market_state"] == "frozen"
+    assert any("冰点" in o for o in d["key_observations"])
+
+    # LLM 路径：情绪格式化注入 user_prompt
+    class P:
+        system_prompt = ""
+        user_prompt = ""
+        mode = "fast"
+        max_tokens = 100
+
+    class MockAdapter:
+        provider_name = "mock"
+
+        async def chat_json(self, params):
+            self.last = params.user_prompt
+            return {"market_state": "fermenting", "confidence": 70,
+                    "suggested_max_position_pct": 60, "risk_level": "medium",
+                    "key_observations": []}
+
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    adapter = MockAdapter()
+    llm_port.register_adapter(adapter)
+    try:
+        d2 = asyncio.run(orch.market_diagnosis({
+            "limit_up_count": 40,
+            "sentiment": {"stage_zh": "发酵期", "sentiment_score": 65,
+                          "max_board_height": 4, "promotion_rate": 0.5,
+                          "board2_count": 10, "board3_count": 5,
+                          "board4p_count": 2},
+        }))
+        assert d2["market_state"] == "fermenting"
+        assert "游资情绪" in adapter.last
+        assert "发酵期" in adapter.last
+    finally:
+        llm_port.register_adapter(orig)
+
+
 def test_climax_stage(tmp_path):
     """高潮期：连板高度 ≥5 且涨停 ≥50。"""
     db = _seed_market(tmp_path, {

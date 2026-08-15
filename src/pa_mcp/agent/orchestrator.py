@@ -351,7 +351,26 @@ class AgentOrchestrator:
         if adapter is None:
             return self._diagnosis_deterministic(market_context)
 
-        ctx = "未提供市场观测数据" if not market_context else str(market_context)[:1500]
+        # 上下文格式化（含游资情绪周期：LLM 可读的中文描述）
+        if market_context:
+            parts = []
+            for k in ("limit_up_count", "limit_down_count", "up_count",
+                      "down_count", "turnover_billion", "date"):
+                if k in market_context:
+                    parts.append(f"{k}={market_context[k]}")
+            senti = market_context.get("sentiment")
+            if isinstance(senti, dict):
+                parts.append(
+                    f"游资情绪={senti.get('stage_zh', senti.get('stage', ''))}"
+                    f"（情绪分{senti.get('sentiment_score')}，"
+                    f"连板高度{senti.get('max_board_height')}板，"
+                    f"晋级率{senti.get('promotion_rate')}，"
+                    f"2板{senti.get('board2_count')}/"
+                    f"3板{senti.get('board3_count')}/"
+                    f"4板+{senti.get('board4p_count')}）")
+            ctx = "；".join(parts) or "无"
+        else:
+            ctx = "未提供市场观测数据"
         params = LLMCallParams(
             system_prompt=(
                 "你是有经验的 A 股市场策略师。只输出合法 JSON。"
@@ -384,8 +403,19 @@ class AgentOrchestrator:
 
     @staticmethod
     def _diagnosis_deterministic(market_context: Optional[dict]) -> dict:
-        """无 LLM 时的确定性诊断（基于成交额/涨跌统计，不编造）。"""
+        """无 LLM 时的确定性诊断（基于成交额/涨跌统计 + 情绪佐证，不编造）。"""
         state, notes = "dull", []
+        try:
+            # 游资情绪佐证：情绪冰点且无明确回暖信号 → 降级 frozen
+            senti = market_context.get("sentiment") if isinstance(
+                market_context, dict) else None
+            if isinstance(senti, dict) and senti.get("stage") == "ice":
+                notes.append(
+                    f"游资情绪冰点（情绪分{senti.get('sentiment_score')}，"
+                    f"连板高度{senti.get('max_board_height')}板）")
+                state = "frozen"
+        except Exception:
+            pass
         try:
             if isinstance(market_context, dict):
                 turnover = float(market_context.get("turnover_billion", 0) or 0)

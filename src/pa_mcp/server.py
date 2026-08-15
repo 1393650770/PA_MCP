@@ -1811,6 +1811,16 @@ async def agent_market_diagnosis() -> dict[str, Any]:
             except Exception:
                 pass
 
+            # 情绪周期上下文注入（游资情绪 → LLM 市场诊断）
+            try:
+                from pa_mcp.research.sentiment_cycle import (
+                    get_sentiment_analyzer)
+                sentiment = get_sentiment_analyzer().sentiment_summary()
+                if sentiment:
+                    market_context["sentiment"] = sentiment
+            except Exception:
+                pass
+
         orch = get_orchestrator()
         diagnosis = await orch.market_diagnosis(market_context or None)
         return _response(data=diagnosis)

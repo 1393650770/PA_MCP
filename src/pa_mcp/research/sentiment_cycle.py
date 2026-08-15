@@ -270,6 +270,34 @@ class SentimentCycleAnalyzer:
         }]))
 
 
+    # ---- 轻量摘要（供市场诊断/LLM 上下文注入） ----
+    def sentiment_summary(self, target_date: Optional[str] = None) -> dict[str, Any]:
+        """情绪关键指标摘要（供 market_diagnosis 上下文注入）。
+
+        返回精简字段（失败返回空 dict，不抛异常——best-effort）。
+        """
+        try:
+            r = self.analyze(target_date=target_date, lookback=3)
+            if "error" in r:
+                return {}
+            return {
+                "date": r["date"],
+                "stage": r["stage"],
+                "stage_zh": r["stage_zh"],
+                "sentiment_score": r["sentiment_score"],
+                "max_board_height": r["max_board_height"],
+                "promotion_rate": r["promotion_rate"],
+                "limit_up_count": r["limit_up_count"],
+                "limit_down_count": r["limit_down_count"],
+                "board2_count": r["board2_count"],
+                "board3_count": r["board3_count"],
+                "board4p_count": r["board4p_count"],
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.debug("sentiment summary unavailable", error=str(e))
+            return {}
+
+
 _analyzer: Optional[SentimentCycleAnalyzer] = None
 
 
