@@ -469,6 +469,38 @@ def test_position_sizing_down_zero():
         assert sizing["suggested_position_pct"] >= 0.0
 
 
+def test_predict_1d_horizon():
+    """次日方向预测（1d）：输出结构与 5d 一致。"""
+    import numpy as np
+    np.random.seed(17)
+    rows = []
+    close = 10.0
+    for i in range(120):
+        close *= 1 + np.random.normal(0.001, 0.015)
+        rows.append({"date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6})
+    df = pd.DataFrame(rows)
+
+    import asyncio as _asyncio
+    from pa_mcp.agent.prediction import PredictionService
+    r = _asyncio.run(PredictionService().predict(
+        "600000", df, horizon="1d", use_llm=False))
+    assert r.horizon == "1d"
+    p = r.to_dict()
+    assert p["direction"] in ("up", "down", "sideways")
+    assert abs(p["probability_distribution"]["up"]
+               + p["probability_distribution"]["down"]
+               + p["probability_distribution"]["sideways"] - 1.0) < 0.011
+    # 1d 区间更窄（波动尺度小）
+    r5 = _asyncio.run(PredictionService().predict(
+        "600000", df, horizon="5d", use_llm=False))
+    w1 = p["expected_range_pct"][1] - p["expected_range_pct"][0]
+    w5 = r5.to_dict()["expected_range_pct"][1] \
+        - r5.to_dict()["expected_range_pct"][0]
+    assert w1 < w5
+
+
 def test_multi_predict_compare():
     """批量预测：多股票对比结果结构正确（确定性模式，无网络）。"""
     import numpy as np

@@ -386,7 +386,7 @@ class PredictionService:
             use_llm: True = LLM 优先（无配置自动降级）；False = 强制
                 确定性统计预测（批量/敏感性分析时控制成本）
         """
-        horizon = horizon if horizon in ("5d", "20d") else "5d"
+        horizon = horizon if horizon in ("1d", "5d", "20d") else "5d"
         today = date.today().isoformat()
         features = extract_features(kline_df)
         if "error" in features:
@@ -535,7 +535,7 @@ class PredictionService:
     def _predict_deterministic(self, symbol: str, predict_date: str,
                                horizon: str, features: dict[str, Any]) -> PredictionResult:
         """无 LLM 时的确定性统计预测（方向打分 + 概率映射）。"""
-        h = 5 if horizon == "5d" else 20
+        h = {"1d": 1, "5d": 5, "20d": 20}.get(horizon, 5)
         ret20 = features["ret20_pct"]
         rsi = features["rsi14"]
         adx = features["adx14"]
@@ -709,7 +709,7 @@ class PredictionService:
                 df = klines.get(sym)
                 if df is None:
                     continue
-                h_days = 5 if hor == "5d" else 20
+                h_days = {"1d": 1, "5d": 5, "20d": 20}.get(hor, 5)
                 predict_dt = str(row["predict_date"])[:10]
                 # 找预测日之后的行情
                 after = df[df["date"].astype(str).str[:10] >= predict_dt]

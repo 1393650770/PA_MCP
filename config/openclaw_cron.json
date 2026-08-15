@@ -9,7 +9,7 @@
         "cron": "0 8 * * 1-5",
         "tz": "Asia/Shanghai",
         "sessionTarget": "isolated",
-        "prompt": "使用 PA_MCP 工具生成今日盘前简报：\n1. 调 get_data_source_health() 确认数据源健康\n2. 调 ai_market_report(symbols='000001,600036,300750,000858,600519,601318') 一键生成 AI 市场研究报告（市场状态/情绪矩阵/板块轮动/因子选股/价值动量/LLM综述）\n3. 调 predict_sector_rotation() 获取板块轮动预测（强势板块候选）\n4. 调 regime_matrix() 确认情绪×轮动操作建议\n5. 对持仓调 predict_market(symbol, horizon='5d') 获取个股预测\n6. 调 scan_market(strategy='bollinger_mean_reversion', top_n=10) 获取当前买入信号候选\n输出：AI 研报摘要/板块预测/持仓预测/信号候选/风险提示。标注研究参考非投资建议。",
+        "prompt": "使用 PA_MCP 工具生成今日盘前简报：\n1. 调 get_data_source_health() 确认数据源健康\n2. 调 market_structure() 获取市场结构联合分析（指数缠论×情绪矩阵，市场方向判断）\n3. 调 ai_market_report(symbols='000001,600036,300750,000858,600519,601318') 一键生成 AI 市场研究报告\n4. 调 predict_sector_rotation() 获取板块轮动预测\n5. 对持仓调 predict_market(symbol, horizon='1d') 获取次日方向预测\n6. 调 scan_market(strategy='bollinger_mean_reversion', top_n=10) 获取信号候选\n输出：市场结构方向/研报摘要/板块预测/持仓次日预测/信号候选/风险提示。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
       },
       {

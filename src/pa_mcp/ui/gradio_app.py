@@ -3044,7 +3044,7 @@ def build_app():
                         "预测落盘可验证命中率（不做纯算命）。")
             with gr.Row():
                 pred_sym = gr.Textbox(label="股票代码", value="000001", scale=2)
-                pred_horizon = gr.Radio(["5d", "20d"], value="5d",
+                pred_horizon = gr.Radio(["1d", "5d", "20d"], value="5d",
                                         label="预测周期", scale=1)
                 pred_btn = gr.Button("预测", variant="primary", scale=1)
             pred_out = gr.Markdown()

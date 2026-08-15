@@ -1672,7 +1672,7 @@ async def agent_market_state() -> dict[str, Any]:
 # ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def predict_market(symbol: str, horizon: Literal["5d", "20d"] = "5d",
+async def predict_market(symbol: str, horizon: Literal["1d", "5d", "20d"] = "5d",
                          save: bool = True) -> dict[str, Any]:
     """AI 市场预测：基于 K 线技术特征预测未来走势方向与概率。
 
@@ -1721,7 +1721,7 @@ async def predict_market(symbol: str, horizon: Literal["5d", "20d"] = "5d",
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def predict_position_size(symbol: str, account_value: float = 100000.0,
-                                horizon: Literal["5d", "20d"] = "5d",
+                                horizon: Literal["1d", "5d", "20d"] = "5d",
                                 base_position_pct: float = 0.0) -> dict[str, Any]:
     """预测驱动的仓位建议（Risk Manager 思路，借鉴 ai-hedge-fund）。
 
@@ -1764,7 +1764,7 @@ async def predict_position_size(symbol: str, account_value: float = 100000.0,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def predict_market_multi(symbols: str, horizon: Literal["5d", "20d"] = "5d",
+async def predict_market_multi(symbols: str, horizon: Literal["1d", "5d", "20d"] = "5d",
                                save: bool = True) -> dict[str, Any]:
     """多股票批量预测对比（方向/概率/区间/周期并排比较）。
 
