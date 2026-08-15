@@ -246,7 +246,17 @@ class DuckDBStore:
             db_dir = Path(self.db_path).parent
             os.makedirs(db_dir, exist_ok=True)
 
-            self._conn = duckdb.connect(self.db_path)
+            try:
+                self._conn = duckdb.connect(self.db_path)
+            except Exception as e:
+                if "already open" in str(e) or "正在使用" in str(e):
+                    raise RuntimeError(
+                        f"DuckDB 文件被其他进程锁定: {self.db_path}\n"
+                        f"原因: 可能有残留的 python 进程仍持有数据库连接。\n"
+                        f"解决: 1) 任务管理器结束残留 python 进程  "
+                        f"2) 或运行: taskkill /F /IM python.exe 3) 重启终端后重试"
+                    ) from e
+                raise
             logger.info("DuckDB connected", path=self.db_path)
             self._init_tables()
         return self._conn
