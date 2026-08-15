@@ -1672,6 +1672,44 @@ async def agent_market_state() -> dict[str, Any]:
 # ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def resonance_event_study(symbol: str) -> dict[str, Any]:
+    """共振信号事件研究：三周期共振是否有额外预测力。
+
+    滚动窗口（每 5 日）扫描强共振信号（1d/5d/20d 同向，强度≥70%）
+    → 信号后 5/10/20 日收益 vs 无条件基准 → has_edge 判定。
+    「预测共振可检验」。
+
+    Args:
+        symbol: 股票代码（需 ≥180 根行情）
+    """
+    try:
+        from pa_mcp.research.resonance import (
+            resonance_event_study as run_es,
+            format_resonance_event_study)
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 400", [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=400)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+        result = run_es(symbol, kline_df)
+        return _response(data={**result,
+                               "report": format_resonance_event_study(result)})
+    except Exception as e:
+        logger.error("resonance_event_study failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def predict_resonance(symbol: str) -> dict[str, Any]:
     """多周期预测共振：1d/5d/20d 三周期方向一致性。
 

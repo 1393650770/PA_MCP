@@ -59,3 +59,24 @@ def test_resonance_no_data():
     r = asyncio.run(ResonanceAnalyzer(
         store_path=":memory:").analyze("000001", kline_df=pd.DataFrame()))
     assert "error" in r
+
+
+def test_scan_and_event_study():
+    """强趋势 → 共振 up 信号 → 事件研究可跑（可检验性）。"""
+    from pa_mcp.research.resonance import (
+        scan_resonance_signals, resonance_event_study)
+    df = _df(n=250, trend=0.005)  # 强上涨趋势
+    sig = asyncio.run(scan_resonance_signals("000001", df, step=10))
+    assert not sig.empty, "强趋势应产生共振信号"
+    assert sig["direction"].isin(["up", "down"]).all()
+    assert sig["strategy_name"].eq("resonance").all()
+
+    r = resonance_event_study("000001", df, step=10)
+    assert r["n_signals"] >= 1
+    assert r["results"]
+    assert "has_edge" in r
+    text = __import__(
+        "pa_mcp.research.resonance",
+        fromlist=["format_resonance_event_study"]
+    ).format_resonance_event_study(r)
+    assert "共振信号事件研究" in text or "未检出" in text

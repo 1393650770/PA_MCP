@@ -1356,6 +1356,23 @@ def calibration_fig_ui() -> tuple[Any, str]:
         return None, f"校准图生成失败：{str(e)[:200]}"
 
 
+def resonance_event_study_ui(symbol: str) -> str:
+    """共振信号事件研究（三周期同向信号的预测力）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.research.resonance import (
+            resonance_event_study, format_resonance_event_study)
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+        result = resonance_event_study(symbol, df)
+        return format_resonance_event_study(result)
+    except Exception as e:
+        return f"共振事件研究失败：{str(e)[:200]}"
+
+
 def predict_resonance_ui(symbol: str) -> str:
     """多周期预测共振（1d/5d/20d 方向一致性）。"""
     symbol = symbol.strip()
@@ -3404,6 +3421,11 @@ def build_app():
             res_out = gr.Markdown()
             res_btn.click(predict_resonance_ui, inputs=[pred_sym],
                           outputs=[res_out])
+
+            res_es_btn = gr.Button("🎯 共振信号事件研究（预测力检验）",
+                                   variant="secondary")
+            res_es_btn.click(resonance_event_study_ui, inputs=[pred_sym],
+                             outputs=[res_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")
