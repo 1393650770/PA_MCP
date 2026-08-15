@@ -1701,6 +1701,16 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def regime_matrix_ui() -> str:
+    """情绪×轮动联合矩阵：市场状态标签 + 操作建议。"""
+    try:
+        from pa_mcp.research.regime_matrix import (
+            get_regime_analyzer, format_matrix)
+        return format_matrix(get_regime_analyzer().analyze())
+    except Exception as e:
+        return f"矩阵分析失败：{str(e)[:200]}"
+
+
 def sentiment_cycle_ui() -> str:
     """游资情绪周期：涨停梯队/连板高度/晋级率/阶段。"""
     try:
@@ -2428,6 +2438,11 @@ def build_app():
                                variant="secondary")
             sc_out = gr.Markdown()
             sc_btn.click(sentiment_cycle_ui, outputs=[sc_out])
+
+            rm_btn = gr.Button("🧭 情绪×轮动联合矩阵（Regime Matrix）",
+                               variant="secondary")
+            rm_out = gr.Markdown()
+            rm_btn.click(regime_matrix_ui, outputs=[rm_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 

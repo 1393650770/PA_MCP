@@ -1948,6 +1948,25 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def regime_matrix() -> dict[str, Any]:
+    """情绪 × 轮动联合矩阵（Regime Matrix）。
+
+    游资情绪阶段（启动/发酵/高潮/退潮/冰点）× 板块轮动速度（高/中/低）
+    → 9 格矩阵：市场状态标签 + 操作建议 + 风险提示。
+    「情绪决定做不做，轮动决定做什么」——纯复用 sentiment_cycle 与
+    sector_rotation 的合成视图。
+    """
+    try:
+        from pa_mcp.research.regime_matrix import (
+            get_regime_analyzer, format_matrix)
+        result = get_regime_analyzer().analyze()
+        return _response(data={**result, "report": format_matrix(result)})
+    except Exception as e:
+        logger.error("regime_matrix failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def chan_beichi_event_study(symbol: str) -> dict[str, Any]:
     """缠论背驰信号事件研究（大牛方法可检验性）。
 
