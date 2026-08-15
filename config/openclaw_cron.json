@@ -82,7 +82,7 @@
         "cron": "7 16 * * 0",
         "tz": "Asia/Shanghai",
         "sessionTarget": "isolated",
-        "prompt": "使用 PA_MCP 工具生成周日综合研究报告：\n1. 调 ai_market_report(symbols='000001,600036,300750,000858,600519,601318') 获取 AI 市场研究报告（含 LLM 综述）\n2. 调 strategy_compare() 获取全策略事件研究对比（有效策略清单）\n3. 调 factor_stock_selection(symbols='同上', prediction_weight=0.5) 获取因子+AI 选股\n4. 调 value_momentum_screen(symbols='同上') 获取价值×动量候选\n5. 调 evaluate_predictions() + evaluate_sector_predictions() 获取预测成绩单\n6. 调 agent_memory_status(days=30) 获取记忆胜率与偏差\n输出：下周市场展望/有效策略/选股候选/预测成绩/记忆状态 完整周报。标注研究参考非投资建议。",
+        "prompt": "使用 PA_MCP 工具生成周日综合研究报告：\n1. 调 ai_market_report(symbols='000001,600036,300750,000858,600519,601318') 获取 AI 市场研究报告（含 LLM 综述与核心共振）\n2. 调 strategy_compare() 获取全策略事件研究对比（有效策略清单）\n3. 调 factor_stock_selection(symbols='同上', prediction_weight=0.5) 获取因子+AI 选股\n4. 调 value_momentum_screen(symbols='同上') 获取价值×动量候选\n5. 对核心标的调 predict_resonance(symbol) 获取三周期共振信号\n6. 调 evaluate_predictions() + evaluate_sector_predictions() 获取预测成绩单\n7. 调 agent_memory_status(days=30) 获取记忆胜率与偏差\n输出：下周市场展望/有效策略/选股候选/共振信号/预测成绩/记忆状态 完整周报。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
       },
       {
