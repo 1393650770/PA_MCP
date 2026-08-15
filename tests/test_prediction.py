@@ -469,6 +469,44 @@ def test_position_sizing_down_zero():
         assert sizing["suggested_position_pct"] >= 0.0
 
 
+def test_multi_predict_compare():
+    """批量预测：多股票对比结果结构正确（确定性模式，无网络）。"""
+    import numpy as np
+    np.random.seed(15)
+    rows = []
+    close = 10.0
+    for i in range(130):
+        close *= 1 + np.random.normal(0.001, 0.015)
+        rows.append({"date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6})
+    df = pd.DataFrame(rows)
+
+    import asyncio as _asyncio
+    from pa_mcp.agent.prediction import PredictionService
+    svc = PredictionService()
+
+    async def _go():
+        out = []
+        for sym in ("600000", "600001", "600002"):
+            r = await svc.predict(sym, df, horizon="5d", use_llm=False)
+            p = r.to_dict()
+            out.append({"symbol": sym, "direction": p["direction"],
+                        "probability": p["probability"],
+                        "prob_up": p["probability_distribution"]["up"],
+                        "expected_return_pct": p["expected_return_pct"],
+                        "cycle": p["cycle_position"]})
+        return out
+
+    results = _asyncio.run(_go())
+    assert len(results) == 3
+    for r in results:
+        assert r["direction"] in ("up", "down", "sideways")
+        assert 0 <= r["probability"] <= 1
+        assert r["prob_up"] >= 0
+        assert "cycle" in r
+
+
 def test_evaluate_sideways_threshold(tmp_path):
     db = tmp_path / "pred_test2.duckdb"
     svc = PredictionService(store_path=str(db))

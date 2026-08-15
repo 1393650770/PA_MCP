@@ -1740,6 +1740,74 @@ async def predict_position_size(symbol: str, account_value: float = 100000.0,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def predict_market_multi(symbols: str, horizon: Literal["5d", "20d"] = "5d",
+                               save: bool = True) -> dict[str, Any]:
+    """多股票批量预测对比（方向/概率/区间/周期并排比较）。
+
+    对每只股票调用市场预测（LLM 优先/统计降级，含板块上下文），
+    输出对比表——快速识别相对强弱（谁更看涨、谁区间更宽）。
+
+    Args:
+        symbols: 股票代码（逗号分隔，2-10 只）
+        horizon: 预测周期 '5d' 或 '20d'
+        save: 是否落盘以便日后验证
+    """
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return _response(success=False, error="至少需要 2 只股票",
+                             error_type="INVALID_ARGUMENT")
+        if len(pool) > 10:
+            pool = pool[:10]
+
+        svc = get_prediction_service()
+        rows = []
+        for sym in pool:
+            try:
+                kline_df = None
+                if _store:
+                    try:
+                        kline_df = _store.query_df(
+                            "SELECT * FROM kline_daily WHERE symbol = ? "
+                            "ORDER BY date DESC LIMIT 160", [sym])
+                    except Exception:
+                        pass
+                if kline_df is None or kline_df.empty:
+                    df, _ = await _get_kline_fallback(sym, days=160)
+                    if df is not None and not df.empty:
+                        kline_df = df
+                if kline_df is None or kline_df.empty:
+                    rows.append({"symbol": sym, "error": "无数据"})
+                    continue
+                result = await svc.predict(sym, kline_df, horizon=horizon)
+                p = result.to_dict()
+                entry = {
+                    "symbol": sym,
+                    "direction": p["direction"],
+                    "probability": p["probability"],
+                    "prob_up": p["probability_distribution"]["up"],
+                    "prob_down": p["probability_distribution"]["down"],
+                    "expected_return_pct": p["expected_return_pct"],
+                    "range": p["expected_range_pct"],
+                    "cycle": p["cycle_position_zh"],
+                    "mode": p["mode"],
+                }
+                if save:
+                    entry["prediction_id"] = svc.save_prediction(result)
+                rows.append(entry)
+            except Exception as e:  # noqa: BLE001
+                rows.append({"symbol": sym, "error": str(e)[:80]})
+
+        return _response(data={"count": len(rows), "horizon": horizon,
+                               "predictions": rows})
+    except Exception as e:
+        logger.error("predict_market_multi failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def prediction_history(symbol: str, limit: int = 20) -> dict[str, Any]:
     """查看某股票的历史预测记录与验证结果（方向/概率/实际收益/命中状态）。"""
     try:

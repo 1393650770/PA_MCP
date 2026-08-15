@@ -1181,6 +1181,56 @@ def predict_market_ui(symbol: str, horizon: str) -> str:
         return f"预测失败：{str(e)[:200]}"
 
 
+def predict_multi_ui(symbols: str) -> str:
+    """多股票批量预测对比（方向/概率/区间并排）。"""
+    symbols = symbols.strip()
+    if not symbols:
+        return "请输入股票代码（逗号分隔）"
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.agent.prediction import get_prediction_service
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()][:10]
+        svc = get_prediction_service()
+        rows = []
+        for sym in pool:
+            try:
+                df = _load_long_history(sym)
+                if df.empty:
+                    rows.append({"symbol": sym, "error": "无数据"})
+                    continue
+                r = _asyncio.run(svc.predict(sym, df, horizon="5d"))
+                p = r.to_dict()
+                dist = p["probability_distribution"]
+                rows.append({
+                    "symbol": sym, "direction": p["direction"],
+                    "probability": p["probability"],
+                    "up": dist["up"], "down": dist["down"],
+                    "exp": p["expected_return_pct"],
+                    "rng": p["expected_range_pct"],
+                    "cycle": p["cycle_position_zh"], "mode": p["mode"],
+                })
+                svc.save_prediction(r)  # 落盘供验证
+            except Exception as e:
+                rows.append({"symbol": sym, "error": str(e)[:60]})
+        lines = ["## 🔮 多股票预测对比（5d）",
+                 "| 代码 | 方向 | 概率 | 涨 | 跌 | 期望% | 区间% | 周期 | 模式 |",
+                 "|---|---|---|---|---|---|---|---|---|"]
+        for r in rows:
+            if "error" in r:
+                lines.append(f"| {r['symbol']} | ❌ {r['error']} |")
+                continue
+            lines.append(
+                f"| {r['symbol']} | {DIRECTION_ZH.get(r['direction'], r['direction'])} | "
+                f"{r['probability']:.0%} | {r['up']:.0%} | {r['down']:.0%} | "
+                f"{r['exp']:+.1f} | {r['rng'][0]:+.1f}~{r['rng'][1]:+.1f} | "
+                f"{r['cycle']} | {'AI' if r['mode'] == 'llm' else '统计'} |")
+        lines.append("\n*已全部落盘，到期可验证。研究参考，非投资建议。*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"批量预测失败：{str(e)[:200]}"
+
+
 def prediction_history_ui(symbol: str) -> str:
     """历史预测记录 + 验证状态。"""
     symbol = symbol.strip()
@@ -2876,6 +2926,16 @@ def build_app():
             pos_out = gr.Markdown()
             pos_btn.click(position_sizing_ui, inputs=[pred_sym],
                           outputs=[pos_out])
+
+            with gr.Row():
+                multi_in = gr.Textbox(
+                    label="批量预测股票（逗号分隔，2-10 只）",
+                    value="000001,600036,300750,000858", scale=2)
+                multi_btn = gr.Button("🔮 多股票预测对比", variant="secondary",
+                                      scale=1)
+            multi_out = gr.Markdown()
+            multi_btn.click(predict_multi_ui, inputs=[multi_in],
+                            outputs=[multi_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")
