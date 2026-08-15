@@ -2732,6 +2732,25 @@ async def factor_scan(symbol: str, horizon: int = 5) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def market_structure() -> dict[str, Any]:
+    """市场结构联合分析：上证指数缠论结构 × 情绪×轮动矩阵。
+
+    指数（多源拉取/库兜底）→ 分型/笔/中枢/背驰（缠论）+ 情绪矩阵
+    → 联合判断（多头/空头/中性 + 环境解读）——大牛方法双重验证。
+
+    返回：index（收盘/日期）、chan（缠论结构）、matrix（情绪矩阵）、
+    joint（联合判断）、report（markdown）。
+    """
+    try:
+        from pa_mcp.research.market_structure import get_market_structure
+        result = await get_market_structure().analyze()
+        return _response(data=result)
+    except Exception as e:
+        logger.error("market_structure failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def regime_matrix() -> dict[str, Any]:
     """情绪 × 轮动联合矩阵（Regime Matrix）。
 

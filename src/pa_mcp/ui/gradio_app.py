@@ -2185,6 +2185,17 @@ def canslim_ui(top_n: int = 20, pool: str = "") -> str:
         return f"CANSLIM 扫描失败：{str(e)[:200]}"
 
 
+def market_structure_ui() -> str:
+    """市场结构联合分析（指数缠论 × 情绪矩阵）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.market_structure import get_market_structure
+        result = _asyncio.run(get_market_structure().analyze())
+        return result["report"]
+    except Exception as e:
+        return f"市场结构分析失败：{str(e)[:200]}"
+
+
 def portfolio_risk_ui() -> str:
     """持仓风险面板（盈亏×预测×集中度×评分）。"""
     try:
@@ -3090,6 +3101,11 @@ def build_app():
                                  variant="secondary")
             risk_out = gr.Markdown()
             risk_btn.click(portfolio_risk_ui, outputs=[risk_out])
+
+            ms_btn = gr.Button("🏛️ 市场结构联合分析（指数缠论×情绪）",
+                               variant="secondary")
+            ms_out = gr.Markdown()
+            ms_btn.click(market_structure_ui, outputs=[ms_out])
             gr.Markdown("经验库说明：每次 AI 分析自动沉淀到经验库，"
                         "后续分析自动参考相似历史案例（RAG）。")
 
