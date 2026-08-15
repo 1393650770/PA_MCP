@@ -240,6 +240,11 @@ def _rule_based_reply(message: str) -> str:
         from pa_mcp.data.symbols import get_stock_name
         return f"**{sym}** = {get_stock_name(sym)}"
 
+    # 工具0.6: 市场扫描（下周买什么/扫描市场/候选）
+    if any(k in message for k in ["下周", "买什么", "扫描市场", "候选", "选股"]):
+        strat = next((s for s in STRATEGY_OPTIONS if s in message), "bollinger_mean_reversion")
+        return scan_market_ui(strat, top_n=10)
+
     # 工具1: 持仓体检
     if "体检" in message or "持仓" in message:
         return portfolio_review_ui()
@@ -501,6 +506,143 @@ def portfolio_build_ui(symbols_str: str, strategy: str) -> tuple[Any, str]:
         return fig, "\n".join(lines)
     except Exception as e:
         return None, f"组合构建失败：{str(e)[:200]}"
+
+
+# ---- 市场扫描（当前信号候选清单）----
+
+def scan_market_ui(strategy: str, top_n: int = 10,
+                    universe_size: int = 30) -> str:
+    """扫描股票池：找当前处于买入信号状态的股票，输出候选清单。
+
+    输出：代码/名称/信号日期/强度/该信号历史 5 日胜率。
+    基于统计而非预测——标明"信号候选"而非"预测上涨"。
+    """
+    from pa_mcp.data.symbols import COMMON_NAMES, get_stock_name
+    from pa_mcp.engine.strategies.base import StrategyRegistry
+    from pa_mcp.engine.strategies.tips import get_strategy_tip
+    from pa_mcp.research.event_study import signal_forward_returns
+
+    # 股票池：内置常用股（跳过已拉取缓存）
+    symbols = list(COMMON_NAMES.keys())[:universe_size]
+
+    registry = StrategyRegistry()
+    registry.auto_discover()
+    base = registry.get(strategy)
+    if base is None:
+        return f"策略 {strategy} 未注册"
+
+    rows = []
+    for sym in symbols:
+        try:
+            df = _load_long_history(sym)
+            if df.empty or len(df) < 120:
+                continue
+            # 当前信号：最近 10 个交易日内有买入信号
+            inst = base.__class__(**getattr(base, "__dict__", {}))
+            try:
+                signals = inst.generate_signals(df.copy())
+            except Exception:
+                continue
+            if not signals:
+                continue
+            window_start = str(df["date"].astype(str).str[:10].iloc[-11])
+            recent = [
+                s for s in signals
+                if (getattr(s, "signal_time", None) or str(getattr(s, "timestamp", ""))[:10]) >=
+                window_start
+            ]
+            if not recent:
+                continue
+            s = recent[-1]
+            sig_date = (getattr(s, "signal_time", None) or
+                        str(getattr(s, "timestamp", ""))[:10])
+            strength = float(getattr(s, "strength_score", 50))
+
+            # 该信号历史 5 日胜率（预测力参考）
+            win_rate = None
+            if len(signals) >= 10:
+                sig_df = pd.DataFrame([{
+                    "symbol": sym,
+                    "date": getattr(x, "signal_time", None) or str(getattr(x, "timestamp", ""))[:10],
+                    "direction": getattr(x, "direction", "neutral").value
+                                if hasattr(getattr(x, "direction", None), "value")
+                                else str(getattr(x, "direction", "neutral")),
+                    "strategy_name": strategy,
+                } for x in signals])
+                results = signal_forward_returns(df, sig_df, [5])
+                if results and results[0].n_events >= 10:
+                    win_rate = results[0].win_rate_pct
+
+            rows.append({
+                "symbol": sym, "name": get_stock_name(sym),
+                "signal_date": sig_date, "strength": strength,
+                "win_rate": win_rate,
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        # 主策略无近期信号 → 用 ma_golden_cross 互补扫描（趋势型更常触发）
+        try:
+            alt = registry.get("ma_golden_cross")
+            if alt is not None:
+                for sym in symbols:
+                    try:
+                        df = _load_long_history(sym)
+                        if df.empty or len(df) < 120:
+                            continue
+                        signals = alt.generate_signals(df.copy())
+                        if not signals:
+                            continue
+                        window_start = str(df["date"].astype(str).str[:10].iloc[-11])
+                        recent = [
+                            s for s in signals
+                            if (getattr(s, "signal_time", None) or str(getattr(s, "timestamp", ""))[:10]) >=
+                            window_start
+                        ]
+                        if not recent:
+                            continue
+                        s = recent[-1]
+                        rows.append({
+                            "symbol": sym, "name": get_stock_name(sym),
+                            "signal_date": (getattr(s, "signal_time", None) or
+                                            str(getattr(s, "timestamp", ""))[:10]),
+                            "strength": float(getattr(s, "strength_score", 50)),
+                            "win_rate": None,
+                            "alt_strategy": "ma_golden_cross",
+                        })
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        if not rows:
+            return (f"{strategy}：当前股票池近10日无买入信号。\n\n"
+                    f"⚠️ **这本身是有用信息**：当前市场状态没有该策略的机会。\n"
+                    f"可尝试：① 换其他策略扫描 ② 扩大股票池 ③ 等待信号出现后再关注。\n\n"
+                    f"*研究参考，非投资建议。*")
+
+    rows.sort(key=lambda r: r["strength"], reverse=True)
+    rows = rows[:top_n]
+
+    lines = [
+        f"## 📡 市场扫描：{strategy} 当前买入信号候选（TOP {len(rows)}）",
+        f"*扫描 {universe_size} 只常用股 · 信号日期 = 最近触发日（近10日）*",
+        "",
+        "| 代码 | 名称 | 信号日期 | 强度 | 历史5日胜率 | 来源策略 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        wr = f"{r['win_rate']:.0f}%" if r["win_rate"] else "样本不足"
+        src = r.get("alt_strategy", strategy)
+        lines.append(f"| {r['symbol']} | {r['name']} | {r['signal_date']} | "
+                     f"{r['strength']:.0f} | {wr} | {src} |")
+    tip = get_strategy_tip(strategy)
+    lines.append(f"\n**策略说明**：{tip.splitlines()[0] if tip else ''}")
+    lines.append("\n⚠️ **重要说明**：此清单是*当前信号候选*，非预测上涨。"
+                 "历史胜率是统计参考；信号可能失效，请结合基本面/资金面自行判断。"
+                 "研究参考，非投资建议。")
+    return "\n".join(lines)
 
 
 # ---- Walk-Forward 研究评估 ----
@@ -1060,6 +1202,17 @@ def build_app():
                           outputs=[cmp_fig, cmp_table])
             cmp_in.submit(compare_stocks_ui, inputs=[cmp_in],
                           outputs=[cmp_fig, cmp_table])
+
+        with gr.Tab("📡 市场扫描"):
+            sm_strategy = gr.Dropdown(STRATEGY_OPTIONS,
+                                      value=detect_best_strategy(),
+                                      label="策略（找当前买入信号）")
+            sm_btn = gr.Button("扫描股票池", variant="primary")
+            sm_out = gr.Markdown()
+            sm_btn.click(scan_market_ui, inputs=[sm_strategy],
+                         outputs=[sm_out])
+            gr.Markdown("扫描内置常用股池，输出**当前处于买入信号状态**的股票"
+                        "（含该信号历史5日胜率）。基于统计而非预测。")
 
         with gr.Tab("🧪 研究评估"):
             wf_sym = gr.Textbox(label="股票代码", value="000001")
