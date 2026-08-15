@@ -1236,6 +1236,30 @@ async def list_alerts(status: Literal["active","triggered"] = "active") -> dict[
 # ---- MCP Tools: Portfolio ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def portfolio_risk_dashboard(use_llm: bool = False) -> dict[str, Any]:
+    """持仓风险面板：实时盈亏 × 批量预测 × 集中度 × 风险评分。
+
+    每只持仓：最新收盘/盈亏/占比/板块 + 5 日预测（默认确定性模式控成本）。
+    组合级：HHI 集中度/单票上限/行业分布 + 风险评分（0-100）与提示。
+
+    Args:
+        use_llm: 预测是否用 LLM（默认 False，成本可控）
+    """
+    try:
+        from pa_mcp.research.portfolio_risk import (
+            get_risk_dashboard, format_risk_dashboard)
+        result = await get_risk_dashboard().analyze(use_llm=use_llm)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result,
+                               "report": format_risk_dashboard(result)})
+    except Exception as e:
+        logger.error("portfolio_risk_dashboard failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def portfolio_summary() -> dict[str, Any]:
     """Get portfolio summary with P&ampL and cost basis.
 

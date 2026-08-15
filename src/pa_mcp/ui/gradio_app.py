@@ -2185,6 +2185,20 @@ def canslim_ui(top_n: int = 20, pool: str = "") -> str:
         return f"CANSLIM 扫描失败：{str(e)[:200]}"
 
 
+def portfolio_risk_ui() -> str:
+    """持仓风险面板（盈亏×预测×集中度×评分）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.portfolio_risk import (
+            get_risk_dashboard, format_risk_dashboard)
+        result = _asyncio.run(get_risk_dashboard().analyze(use_llm=False))
+        if "error" in result:
+            return result["error"]
+        return format_risk_dashboard(result)
+    except Exception as e:
+        return f"持仓风险面板失败：{str(e)[:200]}"
+
+
 def memory_status_ui(days: int = 60) -> str:
     """长期记忆状态：决策胜率/盈亏 + 偏差检测 + 策略权重。"""
     try:
@@ -3071,6 +3085,11 @@ def build_app():
                                 variant="secondary")
             mem_out = gr.Markdown()
             mem_btn.click(memory_status_ui, outputs=[mem_out])
+
+            risk_btn = gr.Button("🛡️ 持仓风险面板（预测×集中度×评分）",
+                                 variant="secondary")
+            risk_out = gr.Markdown()
+            risk_btn.click(portfolio_risk_ui, outputs=[risk_out])
             gr.Markdown("经验库说明：每次 AI 分析自动沉淀到经验库，"
                         "后续分析自动参考相似历史案例（RAG）。")
 
