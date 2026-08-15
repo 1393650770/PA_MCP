@@ -1223,6 +1223,183 @@ def evaluate_predictions_ui() -> str:
         return f"验证失败：{str(e)[:200]}"
 
 
+# ---- 决策树可视化（借鉴 PA_Agent 决策树机制） ----
+
+def _layout_tree(node: dict, depth: int, next_x: list[float]) -> tuple[float, dict]:
+    """递归布局决策树：返回 (本子树中心x, 带坐标的节点)。"""
+    kids = node.get("children") or []
+    nid = node["id"]
+    if not kids:
+        x = next_x[0]
+        next_x[0] += 1.0
+        return x, {"node": node, "x": x, "y": depth}
+    child_layouts = []
+    for c in kids:
+        _, cl = _layout_tree(c, depth + 1, next_x)
+        child_layouts.append(cl)
+    x = sum(cl["x"] for cl in child_layouts) / len(child_layouts)
+    return x, {"node": node, "x": x, "y": depth, "children": child_layouts}
+
+
+def decision_tree_fig(symbol: str) -> tuple[Any, str]:
+    """生成决策树可视化图（plotly 树形图）+ 文本摘要。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return None, "请输入股票代码"
+    try:
+        from pa_mcp.agent.decision_tree import build_decision_tree, tree_summary
+        from pa_mcp.agent.orchestrator import get_orchestrator
+        from pa_mcp.agent.prediction import get_prediction_service
+        from pa_mcp.data.symbols import get_stock_name
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return None, f"{symbol} 无行情数据"
+
+        # 组装输入：预测（必需，含方向/概率/区间）+ 诊断（市场状态）
+        svc = get_prediction_service()
+        pred_result = asyncio.run(svc.predict(symbol, df, horizon="5d"))
+        prediction = pred_result.to_dict()
+
+        diagnosis = None
+        try:
+            orch = get_orchestrator()
+            diagnosis = asyncio.run(orch.market_diagnosis(None))
+        except Exception:
+            pass
+
+        tree = build_decision_tree(
+            symbol, diagnosis=diagnosis, prediction=prediction,
+            stock_name=get_stock_name(symbol))
+        summary = tree_summary(tree)
+
+        # 布局 + 画图
+        _, layout = _layout_tree(tree["tree"], 0, [0.0])
+        fig = go.Figure()
+        max_depth = 0
+
+        def draw(cl: dict, parent: Optional[tuple[float, float]]) -> None:
+            nonlocal max_depth
+            n = cl["node"]
+            max_depth = max(max_depth, cl["y"])
+            if parent is not None:
+                px, py = parent
+                # 折线连接（先垂直再水平，树状观感）
+                fig.add_trace(go.Scatter(
+                    x=[px, px, cl["x"], cl["x"]],
+                    y=[py, py - 0.35, py - 0.35, cl["y"]],
+                    mode="lines", line=dict(color="#888", width=1),
+                    hoverinfo="skip", showlegend=False))
+            color = {"root": "#1f6feb", "decision": "#e8590c",
+                     "branch": "#2b8a3e", "leaf": "#495057"}.get(n["type"], "#666")
+            fig.add_trace(go.Scatter(
+                x=[cl["x"]], y=[cl["y"]],
+                mode="markers+text",
+                marker=dict(size=34 if n["type"] == "root" else 26,
+                            color=color, line=dict(color="#fff", width=1)),
+                text=[n["label"]], textposition="middle center",
+                textfont=dict(color="white", size=11),
+                hovertemplate=f"<b>{n['label']}</b><br>⚙️ {n.get('reason', '')}"
+                              f"<br>📋 {n.get('detail', '')}<extra></extra>",
+                showlegend=False))
+            for c in cl.get("children", []):
+                draw(c, (cl["x"], cl["y"]))
+
+        draw(layout, None)
+        fig.update_layout(
+            title=tree["tree"]["label"],
+            xaxis=dict(visible=False, range=[-0.5, layout["x"] + 0.5]),
+            yaxis=dict(visible=False, autorange="reversed",
+                       range=[max_depth + 0.6, -0.6]),
+            height=max(360, 130 * (max_depth + 1)), margin=dict(l=10, r=10, t=50, b=10),
+            plot_bgcolor="white")
+        return fig, summary
+    except Exception as e:
+        return None, f"决策树生成失败：{str(e)[:200]}"
+
+
+def future_expectation_fig(symbol: str) -> tuple[Any, str]:
+    """未来走势预期图：K线 + 预测区间阴影 + 方向概率 + 周期演进。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return None, "请输入股票代码"
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        from pa_mcp.data.symbols import get_stock_name
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return None, f"{symbol} 无行情数据"
+        data = df.sort_values("date").reset_index(drop=True).tail(40)
+
+        svc = get_prediction_service()
+        result = asyncio.run(svc.predict(symbol, data, horizon="5d"))
+        p = result.to_dict()
+        dist = p["probability_distribution"]
+        rng = p["expected_range_pct"]
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25],
+            subplot_titles=(f"{symbol} {get_stock_name(symbol)} 未来 5d 走势预期",
+                            "方向概率"))
+        # K 线
+        fig.add_trace(go.Candlestick(
+            x=data["date"], open=data["open"], high=data["high"],
+            low=data["low"], close=data["close"], name="K线",
+            increasing_line_color="#e03131", decreasing_line_color="#2f9e44"),
+            row=1, col=1)
+        # MA20
+        ma20 = data["close"].rolling(20).mean()
+        fig.add_trace(go.Scatter(x=data["date"], y=ma20,
+                                 mode="lines", name="MA20",
+                                 line=dict(color="#1c7ed6", width=1)),
+                      row=1, col=1)
+        # 支撑/压力
+        lv = p.get("key_levels") or {}
+        for s_ in lv.get("support", []):
+            fig.add_hline(y=float(s_), line=dict(color="#2f9e44", dash="dot", width=1),
+                          row=1, col=1)
+        for r_ in lv.get("resistance", []):
+            fig.add_hline(y=float(r_), line=dict(color="#e03131", dash="dot", width=1),
+                          row=1, col=1)
+        # 未来预期区间（阴影带，从最后一根 K 线向右延伸）
+        last_date = data["date"].iloc[-1]
+        last_close = float(data["close"].iloc[-1])
+        base, hi = last_close * (1 + rng[0] / 100), last_close * (1 + rng[1] / 100)
+        exp_ = last_close * (1 + p["expected_return_pct"] / 100)
+        fig.add_hrect(y0=base, y1=hi, fillcolor="#ffd43b", opacity=0.15,
+                      line_width=0, row=1, col=1,
+                      annotation_text=f"预期区间 {rng[0]:+.1f}~{rng[1]:+.1f}%",
+                      annotation_position="top left")
+        fig.add_trace(go.Scatter(
+            x=[last_date, last_date], y=[last_close, exp_],
+            mode="lines+markers+text",
+            line=dict(color="#e8590c", width=2, dash="dash"),
+            marker=dict(size=8, color="#e8590c"),
+            text=[f"期望 {p['expected_return_pct']:+.1f}%"],
+            textposition="middle right",
+            name="期望路径"), row=1, col=1)
+        # 方向概率条形图
+        labels = [f"📈 上涨 {dist['up']:.0%}",
+                  f"📉 下跌 {dist['down']:.0%}",
+                  f"➡️ 震荡 {dist['sideways']:.0%}"]
+        vals = [dist["up"], dist["down"], dist["sideways"]]
+        colors = ["#e03131", "#2f9e44", "#868e96"]
+        fig.add_trace(go.Bar(x=vals, y=labels, orientation="h",
+                             marker=dict(color=colors),
+                             text=[f"{v:.0%}" for v in vals],
+                             textposition="auto", name="概率"), row=2, col=1)
+        fig.update_layout(
+            title=(f"🔮 {symbol} 未来 5d 走势预期："
+                   f"{DIRECTION_ZH.get(p['direction'], p['direction'])} {p['probability']:.0%}"
+                   f"　周期 {p['cycle_position_zh']} → {p['cycle_forecast_zh']}"),
+            height=640, showlegend=False, margin=dict(l=10, r=10, t=60, b=10),
+            xaxis_rangeslider_visible=False)
+        return fig, ""
+    except Exception as e:
+        return None, f"走势预期图生成失败：{str(e)[:200]}"
+
+
 def market_diagnosis_ui() -> str:
     """两阶段 Stage 1：市场诊断 + 策略路由（LLM 优先，确定性兜底）。"""
     try:
@@ -1883,6 +2060,16 @@ def build_app():
             hist_out = gr.Markdown()
             hist_btn.click(prediction_history_ui, inputs=[pred_sym],
                            outputs=[hist_out])
+
+            with gr.Row():
+                tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")
+                expect_btn = gr.Button("📊 未来走势预期图", variant="secondary")
+            tree_fig = gr.Plot()
+            tree_out = gr.Markdown()
+            tree_btn.click(decision_tree_fig, inputs=[pred_sym],
+                           outputs=[tree_fig, tree_out])
+            expect_btn.click(future_expectation_fig, inputs=[pred_sym],
+                             outputs=[tree_fig, tree_out])
             gr.Markdown("经验库说明：每次 AI 分析自动沉淀到经验库，"
                         "后续分析自动参考相似历史案例（RAG）。")
 

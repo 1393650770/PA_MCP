@@ -1775,6 +1775,66 @@ async def agent_market_diagnosis() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def get_decision_tree(symbol: str) -> dict[str, Any]:
+    """决策树可视化（借鉴 PA_Agent 决策树机制）：逐层闸门推演。
+
+    市场状态（诊断）→ 策略路由 → 预测方向 → 仓位分级 → 结论建议。
+    每个节点带 reason（判定依据）与 detail（证据），可追溯、不编造。
+
+    Args:
+        symbol: 股票代码（如 '000001'）
+    """
+    try:
+        from pa_mcp.agent.decision_tree import build_decision_tree, tree_summary
+        from pa_mcp.agent.orchestrator import get_orchestrator
+        from pa_mcp.agent.prediction import get_prediction_service
+        from pa_mcp.data.symbols import get_stock_name
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 160",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=160)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        svc = get_prediction_service()
+        pred_result = await svc.predict(symbol, kline_df, horizon="5d")
+        prediction = pred_result.to_dict()
+
+        diagnosis = None
+        try:
+            diagnosis = await get_orchestrator().market_diagnosis(None)
+        except Exception:
+            pass
+
+        tree = build_decision_tree(
+            symbol, diagnosis=diagnosis, prediction=prediction,
+            stock_name=get_stock_name(symbol))
+        return _response(data={
+            "symbol": symbol,
+            "tree": tree["tree"],
+            "summary": tree_summary(tree),
+            "market_state": tree["market_state"],
+            "market_state_zh": tree["market_state_zh"],
+            "position_cap_pct": tree["position_cap_pct"],
+            "risk_level": tree["risk_level"],
+            "observations": tree["observations"],
+        })
+    except Exception as e:
+        logger.error("get_decision_tree failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def agent_experience_search(symbol: str = "", cycle_position: str = "",
                                   direction: str = "", limit: int = 5) -> dict[str, Any]:
     """经验库检索（RAG）：按符号/周期位置/方向检索历史 AI 分析案例。
