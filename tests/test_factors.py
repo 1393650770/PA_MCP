@@ -131,6 +131,48 @@ def test_select_stocks_insufficient():
     assert "error" in r2 or r2["n_scored"] >= 0
 
 
+def _regime_df(n=400, seed=1):
+    """分段趋势（120 日切换）：动量可预测。"""
+    rng = np.random.default_rng(seed)
+    close = 10.0
+    rows = []
+    regime = 1.0
+    for i in range(n):
+        if i % 120 == 0:
+            regime = rng.choice([-1.0, 1.0])
+        close *= 1 + regime * 0.003 + rng.normal(0, 0.006)
+        rows.append({"date": pd.Timestamp("2025-01-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6})
+    return pd.DataFrame(rows)
+
+
+def test_backtest_factor_selection():
+    """分段趋势池：因子选股组合应跑赢全池等权基准。"""
+    from pa_mcp.research.factors import (
+        backtest_factor_selection, format_portfolio_backtest)
+    klines = {f"6000{i:02d}": _regime_df(seed=i) for i in range(1, 9)}
+    r = backtest_factor_selection(klines, top_n=3, horizon=5,
+                                  train_window=120)
+    assert "error" not in r
+    assert r["n_stock"] == 8
+    assert r["n_rebalances"] >= 5
+    p = r["portfolio"]
+    assert p["total_return_pct"] is not None
+    assert p["max_drawdown_pct"] is not None
+    assert r["benchmark"]["total_return_pct"] is not None
+    assert r["excess_return_pct"] > 0  # 选股优于等权
+    text = format_portfolio_backtest(r)
+    assert "超额收益" in text and "组合" in text
+
+
+def test_backtest_factor_selection_insufficient():
+    from pa_mcp.research.factors import backtest_factor_selection
+    klines = {f"6000{i:02d}": _regime_df(n=80, seed=i) for i in range(1, 5)}
+    r = backtest_factor_selection(klines, train_window=120)
+    assert "error" in r  # 数据不足训练窗口
+
+
 def test_register_custom_factor():
     """自定义因子注册 + 检验。"""
     reg = get_factor_registry()

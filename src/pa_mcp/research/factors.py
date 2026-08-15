@@ -373,6 +373,139 @@ def select_stocks_by_factors(
     }
 
 
+# ---- 因子选股组合回测（选股 → 组合闭环，复用 PortfolioBacktestEngine） ----
+
+def backtest_factor_selection(
+    klines: dict[str, pd.DataFrame],
+    top_n: int = 5,
+    horizon: int = 5,
+    train_window: int = 120,
+    initial_cash: float = 100_000.0,
+) -> dict[str, Any]:
+    """滚动窗口因子选股组合回测。
+
+    流程：
+      1. 对齐日历，从 train_window 起每 horizon 天调仓一次
+      2. 每个调仓日：用过去 train_window 天做 pooled 截面 IC → 选 top N
+      3. 信号：top N 发 bullish（买入）、池内其余发 bearish（卖出/调出）
+         ——等权再平衡，延迟一天执行（引擎语义）
+      4. 复用 PortfolioBacktestEngine（共享账本/单票10%/T+1/费用）
+      5. 基准：全池等权持有（同样引擎，无调仓信号）
+      6. 输出：组合收益/超额/最大回撤/年化/换手率
+
+    Args:
+        klines: {symbol: 日线（升序）}（各股 ≥ train_window + 2 根）
+        top_n: 每期持仓数量
+        horizon: 调仓周期（交易日）
+        train_window: IC 训练窗口
+        initial_cash: 初始资金
+    """
+    from pa_mcp.portfolio.backtest import PortfolioBacktestEngine
+
+    if len(klines) < 3 or top_n < 1:
+        return {"error": "至少需要 3 只股票"}
+    # 对齐日历
+    aligned: dict[str, pd.DataFrame] = {}
+    for sym, df in klines.items():
+        d = _ensure(df)
+        if len(d) < train_window + 2:
+            continue
+        aligned[sym] = d
+    if len(aligned) < 3:
+        return {"error": f"满足训练窗口的股票不足（{len(aligned)} < 3）"}
+    calendar = sorted(set().union(
+        *[set(df["date"].astype(str).str[:10]) for df in aligned.values()]))
+    n = len(calendar)
+    if n <= train_window + horizon:
+        return {"error": f"日历 {n} 天不足（需 > {train_window + horizon}）"}
+
+    # 滚动选股 → 信号
+    signals_by_symbol: dict[str, list[dict]] = {s: [] for s in aligned}
+    for t in range(train_window, n - 1, horizon):
+        end_date = calendar[t]
+        # 训练窗口切片
+        train_klines = {}
+        for sym, d in aligned.items():
+            sub = d[d["date"].astype(str).str[:10] <= end_date]
+            train_klines[sym] = sub.tail(train_window)
+        sel = select_stocks_by_factors(
+            train_klines, top_n=top_n, horizon=horizon)
+        if "error" in sel:
+            continue
+        top = sel["top_symbols"]
+        for sym in aligned:
+            sig = {
+                "date": end_date,
+                "symbol": sym,
+                "direction": "bullish" if sym in top else "bearish",
+                "strength_score": 60.0 if sym in top else 40.0,
+            }
+            signals_by_symbol[sym].append(sig)
+
+    sig_dfs = {s: pd.DataFrame(lst) if lst else pd.DataFrame(
+        columns=["date", "symbol", "direction", "strength_score"])
+        for s, lst in signals_by_symbol.items()}
+
+    # 组合回测（因子选股）
+    engine = PortfolioBacktestEngine(initial_cash=initial_cash)
+    result = engine.run(aligned, sig_dfs)
+
+    # 基准：全池等权（每调仓日全部 bullish，不做任何选股）
+    bench_signals = {}
+    for sym, d in aligned.items():
+        bench_signals[sym] = pd.DataFrame([
+            {"date": calendar[t], "symbol": sym, "direction": "bullish",
+             "strength_score": 50.0}
+            for t in range(train_window, n - 1, horizon)])
+    bench_engine = PortfolioBacktestEngine(initial_cash=initial_cash)
+    bench = bench_engine.run(aligned, bench_signals)
+
+    return {
+        "method": (f"滚动 {train_window} 日截面 IC 选股 → 每 {horizon} 日调仓 "
+                   f"top {top_n}，等权组合回测"),
+        "n_stock": len(aligned),
+        "n_rebalances": len(next(iter(sig_dfs.values()))),
+        "portfolio": {
+            "total_return_pct": getattr(result, "total_return_pct", None),
+            "annual_return_pct": getattr(result, "annual_return_pct", None),
+            "max_drawdown_pct": getattr(result, "max_drawdown_pct", None),
+            "sharpe_ratio": getattr(result, "sharpe_ratio", None),
+            "total_trades": getattr(result, "total_trades", None),
+            "total_fees": getattr(result, "total_fees", None),
+            "nav_series": [{"date": str(r.get("trade_date", ""))[:10],
+                            "nav": round(float(r["nav"]), 4)}
+                           for r in getattr(result, "nav_series", [])],
+        },
+        "benchmark": {
+            "total_return_pct": getattr(bench, "total_return_pct", None),
+            "max_drawdown_pct": getattr(bench, "max_drawdown_pct", None),
+        },
+        "excess_return_pct": round(
+            float(getattr(result, "total_return_pct", 0) or 0)
+            - float(getattr(bench, "total_return_pct", 0) or 0), 2),
+        "note": "基准 = 全池等权（无选股）。研究参考，非投资建议。",
+    }
+
+
+def format_portfolio_backtest(result: dict[str, Any]) -> str:
+    """因子组合回测 → markdown。"""
+    if "error" in result:
+        return f"因子组合回测不可用：{result['error']}"
+    p, b = result["portfolio"], result["benchmark"]
+    return (
+        f"## 🏆 因子选股组合回测\n"
+        f"**方法**：{result['method']}\n"
+        f"**样本**：{result['n_stock']} 只股票 × {result['n_rebalances']} 次调仓\n"
+        f"- **组合**：总收益 {p['total_return_pct']}% | 年化 {p['annual_return_pct']}% | "
+        f"最大回撤 {p['max_drawdown_pct']}% | Sharpe {p['sharpe_ratio']}\n"
+        f"- **基准**（全池等权）：总收益 {b['total_return_pct']}% | "
+        f"回撤 {b['max_drawdown_pct']}%\n"
+        f"- **超额收益**：**{result['excess_return_pct']:+.2f}%**\n"
+        f"- 交易 {p['total_trades']} 笔 | 费用 {p['total_fees']} 元\n"
+        f"*{result['note']}*"
+    )
+
+
 def format_selection(result: dict[str, Any]) -> str:
     """选股结果 → markdown。"""
     if "error" in result:

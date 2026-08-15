@@ -1701,6 +1701,31 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def factor_portfolio_ui(symbols: str) -> str:
+    """因子选股组合回测（滚动选股 → 共享账本组合）。"""
+    try:
+        from pa_mcp.research.factors import (
+            backtest_factor_selection, format_portfolio_backtest)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 3:
+            return "至少需要 3 只股票"
+        klines = {}
+        for sym in pool:
+            df = _load_long_history(sym)
+            if not df.empty:
+                klines[sym] = df
+        if len(klines) < 3:
+            return f"仅 {len(klines)} 只股票有行情（需 ≥3）"
+        result = backtest_factor_selection(klines, top_n=5, horizon=5,
+                                           train_window=120)
+        if "error" in result:
+            return result["error"]
+        return format_portfolio_backtest(result)
+    except Exception as e:
+        return f"因子组合回测失败：{str(e)[:200]}"
+
+
 def factor_selection_ui(symbols: str) -> str:
     """多因子截面选股（IC 方向调整 z-score 合成）。"""
     try:
@@ -2502,6 +2527,12 @@ def build_app():
             fs_out = gr.Markdown()
             fs_btn.click(factor_selection_ui, inputs=[fs_pool],
                          outputs=[fs_out])
+
+            fpb_btn = gr.Button("🏆 因子选股组合回测（vs 全池等权）",
+                                variant="secondary")
+            fpb_out = gr.Markdown()
+            fpb_btn.click(factor_portfolio_ui, inputs=[fs_pool],
+                          outputs=[fpb_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
