@@ -415,22 +415,34 @@ def portfolio_ai_analysis(symbol: str) -> str:
 
     parts.append("\n*研究参考，非投资建议*")
 
-    # 有 LLM 时用 LLM 增强解读
+    # 有 LLM 时用 5 分析师团（deep_analyze）深度分析
     try:
-        from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+        from pa_mcp.agent.llm_port import get_llm_adapter
         adapter = get_llm_adapter()
         if adapter is not None:
-            resp = asyncio.run(adapter.chat(LLMCallParams(
-                system_prompt=(
-                    "你是 A 股个股分析助手。基于用户提供的真实数据给出专业解读："
-                    "持仓逻辑/技术面/估值/风险。仅基于给定数据，禁止编造。"
-                    "输出简洁中文，标注研究参考非投资建议。"
-                ),
-                user_prompt=f"股票 {symbol} {name} 的数据如下：\n{summary}\n{valuation}\n{signals if signals else '无信号'}",
-                mode="fast", max_tokens=800,
-            )))
-            if resp.content and not resp.content.startswith('{"error'):
-                return "\n\n".join(parts[:2]) + "\n\n---\n💡 **AI 解读**：\n" + resp.content
+            from pa_mcp.agent.orchestrator import get_orchestrator
+            orch = get_orchestrator()
+            df = _load_long_history(symbol)
+            result = asyncio.run(orch.deep_analyze(
+                symbol, df, market_state=None,
+                fundamental_data={"fundamental": "无财务数据", "events": "无事件数据"},
+            ))
+            if result.overall_strength_score > 0:
+                ai_text = (
+                    f"**综合评分 {result.overall_strength_score}（{'看多' if result.direction == 'bullish' else '看空' if result.direction == 'bearish' else '中性'}）**\n"
+                    f"维度：技术{result.dimension_scores.get('technical', '-')} "
+                    f"资金{result.dimension_scores.get('capital', '-')} "
+                    f"情绪{result.dimension_scores.get('sentiment', '-')} "
+                    f"基本面{result.dimension_scores.get('fundamental', '-')} "
+                    f"事件{result.dimension_scores.get('event', '-')}\n"
+                    f"建议仓位：≤{result.suggested_max_position_pct}%\n"
+                )
+                if result.key_risks:
+                    ai_text += "风险：" + "；".join(result.key_risks[:3]) + "\n"
+                if result.key_evidence:
+                    ev = result.key_evidence[0]
+                    ai_text += f"关键依据：{ev.get('finding', '')}\n"
+                return "\n\n".join(parts[:2]) + "\n\n---\n💡 **AI 分析师团解读**：\n" + ai_text
     except Exception:
         pass
     return "\n\n".join(parts)

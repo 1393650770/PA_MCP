@@ -279,6 +279,43 @@ class AgentOrchestrator:
 
         return result
 
+    # 分析师角色配置（借鉴 ai-hedge-fund 的多 agent 模式）
+    ANALYSTS = [
+        ("technical", TECHNICAL_ANALYST_PROMPT,
+         lambda k, c, d, f, e, m: f"K线数据（近60日）：\n{k}"),
+        ("capital", CAPITAL_ANALYST_PROMPT,
+         lambda k, c, d, f, e, m: f"资金面数据：\n主力资金流：{c or '无'}\n龙虎榜：{d or '无'}"),
+        ("sentiment", SENTIMENT_ANALYST_PROMPT,
+         lambda k, c, d, f, e, m: f"情绪数据：\n市场状态：{m or '未知'}\n新闻：{f.get('news', '无') if isinstance(f, dict) else '无'}"),
+        ("fundamental", FUNDAMENTAL_ANALYST_PROMPT,
+         lambda k, c, d, f, e, m: f"基本面数据：\n{f.get('fundamental', '无') if isinstance(f, dict) else '无'}"),
+        ("event", EVENT_ANALYST_PROMPT,
+         lambda k, c, d, f, e, m: f"事件数据：\n{f.get('events', '无') if isinstance(f, dict) else '无'}"),
+    ]
+
+    # 组合经理 prompt（汇总 5 分析师）
+    PORTFOLIO_MANAGER_PROMPT = """你是投资组合经理，汇总 5 位分析师对 {symbol} 的分析，做出综合决策。
+
+分析师结论：
+{analyst_results}
+
+决策规则：
+1. 综合各维度权重（技术40% 资金20% 情绪10% 基本面20% 事件10%）
+2. 必须考虑风险：仓位建议不得超过 20%
+3. 输出 JSON（仅 JSON）：
+{{
+  "overall_strength_score": 0-100,
+  "dimension_scores": {{"technical": 0-100, "capital": 0-100, "sentiment": 0-100, "fundamental": 0-100, "event": 0-100}},
+  "direction": "bullish|bearish|neutral",
+  "key_evidence": [{{"dimension": "...", "finding": "...", "impact": "positive|negative|neutral"}}],
+  "key_risks": ["..."],
+  "risk_reward_assessment": "favorable|neutral|unfavorable",
+  "suggested_max_position_pct": 0-20,
+  "disclaimer": "Research output, not investment advice."
+}}
+
+DO NOT output buy/sell. Output scores and evidence only."""
+
     async def deep_analyze(
         self, symbol: str, kline_df: pd.DataFrame,
         capital_flow: Optional[dict] = None,
@@ -288,27 +325,140 @@ class AgentOrchestrator:
         event_data: Optional[dict] = None,
         market_state: Optional[str] = None,
     ) -> AnalysisResult:
-        """Deep mode: 5 parallel analysts + debate + risk review.
+        """Deep mode: 5 parallel LLM analysts + portfolio manager synthesis.
 
-        Stage 1: Parallel data fetch (done by caller)
-        Stage 2: 5 analysts in parallel
-        Stage 3: Self-debate (bull vs bear in one call)
-        Stage 4: Risk review + hard guard check
+        Stage 1: Parallel data summary (deterministic)
+        Stage 2: 5 analysts in parallel (asyncio.gather)
+        Stage 3: Portfolio manager synthesis
+        Stage 4: RiskGuard clamp (position cap)
         """
         t0 = datetime.now()
 
-        # In production, these would be actual LLM calls via asyncio.gather
-        # For now, return a placeholder result
-        total_tokens = 40000  # Estimated for deep mode
+        from pa_mcp.agent.llm_port import get_llm_adapter as _get_adapter
+
+        adapter = _get_adapter()
+        if adapter is None:
+            # 无 LLM → 降级为确定性规则分析（不返回空占位）
+            return self._rule_based_deep(symbol, kline_df, market_state, fundamental_data)
+
+        from pa_mcp.agent.llm_port import LLMCallParams
+
+        kline_summary = self._summarize_kline(kline_df)
+
+        # Stage 2: 5 分析师并行
+        async def run_analyst(dim: str, prompt: str, data_builder) -> tuple[str, dict]:
+            user_data = data_builder(kline_summary, capital_flow, dragon_tiger,
+                                     fundamental_data, event_data, market_state)
+            params = LLMCallParams(
+                system_prompt=prompt, user_prompt=user_data,
+                mode="fast", max_tokens=800,
+            )
+            resp = await adapter.chat_json(params)
+            return dim, resp
+
+        results = await asyncio.gather(*[
+            run_analyst(dim, prompt, builder)
+            for dim, prompt, builder in self.ANALYSTS
+        ], return_exceptions=True)
+
+        analyst_results = {}
+        for r in results:
+            if isinstance(r, Exception) or r is None:
+                continue
+            dim, data = r
+            if isinstance(data, dict) and "error" not in data:
+                analyst_results[dim] = data
+
+        if not analyst_results:
+            return self._rule_based_deep(symbol, kline_df, market_state, fundamental_data)
+
+        # Stage 3: 组合经理汇总
+        analyst_text = "\n".join(
+            f"[{dim}] 分数={data.get('strength_score', 50)} "
+            f"风险={data.get('risks', [])}"
+            for dim, data in analyst_results.items()
+        )
+        pm_params = LLMCallParams(
+            system_prompt=self.PORTFOLIO_MANAGER_PROMPT.format(
+                symbol=symbol, analyst_results=analyst_text),
+            user_prompt=f"请对 {symbol} 做综合决策",
+            mode="deep", max_tokens=1200,
+        )
+        pm_resp = await adapter.chat_json(pm_params)
 
         result = AnalysisResult(
             symbol=symbol,
             mode="deep",
-            token_used=total_tokens,
+            token_used=sum(
+                r.get("token_used", 0) for r in analyst_results.values()
+            ) if analyst_results else 0,
             analysis_time_ms=(datetime.now() - t0).total_seconds() * 1000,
         )
 
-        logger.info("Deep analysis request built", symbol=symbol, tokens_est=total_tokens)
+        if isinstance(pm_resp, dict) and "error" not in pm_resp:
+            result.overall_strength_score = float(pm_resp.get("overall_strength_score", 50))
+            result.dimension_scores = pm_resp.get("dimension_scores", {})
+            result.direction = pm_resp.get("direction", "neutral")
+            result.key_evidence = pm_resp.get("key_evidence", [])
+            result.key_risks = pm_resp.get("key_risks", [])
+            result.risk_reward_assessment = pm_resp.get("risk_reward_assessment", "neutral")
+            # Stage 4: RiskGuard 仓位上限（不可绕过）
+            suggested = float(pm_resp.get("suggested_max_position_pct", 5))
+            result.suggested_max_position_pct = min(max(suggested, 0), 20)
+        else:
+            # 组合经理失败 → 用分析师平均
+            scores = [float(d.get("strength_score", 50)) for d in analyst_results.values()]
+            result.overall_strength_score = round(sum(scores) / len(scores), 1)
+            result.dimension_scores = {
+                dim: float(d.get("strength_score", 50))
+                for dim, d in analyst_results.items()
+            }
+            result.direction = "bullish" if result.overall_strength_score >= 60 else (
+                "bearish" if result.overall_strength_score <= 40 else "neutral")
+            result.suggested_max_position_pct = 5.0
+
+        logger.info(
+            "Deep analysis complete",
+            symbol=symbol, analysts=len(analyst_results),
+            score=result.overall_strength_score,
+            elapsed_ms=round(result.analysis_time_ms),
+        )
+        return result
+
+    def _rule_based_deep(
+        self, symbol: str, kline_df: pd.DataFrame,
+        market_state: Optional[str] = None,
+        fundamental_data: Optional[dict] = None,
+    ) -> AnalysisResult:
+        """无 LLM 时的确定性规则分析（真实数据，不编造）。"""
+        t0 = datetime.now()
+        result = AnalysisResult(symbol=symbol, mode="deep")
+
+        if kline_df is not None and not kline_df.empty:
+            close = kline_df["close"].values
+            ma20 = pd.Series(close).rolling(20).mean().iloc[-1]
+            ret20 = (close[-1] / close[-21] - 1) * 100 if len(close) > 21 else 0
+            score = 50.0
+            if close[-1] > ma20:
+                score += 15
+            score += max(-15, min(15, ret20 / 2))
+            result.overall_strength_score = round(min(100, max(0, score)), 1)
+            result.dimension_scores = {
+                "technical": result.overall_strength_score,
+                "capital": 50, "sentiment": 50, "fundamental": 50, "event": 50,
+            }
+            result.direction = ("bullish" if result.overall_strength_score >= 60
+                                else "bearish" if result.overall_strength_score <= 40
+                                else "neutral")
+            result.key_evidence = [{
+                "dimension": "technical",
+                "finding": (f"MA20 {ma20:.2f}，20日涨跌 {ret20:+.1f}%"
+                            f"（{'多头' if close[-1] > ma20 else '空头'}趋势）"),
+                "impact": "positive" if close[-1] > ma20 else "negative",
+            }]
+            result.key_risks = ["无 LLM 配置，此为确定性规则分析（非 AI 解读）"]
+            result.suggested_max_position_pct = 5.0
+            result.analysis_time_ms = (datetime.now() - t0).total_seconds() * 1000
         return result
 
     @staticmethod
