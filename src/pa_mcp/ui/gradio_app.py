@@ -1748,8 +1748,8 @@ def factor_portfolio_ui(symbols: str) -> str:
         return f"因子组合回测失败：{str(e)[:200]}"
 
 
-def factor_selection_ui(symbols: str) -> str:
-    """多因子截面选股（IC 方向调整 z-score 合成）。"""
+def factor_selection_ui(symbols: str, prediction_weight: float = 0.0) -> str:
+    """多因子截面选股（可选 AI 预测融合）。"""
     try:
         from pa_mcp.research.factors import (
             select_stocks_by_factors, format_selection)
@@ -1764,7 +1764,8 @@ def factor_selection_ui(symbols: str) -> str:
                 klines[sym] = df
         if len(klines) < 5:
             return f"仅 {len(klines)} 只股票有行情（需 ≥5）"
-        result = select_stocks_by_factors(klines, top_n=10)
+        result = select_stocks_by_factors(
+            klines, top_n=10, prediction_weight=prediction_weight)
         if "error" in result:
             return result["error"]
         return format_selection(result)
@@ -2550,6 +2551,19 @@ def build_app():
             fs_out = gr.Markdown()
             fs_btn.click(factor_selection_ui, inputs=[fs_pool],
                          outputs=[fs_out])
+
+            with gr.Row():
+                fsp_btn = gr.Button("🤖 因子+AI 预测融合选股（权重 50%）",
+                                    variant="secondary")
+                fs0_btn = gr.Button("🧮 纯因子选股（对照）",
+                                    variant="secondary")
+            fs0_out = gr.Markdown()
+            fsp_btn.click(lambda: factor_selection_ui(fs_pool.value,
+                                                      prediction_weight=0.5),
+                          outputs=[fs0_out])
+            fs0_btn.click(lambda: factor_selection_ui(fs_pool.value,
+                                                      prediction_weight=0.0),
+                          outputs=[fs0_out])
 
             fpb_btn = gr.Button("🏆 因子选股组合回测（vs 全池等权）",
                                 variant="secondary")

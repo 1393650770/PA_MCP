@@ -27,7 +27,7 @@
         "cron": "30 15 * * 5",
         "tz": "Asia/Shanghai",
         "sessionTarget": "isolated",
-        "prompt": "使用 PA_MCP 工具做周度策略研究：\n1. 调 research_walk_forward(symbol='000001', strategy='bollinger_mean_reversion') 评估策略OOS表现\n2. 调 research_event_study(symbol='000001', strategy='bollinger_mean_reversion') 检验信号预测力\n3. 调 get_strategy_info() 查看全部策略说明\n输出：本周策略评估结论/是否仍值得关注/下周观察计划。标注研究参考非投资建议。",
+        "prompt": "使用 PA_MCP 工具做周度策略研究：\n1. 调 strategy_compare() 获取全策略事件研究对比（10 策略同台检验，有效策略清单）\n2. 调 research_walk_forward(symbol='000001', strategy='bollinger_mean_reversion') 评估策略OOS表现\n3. 调 backtest_overfit_diagnosis() 检查调参过拟合风险\n4. 调 research_event_study(symbol='000001', strategy='bollinger_mean_reversion') 检验信号预测力\n5. 调 get_strategy_info() 查看全部策略说明\n输出：全策略对比结论/有效策略清单/OOS 表现/过拟合风险/下周观察计划。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
       },
       {

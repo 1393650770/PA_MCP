@@ -120,6 +120,28 @@ def test_select_stocks_by_factors():
     assert "多因子选股" in text and "综合分" in text
 
 
+def test_select_with_prediction_fusion():
+    """预测融合：prediction_weight>0 时输出标记 + 排序仍合理。"""
+    from pa_mcp.research.factors import select_stocks_by_factors
+    klines = {}
+    trends = {"000001": 0.006, "000002": 0.004, "000003": 0.002,
+              "000004": 0.0, "000005": -0.002, "000006": -0.004}
+    for sym, t in trends.items():
+        klines[sym] = _stock_df(seed=int(sym), trend=t)
+
+    r = select_stocks_by_factors(klines, top_n=6, prediction_weight=0.5)
+    assert "error" not in r
+    assert r["prediction_used"] is True
+    assert r["prediction_weight"] == 0.5
+    assert "AI 预测融合" in r["method"]
+    # 纯因子对照
+    r0 = select_stocks_by_factors(klines, top_n=6, prediction_weight=0.0)
+    assert r0["prediction_used"] is False
+    # 两者都产出排序（预测权重 0.5 时不破坏整体方向——强趋势仍居前）
+    top_hybrid = r["top_symbols"]
+    assert top_hybrid[0] == "000001" or top_hybrid[0] == "000002"
+
+
 def test_select_stocks_insufficient():
     from pa_mcp.research.factors import select_stocks_by_factors
     r = select_stocks_by_factors({}, top_n=5)

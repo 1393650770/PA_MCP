@@ -261,20 +261,25 @@ def select_stocks_by_factors(
     top_n: int = 10,
     horizon: int = HORIZON_DEFAULT,
     min_ic: float = 0.02,
+    prediction_weight: float = 0.0,
 ) -> dict[str, Any]:
-    """多因子截面选股。
+    """多因子截面选股（可选融合 AI 预测概率）。
 
     流程：
       1. 池内 pooled 数据计算每因子 IC 符号（全样本秩相关）
       2. 每股票最新一期因子值 → 截面 z-score
       3. 综合分 = 平均(|IC|-达标的 因子 z-score × IC 符号)（IC 加权方向）
-      4. 按综合分排序输出 top N + 因子明细
+      4. 可选：AI 预测概率融合——预测方向化概率（up=+p_up / down=-p_down
+         / sideways≈0）截面 z-score，按 prediction_weight 加权并入综合分
+      5. 按综合分排序输出 top N + 因子明细
 
     Args:
         klines: {symbol: DataFrame}（各股 ≥ 60 根）
         top_n: 返回数量
         horizon: 前瞻窗口（IC 计算用）
         min_ic: IC 门槛（低于该 |IC| 的因子不参与合成）
+        prediction_weight: AI 预测权重 0-1（0 = 纯量化因子；
+            0.3-0.5 = 混合；1 = 纯预测）
     """
     if not klines:
         return {"error": "无行情数据"}
@@ -330,6 +335,37 @@ def select_stocks_by_factors(
                 continue
         latest_values[sym] = entry
 
+    # AI 预测概率融合（方向化概率，截面 z-score）
+    pred_values: dict[str, float] = {}
+    if prediction_weight > 0:
+        try:
+            import asyncio as _asyncio
+            from pa_mcp.agent.prediction import get_prediction_service
+            svc = get_prediction_service()
+            for sym, df in klines.items():
+                try:
+                    r = _asyncio.run(svc.predict(sym, df, horizon="5d"))
+                    p = r.to_dict()
+                    d = p["direction"]
+                    if d == "up":
+                        pred_values[sym] = p["prob_up"]
+                    elif d == "down":
+                        pred_values[sym] = -p["prob_down"]
+                    else:
+                        pred_values[sym] = 0.0
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pred_values = {}
+        if len(pred_values) >= 3:
+            vals = list(pred_values.values())
+            mean, std = float(np.mean(vals)), float(np.std(vals))
+            if std < 1e-12:
+                pred_values = {}
+            else:
+                pred_values = {s: (v - mean) / std
+                               for s, v in pred_values.items()}
+
     # z-score（截面）
     rows = []
     for sym, entry in latest_values.items():
@@ -350,6 +386,11 @@ def select_stocks_by_factors(
             z = (entry[fname] - mean) / std
             scores.append(sign * z)
             details[fname] = round(sign * z, 3)
+        # 预测融合
+        if pred_values and sym in pred_values:
+            pz = pred_values[sym]
+            scores.append(pz * prediction_weight)
+            details["prediction"] = round(pz * prediction_weight, 3)
         if not scores:
             continue
         rows.append({
@@ -362,12 +403,17 @@ def select_stocks_by_factors(
 
     rows.sort(key=lambda r: r["score"], reverse=True)
     top = rows[:top_n]
+    method = (f"多因子截面选股：IC 方向调整的 z-score 等权合成"
+              f"（{len(factor_signs)} 因子达标，|IC|≥{min_ic}）")
+    if prediction_weight > 0 and pred_values:
+        method += f" + AI 预测融合（权重 {prediction_weight:.0%}）"
     return {
-        "method": ("多因子截面选股：IC 方向调整的 z-score 等权合成"
-                   f"（{len(factor_signs)} 因子达标，|IC|≥{min_ic}）"),
+        "method": method,
         "n_stock": n_stock,
         "n_scored": len(rows),
         "factors_used": sorted(factor_signs.keys()),
+        "prediction_weight": prediction_weight,
+        "prediction_used": bool(pred_values),
         "selection": top,
         "top_symbols": [r["symbol"] for r in top],
     }
