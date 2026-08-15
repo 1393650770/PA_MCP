@@ -35,6 +35,9 @@ REPORT_PROMPT = """你是 A 股市场研究综述编辑。基于以下确定性�
 【价值×动量复合】
 {value_momentum}
 
+【持仓风险】
+{portfolio_risk}
+
 【预测验证成绩单】
 {prediction_eval}
 
@@ -146,6 +149,27 @@ class AiMarketReport:
         except Exception:
             out["prediction_eval"] = "无预测验证数据"
 
+        # 持仓风险（best-effort，无持仓时跳过）
+        try:
+            from pa_mcp.research.portfolio_risk import PortfolioRiskDashboard
+            import asyncio
+            pr = asyncio.run(PortfolioRiskDashboard(
+                self._store_path).analyze(use_llm=False))
+            if "error" not in pr:
+                down = [h["symbol"] for h in pr["holdings"]
+                        if h.get("prediction")
+                        and h["prediction"]["direction"] == "down"]
+                out["portfolio_risk"] = (
+                    f"组合市值 {pr['total_value']:,.0f} 元，盈亏 "
+                    f"{pr['total_pnl_pct']:+.1f}%，风险评分 "
+                    f"{pr['risk_score']}（{pr['risk_level']}），"
+                    f"单票最大 {pr['concentration']['top_weight_pct']:.0f}%"
+                    + (f"，预测看跌：{'、'.join(down)}" if down else ""))
+            else:
+                out["portfolio_risk"] = "无持仓数据"
+        except Exception:
+            out["portfolio_risk"] = "无持仓数据"
+
         return out
 
     def _load_klines(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
@@ -187,6 +211,7 @@ class AiMarketReport:
                     sector_rotation=sections.get("sector_rotation", "无"),
                     factor_selection=sections.get("factor_selection", "无"),
                     value_momentum=sections.get("value_momentum", "无"),
+                    portfolio_risk=sections.get("portfolio_risk", "无"),
                     prediction_eval=sections.get("prediction_eval", "无"),
                 )
                 params = LLMCallParams(
@@ -226,6 +251,7 @@ class AiMarketReport:
             f"- **板块轮动**：{sections.get('sector_rotation', '—')}",
             f"- **因子选股**：{sections.get('factor_selection', '—')}",
             f"- **价值×动量**：{sections.get('value_momentum', '—')}",
+            f"- **持仓风险**：{sections.get('portfolio_risk', '—')}",
             f"- **预测验证**：{sections.get('prediction_eval', '—')}",
         ]
         if llm:

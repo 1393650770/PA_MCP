@@ -122,6 +122,40 @@ def test_report_with_llm_mock(tmp_path):
         llm_port.register_adapter(orig)
 
 
+def test_report_with_portfolio_section(tmp_path):
+    """研报含持仓风险段（best-effort）。"""
+    db = _seed(tmp_path)
+    # 灌一笔持仓
+    from pa_mcp.data.store import DuckDBStore
+    store = DuckDBStore(db)
+    store.connect()
+    store.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio (
+            id INTEGER PRIMARY KEY,
+            symbol VARCHAR(10) NOT NULL,
+            cost DOUBLE NOT NULL,
+            shares DOUBLE NOT NULL,
+            added_date DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    store.insert_df("portfolio", pd.DataFrame([
+        {"id": 1, "symbol": "000001", "cost": 10.0, "shares": 10000,
+         "added_date": "2026-07-01"}]))
+    store.close()
+
+    gen = AiMarketReport(store_path=db)
+    result = asyncio.run(gen.generate(
+        ["000001", "000002", "000003", "000004", "000005", "000006"]))
+    s = result["sections"]
+    assert "portfolio_risk" in s
+    assert "持仓" in result["report"]
+    # 无持仓库 → 降级不崩
+    gen2 = AiMarketReport(store_path=str(tmp_path / "none.db"))
+    r2 = asyncio.run(gen2.generate(["000001", "000002", "000003"]))
+    assert "持仓" in r2["report"]
+
+
 def test_report_llm_fails_fallback(tmp_path):
     """LLM 返回错误 → 降级模板（不崩）。"""
     db = _seed(tmp_path)
