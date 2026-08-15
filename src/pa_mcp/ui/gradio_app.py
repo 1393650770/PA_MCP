@@ -1206,6 +1206,30 @@ def evaluate_predictions_ui() -> str:
             lines.append(brier_line)
         if summary.get("return_correlation") is not None:
             lines.append(f"- **期望收益 vs 实际收益相关**：{summary['return_correlation']:+.3f}")
+        if summary.get("ic") is not None:
+            ic_line = f"- **IC（信息系数，Spearman）**：{summary['ic']:+.3f}"
+            if summary.get("icir") is not None:
+                ic_line += f"　**ICIR（滚动稳定性）**：{summary['icir']:+.3f}"
+            ic_line += (" ✅ 预测排序有信息量" if (summary["ic"] or 0) > 0.05
+                        else " ⚠️ 排序信息弱")
+            lines.append(ic_line)
+        if summary.get("calibration_bins"):
+            lines.append("\n### 概率校准（预测概率 vs 实际命中率）")
+            lines.append("| 概率桶 | 样本 | 实际命中 | 判定 |")
+            lines.append("|---|---|---|---|")
+            for b in summary["calibration_bins"]:
+                verdict = "⚠️ 过度自信" if b["overconfident"] else "✅ 合理"
+                lines.append(f"| {b['prob_range']} | {b['n']} | "
+                             f"{b['actual_hit_rate']:.0%} | {verdict} |")
+        if summary.get("by_mode"):
+            lines.append("\n### 模式对比（AI vs 统计）")
+            lines.append("| 模式 | 样本 | 命中率 | 平均收益% | Brier |")
+            lines.append("|---|---|---|---|---|")
+            for m, info in summary["by_mode"].items():
+                label = "🤖 AI 解读" if m == "llm" else "📐 统计降级"
+                lines.append(f"| {label} | {info['count']} | {info['hit_rate']:.0%} | "
+                             f"{info['avg_return_pct']:+.2f} | "
+                             f"{info.get('brier_score', '—')} |")
         lines.extend(["", "### 分方向表现",
             "| 方向 | 数量 | 命中率 | 平均收益% |",
             "|---|---|---|---|",

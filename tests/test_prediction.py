@@ -310,6 +310,104 @@ def test_return_correlation(tmp_path):
     assert summary["return_correlation"] > 0.99
 
 
+def test_ic_icir_evaluation(tmp_path):
+    """IC：期望收益排序与涨幅正相关 → IC > 0；跨周 ICIR 可算。"""
+    db = tmp_path / "ic_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+    # 12 条预测分布在 3 周，期望收益与股票斜率严格单调对齐 → 强正相关
+    for i, (exp_ret, wk) in enumerate((
+            (1.0, "2026-07-06"), (2.0, "2026-07-06"), (3.0, "2026-07-06"),
+            (4.0, "2026-07-07"), (5.0, "2026-07-08"),
+            (6.0, "2026-07-13"), (7.0, "2026-07-14"), (8.0, "2026-07-15"),
+            (9.0, "2026-07-20"), (10.0, "2026-07-21"), (11.0, "2026-07-22"),
+            (12.0, "2026-07-23"))):
+        svc.save_prediction(PredictionResult(
+            symbol=f"6000{i:02d}", predict_date=wk, horizon="5d",
+            direction="up", prob_up=0.6, prob_down=0.2, prob_sideways=0.2,
+            expected_return_pct=exp_ret))
+
+    # 行情须覆盖最后一条预测（07-23）+ 5 个交易日回填期
+    dates = pd.date_range("2026-07-01", periods=30, freq="B")
+
+    def rising_kline(symbol):
+        idx = int(symbol[-2:])
+        m = 0.01 + 0.002 * idx  # 收益与期望单调一致
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + m * i for i in range(30)],
+            "high": [10.5 + m * i for i in range(30)],
+            "low": [9.5 + m * i for i in range(30)],
+            "close": [10.0 + m * i for i in range(30)],
+            "volume": [1e6] * 30,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=rising_kline, today="2026-08-15"))
+    assert summary["ic"] is not None
+    assert summary["ic"] > 0.5          # 强正秩相关
+    assert summary["icir"] is not None  # 多窗口
+    assert summary["return_correlation"] is not None
+
+
+def test_calibration_bins_overconfidence(tmp_path):
+    """概率分桶：高概率桶（80%+）实际命中低 → 标记过度自信。"""
+    db = tmp_path / "calib_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+    # 10 条 85% 概率的 up 预测，行情横盘（实际只涨 0.5% 阈值内算 miss）
+    for i in range(10):
+        svc.save_prediction(PredictionResult(
+            symbol=f"6001{i:02d}", predict_date="2026-07-06", horizon="5d",
+            direction="up", prob_up=0.85, prob_down=0.1, prob_sideways=0.05,
+            probability=0.85))
+    dates = pd.date_range("2026-07-01", periods=10, freq="B")
+
+    def flat_kline(symbol):
+        return pd.DataFrame({
+            "date": dates, "open": [10.0] * 10, "high": [10.2] * 10,
+            "low": [9.8] * 10, "close": [10.0] * 10, "volume": [1e6] * 10,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=flat_kline, today="2026-08-15"))
+    assert summary["calibration_bins"], "应有校准分桶"
+    top = summary["calibration_bins"][-1]
+    assert top["prob_range"] == "80%-100%"
+    assert top["actual_hit_rate"] < 0.2
+    assert top["overconfident"] is True  # 85% 预测实际 ~0% 命中 → 过度自信
+
+
+def test_by_mode_comparison(tmp_path):
+    """模式对比：llm vs deterministic 分组统计。"""
+    db = tmp_path / "mode_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+    for i in range(4):
+        svc.save_prediction(PredictionResult(
+            symbol=f"6002{i:02d}", predict_date="2026-07-06", horizon="5d",
+            direction="up", prob_up=0.7, prob_down=0.15, prob_sideways=0.15,
+            mode="llm"))
+    for i in range(4):
+        svc.save_prediction(PredictionResult(
+            symbol=f"6003{i:02d}", predict_date="2026-07-06", horizon="5d",
+            direction="down", prob_up=0.15, prob_down=0.7, prob_sideways=0.15,
+            mode="deterministic"))
+    dates = pd.date_range("2026-07-01", periods=10, freq="B")
+
+    def rising_kline(symbol):
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + 0.05 * i for i in range(10)],
+            "high": [10.5 + 0.05 * i for i in range(10)],
+            "low": [9.5 + 0.05 * i for i in range(10)],
+            "close": [10.0 + 0.05 * i for i in range(10)],
+            "volume": [1e6] * 10,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=rising_kline, today="2026-08-15"))
+    assert "llm" in summary["by_mode"] and "deterministic" in summary["by_mode"]
+    assert summary["by_mode"]["llm"]["hit_rate"] == 1.0      # up 预测涨 → 全中
+    assert summary["by_mode"]["deterministic"]["hit_rate"] == 0.0
+    assert "brier_score" in summary["by_mode"]["llm"]
+
+
 def test_evaluate_sideways_threshold(tmp_path):
     db = tmp_path / "pred_test2.duckdb"
     svc = PredictionService(store_path=str(db))

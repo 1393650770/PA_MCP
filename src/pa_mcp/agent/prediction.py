@@ -721,9 +721,10 @@ class PredictionService:
         """评估汇总（全部预测 + 已评估部分，含 Brier 概率校准分数）。"""
         total = store.query_df("SELECT COUNT(*) AS c FROM prediction_log", [])
         ev_df = store.query_df(
-            "SELECT direction, status, actual_return_pct, prob_up, prob_down, "
-            "prob_sideways, expected_return_pct FROM prediction_log "
-            "WHERE status != 'pending'", [])
+            "SELECT direction, status, actual_return_pct, probability, "
+            "prob_up, prob_down, prob_sideways, expected_return_pct, "
+            "predict_date, mode "
+            "FROM prediction_log WHERE status != 'pending'", [])
         n = int(ev_df.shape[0])
         out: dict[str, Any] = {
             "total_predictions": int(total.iloc[0]["c"]) if not total.empty else 0,
@@ -732,7 +733,11 @@ class PredictionService:
             "brier_score": None,
             "baseline_brier": None,      # 气候学基准（按历史频率预测）
             "brier_skill_score": None,   # 1 - brier/baseline（>0 = 优于基准）
-            "return_correlation": None,  # 预测期望收益 vs 实际收益相关系数
+            "return_correlation": None,  # 预测期望收益 vs 实际收益 Pearson 相关
+            "ic": None,                  # Spearman IC：期望收益排序 vs 实际收益排序
+            "icir": None,                # ICIR：滚动窗口 IC 均值/标准差（Qlib 标准）
+            "calibration_bins": [],      # 概率校准分桶（预测概率 vs 实际命中率）
+            "by_mode": {},               # AI(llm) vs 统计(deterministic) 对比
             "by_direction": {},
             "avg_actual_return_pct": None,
             "direction_agreement_pct": None,
@@ -772,7 +777,7 @@ class PredictionService:
             if base > 0:
                 out["brier_skill_score"] = round(1 - brier / base, 4)
 
-        # 预测期望收益 vs 实际收益 相关性（Spearman 稳健版用 pandas rank）
+        # 预测期望收益 vs 实际收益 相关性（Pearson）
         exp = pd.to_numeric(ev_df["expected_return_pct"], errors="coerce")
         act = pd.to_numeric(ev_df["actual_return_pct"], errors="coerce")
         valid = exp.notna() & act.notna()
@@ -780,6 +785,81 @@ class PredictionService:
             corr = exp[valid].corr(act[valid], method="pearson")
             if pd.notna(corr):
                 out["return_correlation"] = round(float(corr), 4)
+
+        # ---- IC / ICIR（Qlib 标准：预测排序 vs 实际收益排序的秩相关） ----
+        # Spearman 用 rank+Pearson 实现（避免 scipy 依赖）
+        def _spearman(a: pd.Series, b: pd.Series) -> float:
+            va = a.notna() & b.notna()
+            if va.sum() < 3:
+                return float("nan")
+            ra = a[va].rank()
+            rb = b[va].rank()
+            return float(ra.corr(rb)) if ra.corr(rb) is not None else float("nan")
+
+        if valid.sum() >= 8:
+            ic = _spearman(exp, act)
+            if not pd.isna(ic):
+                out["ic"] = round(ic, 4)
+            # 滚动窗口 IC：按预测日分组（每窗 ≥3 条才计入）
+            work = ev_df[valid].copy()
+            work["wk"] = pd.to_datetime(work["predict_date"]).dt.to_period("W")
+            win_ics: list[float] = []
+            for _, g in work.groupby("wk"):
+                e = pd.to_numeric(g["expected_return_pct"], errors="coerce")
+                a = pd.to_numeric(g["actual_return_pct"], errors="coerce")
+                ic_w = _spearman(e, a)
+                if not pd.isna(ic_w):
+                    win_ics.append(ic_w)
+            if len(win_ics) >= 2:
+                mean_ic = sum(win_ics) / len(win_ics)
+                std_ic = (sum((x - mean_ic) ** 2 for x in win_ics)
+                          / len(win_ics)) ** 0.5
+                if std_ic > 0:
+                    out["icir"] = round(mean_ic / std_ic, 3)
+
+        # ---- 概率校准分桶（预测概率 vs 实际命中率，检验过度自信） ----
+        # 只评估有方向的预测（up/down），用主方向概率分桶
+        dirn = ev_df[ev_df["direction"].isin(["up", "down"])].copy()
+        if not dirn.empty:
+            dirn["prob"] = pd.to_numeric(dirn["probability"], errors="coerce")
+            dirn = dirn[dirn["prob"].notna()]
+            if len(dirn) >= 4:
+                buckets = [(0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 1.01)]
+                for lo, hi in buckets:
+                    sub = dirn[(dirn["prob"] >= lo) & (dirn["prob"] < hi)]
+                    if sub.empty:
+                        continue
+                    hit = float((sub["status"] == "hit").mean())
+                    out["calibration_bins"].append({
+                        "prob_range": f"{lo:.0%}-{min(hi, 1.0):.0%}",
+                        "n": int(sub.shape[0]),
+                        "actual_hit_rate": round(hit, 3),
+                        "mid_prob": round((lo + min(hi, 1.0)) / 2, 3),
+                        "overconfident": hit < (lo + min(hi, 1.0)) / 2 - 0.1,
+                    })
+
+        # ---- 模式对比：AI(llm) vs 统计(deterministic) ----
+        by_mode: dict[str, dict] = {}
+        for m in ("llm", "deterministic"):
+            sub = ev_df[ev_df["mode"] == m]
+            if sub.empty:
+                continue
+            entry: dict[str, Any] = {
+                "count": int(sub.shape[0]),
+                "hit_rate": round(float((sub["status"] == "hit").mean()), 3),
+                "avg_return_pct": round(float(sub["actual_return_pct"].mean()), 3),
+            }
+            sub_prob = sub[["prob_up", "prob_down", "prob_sideways"]]
+            if sub_prob.notna().all().all():
+                y_up = (sub["actual_return_pct"] > SIDEWAYS_THRESHOLD_PCT).astype(float)
+                y_down = (sub["actual_return_pct"] < -SIDEWAYS_THRESHOLD_PCT).astype(float)
+                y_side = (sub["actual_return_pct"].abs() <= SIDEWAYS_THRESHOLD_PCT).astype(float)
+                b = float(((sub["prob_up"] - y_up) ** 2
+                           + (sub["prob_down"] - y_down) ** 2
+                           + (sub["prob_sideways"] - y_side) ** 2).mean())
+                entry["brier_score"] = round(b, 4)
+            by_mode[m] = entry
+        out["by_mode"] = by_mode
 
         by_dir: dict[str, dict] = {}
         for d in ("up", "down", "sideways"):
