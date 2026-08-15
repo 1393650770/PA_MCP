@@ -1948,6 +1948,50 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def backtest_overfit_diagnosis(sharpe_obs: float, n_trials: int,
+                                     periods: int,
+                                     returns_matrix: str = "") -> dict[str, Any]:
+    """回测过拟合与多重检验诊断（DSR / Harvey-Liu / CSCV-PBO）。
+
+    借鉴 QuantSkills skill-backtest-overfit（Bailey & López de Prado 框架）：
+    - DSR：考虑调参/试验次数 N 后，观测 Sharpe 是否仍显著（≥95%）
+    - Harvey-Liu 阈值：多重检验下 Sharpe 显著性门槛 sqrt(2lnN/T)
+    - CSCV-PBO（可选）：传入策略收益矩阵（JSON 二维数组，策略×时间），
+      计算过拟合概率（样本内最优策略在样本外跌出前半的比例）
+
+    Args:
+        sharpe_obs: 观测年化 Sharpe（最佳参数组合的回测值）
+        n_trials: 试验次数（策略数 × 参数组合数 × 股票数，诚实估计）
+        periods: 样本期数（年化 Sharpe 的分母）
+        returns_matrix: 可选 JSON 二维数组（策略×时间收益），用于 CSCV-PBO
+    """
+    try:
+        from pa_mcp.research.overfit import (
+            run_overfit_report, format_overfit_report)
+        import json
+        import numpy as np
+
+        matrix = None
+        if returns_matrix.strip():
+            try:
+                matrix = np.asarray(json.loads(returns_matrix), dtype=float)
+                if matrix.ndim != 2:
+                    return _response(success=False, error="returns_matrix 须为二维数组",
+                                     error_type="INVALID_ARGUMENT")
+            except Exception as e:
+                return _response(success=False,
+                                 error=f"returns_matrix 解析失败：{e}",
+                                 error_type="INVALID_ARGUMENT")
+
+        report = run_overfit_report(sharpe_obs, n_trials, periods,
+                                    returns_matrix=matrix)
+        return _response(data={**report, "report": format_overfit_report(report)})
+    except Exception as e:
+        logger.error("backtest_overfit_diagnosis failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def sentiment_cycle(date: str = "") -> dict[str, Any]:
     """游资情绪周期分析（涨停梯队/连板高度/晋级率/阶段判定）。
 

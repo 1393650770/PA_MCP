@@ -1566,6 +1566,90 @@ def sector_rotation_ui(load_data: bool = False) -> str:
         return f"板块轮动失败：{str(e)[:200]}"
 
 
+def overfit_ui(symbol: str = "000001", strategy: str = "bollinger_mean_reversion") -> str:
+    """回测过拟合诊断：对现有策略在历史数据上的调参空间做 DSR 检查。
+
+    自动跑参数网格（ParamRange 步长抽样）→ 收集 Sharpe 分布 →
+    DSR（多重检验修正）+ Harvey-Liu 阈值。PBO 需收益矩阵（MCP 工具可传）。
+    """
+    try:
+        import asyncio as _asyncio
+        import numpy as np
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        from pa_mcp.research.overfit import (
+            run_overfit_report, format_overfit_report)
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+
+        registry = StrategyRegistry()
+        registry.auto_discover()
+        cls = registry.get(strategy)
+        if cls is None:
+            return f"策略 {strategy} 未注册"
+
+        # 参数网格抽样（每个 ParamRange 取 min/中点/max，组合数 ≤ 20）
+        ps = cls.get_params_space()
+        import itertools
+        grid_vals = []
+        for p in ps:
+            vals = {p.min_val, (p.min_val + p.max_val) / 2, p.max_val}
+            grid_vals.append(sorted(vals))
+        combos = list(itertools.product(*grid_vals)) if grid_vals else [()]
+        if len(combos) > 20:
+            combos = combos[:20]
+
+        # 逐组合跑事件驱动回测（用净值序列算 Sharpe）
+        from pa_mcp.backtest.engine import BacktestEngine
+        sharpe_list = []
+        for combo in combos:
+            params = {p.name: v for p, v in zip(ps, combo)}
+            try:
+                inst = cls(**params)
+                signals = inst.generate_signals(df.copy())
+                if not signals:
+                    continue
+                sig_df = pd.DataFrame([{
+                    "symbol": symbol,
+                    "date": (getattr(s, "signal_time", None) or
+                             str(getattr(s, "timestamp", ""))[:10]),
+                    "direction": getattr(s, "direction", "neutral").value
+                                if hasattr(getattr(s, "direction", None), "value")
+                                else str(getattr(s, "direction", "neutral")),
+                    "strength_score": float(getattr(s, "strength_score", 50)),
+                    "strategy_name": strategy,
+                } for s in signals])
+                if sig_df.empty:
+                    continue
+                report = BacktestEngine(initial_cash=100000).run(df, sig_df)
+                nav = report.nav_series
+                if nav is not None and len(nav) > 2:
+                    vals = np.asarray([float(r["nav"]) for r in nav])
+                    rets = np.diff(vals) / (vals[:-1] + 1e-12)
+                    if rets.std() > 0:
+                        sharpe_list.append(rets.mean() / rets.std()
+                                           * np.sqrt(len(rets)))
+            except Exception:
+                continue
+
+        if not sharpe_list:
+            return "参数网格回测全部失败（数据/引擎问题）"
+
+        n_trials = len(sharpe_list)
+        best = max(sharpe_list)
+        report = run_overfit_report(best, n_trials, len(df),
+                                    returns_matrix=None)
+        lines = [f"## 🎲 回测过拟合诊断：{strategy} × {symbol}",
+                 f"自动跑了 **{n_trials} 个参数组合**，"
+                 f"最佳年化 Sharpe {best:.3f}（{len(df)} 个交易日）",
+                 ""]
+        lines.append(format_overfit_report(report))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"过拟合诊断失败：{str(e)[:200]}"
+
+
 def position_sizing_ui(symbol: str) -> str:
     """预测驱动的仓位建议（预测概率 × 历史命中率校准）。"""
     symbol = symbol.strip()
@@ -2296,6 +2380,11 @@ def build_app():
             es_out = gr.Markdown()
             es_btn.click(event_study_ui, inputs=[wf_sym, wf_strategy],
                          outputs=[es_out])
+
+            of_btn = gr.Button("🎲 回测过拟合诊断（DSR/PBO 多重检验）",
+                               variant="secondary")
+            of_out = gr.Markdown()
+            of_btn.click(overfit_ui, outputs=[of_out])
 
         with gr.Tab("📦 组合构建"):
             pb_in = gr.Textbox(label="股票池（逗号分隔）",
