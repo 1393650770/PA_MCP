@@ -2016,6 +2016,58 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def factor_stock_selection(symbols: str, top_n: int = 10,
+                                 horizon: int = 5) -> dict[str, Any]:
+    """多因子截面选股（Qlib 风格）。
+
+    股票池上：每因子 pooled IC 符号（|IC|≥0.02 达标）→ 各股最新因子值
+    截面 z-score × IC 方向 → 等权合成综合分 → 排名输出 top N + 因子明细。
+    ——「有效因子 → 选股」闭环。
+
+    Args:
+        symbols: 股票池（逗号分隔，≥5 只）
+        top_n: 返回数量
+        horizon: IC 前瞻窗口（默认 5）
+    """
+    try:
+        from pa_mcp.research.factors import (
+            select_stocks_by_factors, format_selection)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 5:
+            return _response(success=False,
+                             error="至少需要 5 只股票（截面合成要求）",
+                             error_type="INVALID_ARGUMENT")
+
+        klines = {}
+        for sym in pool:
+            try:
+                df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 150", [sym]) if _store else None
+                if df is None or df.empty:
+                    kdf, _ = await _get_kline_fallback(sym, days=150)
+                    df = kdf
+                if df is not None and not df.empty:
+                    klines[sym] = df
+            except Exception:
+                continue
+        if len(klines) < 5:
+            return _response(success=False,
+                             error=f"仅 {len(klines)} 只股票有数据（需 ≥5）",
+                             error_type="DATA_UNAVAILABLE")
+
+        result = select_stocks_by_factors(klines, top_n=top_n, horizon=horizon)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result, "report": format_selection(result)})
+    except Exception as e:
+        logger.error("factor_stock_selection failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def factor_scan(symbol: str, horizon: int = 5) -> dict[str, Any]:
     """因子批量扫描：全部注册因子在一只股票上的 IC/分层检验排行。
 

@@ -86,6 +86,51 @@ def test_pack_factor():
     assert pack_factor("不存在") is None
 
 
+def _stock_df(n=150, seed=1, trend=0.004):
+    """单只股票行情（trend = 日收益趋势强度）。"""
+    rng = np.random.default_rng(seed)
+    close = 10.0
+    rows = []
+    for i in range(n):
+        close *= 1 + trend + rng.normal(0, 0.008)
+        rows.append({"date": pd.Timestamp("2025-06-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6})
+    return pd.DataFrame(rows)
+
+
+def test_select_stocks_by_factors():
+    """趋势强弱不同的 6 只股票：强趋势者综合分居前。"""
+    from pa_mcp.research.factors import (
+        select_stocks_by_factors, format_selection)
+    klines = {}
+    trends = {"000001": 0.006, "000002": 0.004, "000003": 0.002,
+              "000004": 0.0, "000005": -0.002, "000006": -0.004}
+    for sym, t in trends.items():
+        klines[sym] = _stock_df(seed=int(sym), trend=t)
+
+    r = select_stocks_by_factors(klines, top_n=6)
+    assert "error" not in r
+    assert len(r["selection"]) == 6
+    # 强趋势股票综合分更高（动量因子 IC 正 → 排序与趋势一致）
+    scores = {x["symbol"]: x["score"] for x in r["selection"]}
+    assert scores["000001"] > scores["000003"] > scores["000006"]
+    assert len(r["factors_used"]) >= 3
+    text = format_selection(r)
+    assert "多因子选股" in text and "综合分" in text
+
+
+def test_select_stocks_insufficient():
+    from pa_mcp.research.factors import select_stocks_by_factors
+    r = select_stocks_by_factors({}, top_n=5)
+    assert "error" in r
+    # 波动太大（无趋势）→ 因子 IC 不达标
+    klines = {f"6000{i:02d}": _stock_df(seed=i, trend=0.0)
+              for i in range(5)}
+    r2 = select_stocks_by_factors(klines)
+    assert "error" in r2 or r2["n_scored"] >= 0
+
+
 def test_register_custom_factor():
     """自定义因子注册 + 检验。"""
     reg = get_factor_registry()

@@ -1701,6 +1701,30 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def factor_selection_ui(symbols: str) -> str:
+    """多因子截面选股（IC 方向调整 z-score 合成）。"""
+    try:
+        from pa_mcp.research.factors import (
+            select_stocks_by_factors, format_selection)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 5:
+            return "至少需要 5 只股票（截面合成要求）"
+        klines = {}
+        for sym in pool:
+            df = _load_long_history(sym)
+            if not df.empty:
+                klines[sym] = df
+        if len(klines) < 5:
+            return f"仅 {len(klines)} 只股票有行情（需 ≥5）"
+        result = select_stocks_by_factors(klines, top_n=10)
+        if "error" in result:
+            return result["error"]
+        return format_selection(result)
+    except Exception as e:
+        return f"因子选股失败：{str(e)[:200]}"
+
+
 def factor_scan_ui(symbol: str) -> str:
     """因子批量扫描：全部注册因子的 IC/分层检验排行。"""
     symbol = symbol.strip()
@@ -2467,6 +2491,17 @@ def build_app():
                                    variant="secondary", scale=1)
             fc_out = gr.Markdown()
             fc_btn.click(factor_scan_ui, inputs=[fc_sym], outputs=[fc_out])
+
+            with gr.Row():
+                fs_pool = gr.Textbox(
+                    label="因子选股池（逗号分隔，≥5 只）",
+                    value="000001,600036,300750,000858,600519,601318",
+                    scale=2)
+                fs_btn = gr.Button("🎯 多因子选股（IC 加权合成）",
+                                   variant="secondary", scale=1)
+            fs_out = gr.Markdown()
+            fs_btn.click(factor_selection_ui, inputs=[fs_pool],
+                         outputs=[fs_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 

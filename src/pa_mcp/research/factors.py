@@ -254,6 +254,146 @@ def pack_factor(name: str) -> Optional[dict[str, Any]]:
             "packed_at_note": "定义打包（不含函数体）；跨会话复用需重新注册"}
 
 
+# ---- 多因子选股（Qlib 风格：IC 方向调整的截面 z-score 合成） ----
+
+def select_stocks_by_factors(
+    klines: dict[str, pd.DataFrame],
+    top_n: int = 10,
+    horizon: int = HORIZON_DEFAULT,
+    min_ic: float = 0.02,
+) -> dict[str, Any]:
+    """多因子截面选股。
+
+    流程：
+      1. 池内 pooled 数据计算每因子 IC 符号（全样本秩相关）
+      2. 每股票最新一期因子值 → 截面 z-score
+      3. 综合分 = 平均(|IC|-达标的 因子 z-score × IC 符号)（IC 加权方向）
+      4. 按综合分排序输出 top N + 因子明细
+
+    Args:
+        klines: {symbol: DataFrame}（各股 ≥ 60 根）
+        top_n: 返回数量
+        horizon: 前瞻窗口（IC 计算用）
+        min_ic: IC 门槛（低于该 |IC| 的因子不参与合成）
+    """
+    if not klines:
+        return {"error": "无行情数据"}
+    n_stock = len(klines)
+
+    # 1) 每因子 pooled 截面 IC 符号（跨股票拼接秩相关——横截面选股
+    #    的正确口径；逐股票 IC 平均会混入时序噪声反转，方向失真）
+    factor_signs: dict[str, float] = {}
+    factor_meta: dict[str, FactorDefinition] = {}
+    for fd in get_factor_registry().list_all():
+        try:
+            all_v: list[pd.Series] = []
+            all_r: list[pd.Series] = []
+            for sym, df in klines.items():
+                d = _ensure(df)
+                values = fd.fn(d)
+                if values is None or len(values) != len(d):
+                    continue
+                vals = pd.Series(values.to_numpy(), index=d.index)
+                fwd = d["close"].shift(-horizon) / d["close"] - 1
+                valid = vals.notna() & fwd.notna()
+                if valid.sum() < 20:
+                    continue
+                all_v.append(vals[valid].astype(float))
+                all_r.append(fwd[valid].astype(float))
+            if len(all_v) < 3:
+                continue
+            V = pd.concat(all_v)
+            R = pd.concat(all_r)
+            ic = V.rank().corr(R.rank())
+            if ic is not None and not pd.isna(ic) and abs(float(ic)) >= min_ic:
+                factor_signs[fd.name] = 1.0 if ic > 0 else -1.0
+                factor_meta[fd.name] = fd
+        except Exception:  # noqa: BLE001
+            continue
+
+    if not factor_signs:
+        return {"error": "无因子达到 IC 门槛，无法选股（数据不足或因子无信息）"}
+
+    # 2+3) 截面 z-score 合成
+    latest_values: dict[str, dict[str, float]] = {}  # symbol → {factor: value}
+    for sym, df in klines.items():
+        d = _ensure(df)
+        entry = {}
+        for fname in factor_signs:
+            try:
+                vals = factor_meta[fname].fn(d)
+                if vals is not None and len(vals) == len(d):
+                    v = float(vals.iloc[-1])
+                    if not pd.isna(v):
+                        entry[fname] = v
+            except Exception:  # noqa: BLE001
+                continue
+        latest_values[sym] = entry
+
+    # z-score（截面）
+    rows = []
+    for sym, entry in latest_values.items():
+        if len(entry) < max(2, len(factor_signs) // 2):
+            continue
+        scores = []
+        details: dict[str, float] = {}
+        for fname, sign in factor_signs.items():
+            if fname not in entry:
+                continue
+            vals = [latest_values[s2][fname] for s2 in latest_values
+                    if fname in latest_values[s2]]
+            if len(vals) < 3:
+                continue
+            mean, std = float(np.mean(vals)), float(np.std(vals))
+            if std < 1e-12:
+                continue
+            z = (entry[fname] - mean) / std
+            scores.append(sign * z)
+            details[fname] = round(sign * z, 3)
+        if not scores:
+            continue
+        rows.append({
+            "symbol": sym,
+            "score": round(float(np.mean(scores)), 4),
+            "factor_details": details,
+        })
+    if not rows:
+        return {"error": "合成失败（因子覆盖不足）"}
+
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    top = rows[:top_n]
+    return {
+        "method": ("多因子截面选股：IC 方向调整的 z-score 等权合成"
+                   f"（{len(factor_signs)} 因子达标，|IC|≥{min_ic}）"),
+        "n_stock": n_stock,
+        "n_scored": len(rows),
+        "factors_used": sorted(factor_signs.keys()),
+        "selection": top,
+        "top_symbols": [r["symbol"] for r in top],
+    }
+
+
+def format_selection(result: dict[str, Any]) -> str:
+    """选股结果 → markdown。"""
+    if "error" in result:
+        return f"因子选股不可用：{result['error']}"
+    lines = [
+        f"## 🎯 多因子选股",
+        f"**方法**：{result['method']}",
+        f"**池**：{result['n_scored']}/{result['n_stock']} 只完成评分",
+        "",
+        "| 排名 | 代码 | 综合分 | 因子明细（z-score×方向） |",
+        "|---|---|---|---|",
+    ]
+    for i, r in enumerate(result["selection"], 1):
+        det = "，".join(f"{k} {v:+.2f}" for k, v in
+                        list(r["factor_details"].items())[:5])
+        lines.append(f"| {i} | {r['symbol']} | **{r['score']:+.3f}** | {det} |")
+    lines.append(f"\n*参与因子：{'、'.join(result['factors_used'])}。"
+                 "研究参考，非投资建议。*")
+    return "\n".join(lines)
+
+
 def format_factor_report(result: dict[str, Any]) -> str:
     """单因子检验 → markdown。"""
     if "error" in result:
