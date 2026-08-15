@@ -918,6 +918,123 @@ class PredictionService:
         out["by_direction"] = by_dir
         return out
 
+    # ---- 预测驱动的仓位建议（借鉴 ai-hedge-fund Risk Manager 思路） ----
+    async def position_sizing(self, symbol: str,
+                              account_value: float = 100000.0,
+                              horizon: str = "5d",
+                              base_position_pct: Optional[float] = None,
+                              kline_df: Optional[pd.DataFrame] = None) -> dict[str, Any]:
+        """预测 → 仓位翻译器：预测概率 × 历史命中率校准 → 仓位建议。
+
+        逻辑（可追溯）：
+          1. 预测（复用 predict()，含板块上下文）
+          2. 校准：该股票历史同方向命中率（prediction_log 已评估记录），
+             无历史时用全局命中率；再按概率分桶校准（过度自信桶降权）
+          3. 仓位 = base（分析建议或方向默认）× 校准系数，受 20% 硬上限
+          4. 输出完整推导链（prob/校准/系数/最终建议）
+
+        Args:
+            symbol: 股票代码
+            account_value: 账户资金（用于展示金额）
+            horizon: 预测周期
+            base_position_pct: 基础仓位（分析师建议）；None = 按方向回退
+            kline_df: 可选 K 线（缺省自动拉取）
+        """
+        if kline_df is None:
+            from pa_mcp.config import get_settings
+            from pa_mcp.data.store import DuckDBStore
+            store = DuckDBStore(get_settings().database.path)
+            store.connect()
+            try:
+                kline_df = store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 160", [symbol])
+            finally:
+                store.close()
+
+        result = await self.predict(symbol, kline_df, horizon=horizon)
+        p = result.to_dict()
+        direction = p["direction"]
+        prob = p["probability"]
+
+        # 历史校准：同方向已评估预测的命中率
+        store = self._store()
+        try:
+            hist = store.query_df(
+                "SELECT direction, status, probability FROM prediction_log "
+                "WHERE symbol = ? AND direction = ? AND status != 'pending'",
+                [symbol, direction])
+            if hist.empty:
+                hist = store.query_df(
+                    "SELECT direction, status, probability FROM prediction_log "
+                    "WHERE direction = ? AND status != 'pending'",
+                    [direction])
+            hist_hit = float((hist["status"] == "hit").mean()) \
+                if not hist.empty else 0.5
+            n_hist = int(hist.shape[0])
+        finally:
+            store.close()
+
+        # 概率分桶校准：桶内实际命中率（若低于桶中值 → 过度自信 → 降权）
+        bucket_hit = None
+        for lo, hi in ((0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 1.01)):
+            if lo <= prob < hi:
+                bucket_hit = self._bucket_hit_rate(lo, hi)
+                break
+
+        # 校准系数：历史命中率/0.5（相对随机的比值）再乘桶校准
+        hist_factor = hist_hit / 0.5 if hist_hit > 0 else 0.8
+        bucket_factor = 1.0
+        if bucket_hit is not None:
+            mid = min(lo + (hi - lo) / 2, 1.0)
+            bucket_factor = max(0.5, min(1.2, bucket_hit / mid * 1.2))
+
+        # 基础仓位：base 或按方向回退（与决策树一致）
+        if base_position_pct is None or base_position_pct <= 0:
+            base_position_pct = (10.0 if direction == "up"
+                                 else 0.0 if direction == "down" else 3.0)
+        suggested = base_position_pct * hist_factor * bucket_factor
+        suggested = max(0.0, min(20.0, suggested))  # RiskGuard 硬上限
+        suggested = round(suggested, 1)
+
+        amount = account_value * suggested / 100
+        return {
+            "symbol": symbol,
+            "horizon": horizon,
+            "direction": direction,
+            "probability": prob,
+            "base_position_pct": base_position_pct,
+            "hist_hit_rate": round(hist_hit, 3),
+            "hist_samples": n_hist,
+            "bucket_hit_rate": bucket_hit,
+            "hist_factor": round(hist_factor, 3),
+            "bucket_factor": round(bucket_factor, 3),
+            "suggested_position_pct": suggested,
+            "suggested_amount": round(amount, 2),
+            "explanation": (
+                f"预测{direction}({prob:.0%}) × 历史命中率{hist_hit:.0%}"
+                f"（{n_hist}样本）{'× 概率桶校准' if bucket_hit is not None else ''}"
+                f" → 建议仓位 ≤{suggested}%（RiskGuard 20% 上限内）"),
+            "disclaimer": "研究参考，非投资建议。仓位须结合自身风险承受能力。",
+        }
+
+    def _bucket_hit_rate(self, lo: float, hi: float) -> Optional[float]:
+        """全局概率桶实际命中率（evaluate 同款分桶）。"""
+        store = self._store()
+        try:
+            df = store.query_df(
+                "SELECT direction, status, probability FROM prediction_log "
+                "WHERE status != 'pending' AND direction IN ('up','down')", [])
+            if df.empty:
+                return None
+            df["prob"] = pd.to_numeric(df["probability"], errors="coerce")
+            sub = df[(df["prob"] >= lo) & (df["prob"] < hi)]
+            if sub.empty:
+                return None
+            return round(float((sub["status"] == "hit").mean()), 3)
+        finally:
+            store.close()
+
     # ---- 历史查询 ----
     def prediction_history(self, symbol: str, limit: int = 20) -> list[dict[str, Any]]:
         """某股票最近预测记录（含评估结果）。"""

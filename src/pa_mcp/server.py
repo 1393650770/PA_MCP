@@ -1696,6 +1696,50 @@ async def predict_market(symbol: str, horizon: Literal["5d", "20d"] = "5d",
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def predict_position_size(symbol: str, account_value: float = 100000.0,
+                                horizon: Literal["5d", "20d"] = "5d",
+                                base_position_pct: float = 0.0) -> dict[str, Any]:
+    """预测驱动的仓位建议（Risk Manager 思路，借鉴 ai-hedge-fund）。
+
+    预测概率 × 历史命中率校准 × 概率桶校准 → 建议仓位（≤20% 硬上限）。
+    输出完整推导链（可追溯），供研究与决策参考。
+
+    Args:
+        symbol: 股票代码
+        account_value: 账户资金（用于金额展示）
+        horizon: 预测周期
+        base_position_pct: 基础仓位（分析师建议）；0 = 按方向回退
+    """
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        svc = get_prediction_service()
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 160",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=160)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        sizing = await svc.position_sizing(
+            symbol, account_value=account_value, horizon=horizon,
+            base_position_pct=base_position_pct or None, kline_df=kline_df)
+        return _response(data=sizing)
+    except Exception as e:
+        logger.error("predict_position_size failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def prediction_history(symbol: str, limit: int = 20) -> dict[str, Any]:
     """查看某股票的历史预测记录与验证结果（方向/概率/实际收益/命中状态）。"""
     try:

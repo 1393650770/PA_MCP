@@ -1566,6 +1566,40 @@ def sector_rotation_ui(load_data: bool = False) -> str:
         return f"板块轮动失败：{str(e)[:200]}"
 
 
+def position_sizing_ui(symbol: str) -> str:
+    """预测驱动的仓位建议（预测概率 × 历史命中率校准）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.agent.prediction import get_prediction_service
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+        sizing = _asyncio.run(get_prediction_service().position_sizing(
+            symbol, kline_df=df))
+        return (
+            f"## 💼 预测→仓位建议（{symbol}）\n"
+            f"- **预测**：{DIRECTION_ZH.get(sizing['direction'], sizing['direction'])}"
+            f" {sizing['probability']:.0%}（{sizing['horizon']}）\n"
+            f"- **历史校准**：同方向命中率 {sizing['hist_hit_rate']:.0%}"
+            f"（{sizing['hist_samples']} 样本）"
+            + (f"，概率桶命中率 {sizing['bucket_hit_rate']:.0%}"
+               if sizing["bucket_hit_rate"] is not None else "")
+            + f"\n- **推导链**：基础 {sizing['base_position_pct']:.0f}% × "
+            f"历史系数 {sizing['hist_factor']:.2f} × "
+            f"桶系数 {sizing['bucket_factor']:.2f}\n"
+            f"- **建议仓位**：**≤{sizing['suggested_position_pct']}%**"
+            f"（{sizing['suggested_amount']:,.0f} 元 @10 万账户）\n"
+            f"- **解释**：{sizing['explanation']}\n"
+            f"*{sizing['disclaimer']}*"
+        )
+    except Exception as e:
+        return f"仓位建议失败：{str(e)[:200]}"
+
+
 def canslim_ui(top_n: int = 20, pool: str = "") -> str:
     """CANSLIM 成长股扫描（欧奈尔七要素）。"""
     try:
@@ -2314,6 +2348,12 @@ def build_app():
             hist_out = gr.Markdown()
             hist_btn.click(prediction_history_ui, inputs=[pred_sym],
                            outputs=[hist_out])
+
+            pos_btn = gr.Button("💼 预测→仓位建议（Risk Manager）",
+                                variant="secondary")
+            pos_out = gr.Markdown()
+            pos_btn.click(position_sizing_ui, inputs=[pred_sym],
+                          outputs=[pos_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")

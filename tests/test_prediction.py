@@ -408,6 +408,67 @@ def test_by_mode_comparison(tmp_path):
     assert "brier_score" in summary["by_mode"]["llm"]
 
 
+def test_position_sizing_with_history(tmp_path):
+    """预测→仓位：同方向历史全中 → hist_hit_rate=1.0 生效；上限 20%。"""
+    db = tmp_path / "sizing_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+
+    # 先预测拿方向，再按该方向灌 5 条全中历史
+    df = _make_df()
+    pre = asyncio.run(svc.predict("600000", df, horizon="5d"))
+    d = pre.direction
+    for i in range(5):
+        svc.save_prediction(PredictionResult(
+            symbol="600000", predict_date="2026-07-06", horizon="5d",
+            direction=d, prob_up=0.7 if d == "up" else 0.15,
+            prob_down=0.7 if d == "down" else 0.15,
+            prob_sideways=0.15))
+    dates = pd.date_range("2026-07-01", periods=10, freq="B")
+    sign = 1 if d == "up" else -1
+
+    def hist_kline(symbol):
+        # 行情方向与预测方向一致 → 历史全中
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + sign * 0.05 * i for i in range(10)],
+            "high": [10.5 + sign * 0.05 * i for i in range(10)],
+            "low": [9.5 + sign * 0.05 * i for i in range(10)],
+            "close": [10.0 + sign * 0.05 * i for i in range(10)],
+            "volume": [1e6] * 10,
+        })
+
+    asyncio.run(svc.evaluate_predictions(
+        kline_provider=hist_kline, today="2026-08-15"))
+
+    sizing = asyncio.run(svc.position_sizing("600000", kline_df=df))
+    assert sizing["direction"] == d
+    assert sizing["hist_hit_rate"] == 1.0
+    assert sizing["hist_samples"] == 5
+    assert 0 <= sizing["suggested_position_pct"] <= 20  # RiskGuard 上限
+    # up 方向基础仓位回退 10%；down 为 0
+    assert sizing["base_position_pct"] == (10.0 if d == "up" else 0.0)
+
+
+def test_position_sizing_down_zero():
+    """看跌预测 → 仓位 0（不做空）。"""
+    import numpy as np
+    np.random.seed(11)
+    close = 10.0
+    rows = []
+    for i in range(120):
+        close *= 1 + np.random.normal(-0.002, 0.015)
+        rows.append({"date": pd.Timestamp("2026-01-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e6})
+    df = pd.DataFrame(rows)
+
+    svc = PredictionService(store_path=":memory:")
+    sizing = asyncio.run(svc.position_sizing("600000", kline_df=df))
+    if sizing["direction"] == "down":
+        assert sizing["suggested_position_pct"] == 0.0
+    else:
+        assert sizing["suggested_position_pct"] >= 0.0
+
+
 def test_evaluate_sideways_threshold(tmp_path):
     db = tmp_path / "pred_test2.duckdb"
     svc = PredictionService(store_path=str(db))
