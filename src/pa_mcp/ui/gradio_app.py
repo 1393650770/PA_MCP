@@ -1181,6 +1181,16 @@ def predict_market_ui(symbol: str, horizon: str) -> str:
         return f"预测失败：{str(e)[:200]}"
 
 
+def data_quality_ui() -> str:
+    """数据质量体检（表覆盖/K 线完整性/缺口）。"""
+    try:
+        from pa_mcp.data.quality_report import (
+            get_quality_report, format_report)
+        return format_report(get_quality_report().generate())
+    except Exception as e:
+        return f"数据体检失败：{str(e)[:200]}"
+
+
 def predict_multi_ui(symbols: str) -> str:
     """多股票批量预测对比（方向/概率/区间并排）。"""
     symbols = symbols.strip()
@@ -2635,6 +2645,9 @@ def build_app():
             health_btn = gr.Button("刷新健康状态", size="sm")
             health_btn.click(source_health_ui, outputs=[health_md])
             app.load(source_health_ui, outputs=[health_md])
+
+            dq_btn = gr.Button("🩺 数据质量体检（表覆盖/OHLC/缺口）", size="sm")
+            dq_btn.click(data_quality_ui, outputs=[health_md])
 
         with gr.Tab("📊 数据看板"):
             with gr.Row():

@@ -2133,6 +2133,23 @@ async def chan_beichi_backtest(symbols: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def data_quality_report() -> dict[str, Any]:
+    """数据质量体检：表覆盖 + K 线完整性（OHLC 一致性/非正/NaN/缺口）。
+
+    输出健康评分（0-100）+ 问题清单（可追溯）——研究可信度的前置检查。
+    用于调度后/研究前的数据体检。
+    """
+    try:
+        from pa_mcp.data.quality_report import (
+            get_quality_report, format_report)
+        result = get_quality_report().generate()
+        return _response(data={**result, "report": format_report(result)})
+    except Exception as e:
+        logger.error("data_quality_report failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def ai_market_report(symbols: str) -> dict[str, Any]:
     """AI 市场研究报告：确定性研究结果 → LLM 综述。
 
