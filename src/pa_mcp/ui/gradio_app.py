@@ -3090,6 +3090,15 @@ def build_app():
                         outputs=[ov_out])
             ov_gra.click(graham_ui, inputs=[ov_pool], outputs=[ov_out])
             ov_ms.click(market_structure_ui, outputs=[ov_out])
+
+            with gr.Row():
+                ov_risk = gr.Button("🛡️ 持仓风险面板")
+                ov_mp = gr.Button("🔮 多股预测对比")
+                ov_sent = gr.Button("🌡️ 游资情绪周期")
+            ov_risk.click(portfolio_risk_ui, outputs=[ov_out])
+            ov_mp.click(predict_multi_ui, inputs=[ov_pool],
+                        outputs=[ov_out])
+            ov_sent.click(sentiment_cycle_ui, outputs=[ov_out])
             gr.Markdown("全部输出研究参考，非投资建议。详细工具见各专用 Tab。")
 
         with gr.Tab("🔮 市场预测"):
