@@ -148,9 +148,18 @@ class Settings(BaseSettings):
 _settings: Optional[Settings] = None
 
 
+# 项目根目录（src/pa_mcp/config.py → 项目根）
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 def get_settings() -> Settings:
     """Get or create global settings instance."""
     global _settings
     if _settings is None:
         _settings = Settings.from_yaml()
+        # 数据库相对路径 → 基于项目根的绝对路径
+        # （避免从不同工作目录启动时连到不同数据库文件，导致数据"丢失"）
+        db_path = _settings.database.path
+        if db_path and not os.path.isabs(db_path):
+            _settings.database.path = str(PROJECT_ROOT / db_path)
     return _settings
