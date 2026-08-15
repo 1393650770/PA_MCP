@@ -178,6 +178,128 @@ def test_market_diagnosis_llm_invalid_falls_back():
         llm_port.register_adapter(orig)
 
 
+def _analyst_ok():
+    return {"strength_score": 70, "risks": [], "key_findings": ["多头"],
+            "dimension": "technical"}
+
+
+def _pm_ok():
+    return {
+        "overall_strength_score": 68, "direction": "bullish",
+        "dimension_scores": {"technical": 70, "capital": 60, "sentiment": 55,
+                             "fundamental": 65, "event": 50},
+        "key_evidence": [], "key_risks": [], "risk_reward_assessment": "favorable",
+        "suggested_max_position_pct": 8,
+    }
+
+
+def _bull_ok():
+    return {
+        "bull_points": [{"point": "均线多头", "evidence": "MA5>MA20>MA60"},
+                        {"point": "放量突破", "evidence": "量比1.8"},
+                        {"point": "资金流入", "evidence": "主力净流入"}],
+        "bear_rebuttals": [{"attack": "超买", "rebuttal": "强势不回补"}],
+        "suggested_position_pct": 10,
+    }
+
+
+def _bear_ok():
+    return {
+        "bear_points": [{"point": "高位放量滞涨", "evidence": "量增价平"},
+                        {"point": "大盘弱势", "evidence": "指数破位"},
+                        {"point": "获利盘丰厚", "evidence": "累计涨幅大"}],
+        "bull_rebuttals": [{"attack": "均线多头", "rebuttal": "乖离率过大"}],
+        "biggest_missed_risk": "业绩不及预期",
+    }
+
+
+def _master_ok():
+    return {
+        "final_direction": "bearish", "final_strength_score": 45,
+        "suggested_max_position_pct": 6,
+        "master_style": "反身性",
+        "verdict_reason": "高位风险大于收益",
+        "key_evidence_used": ["量价背离"], "falsification_conditions": ["放量新高"],
+        "final_risks": ["回调风险"],
+    }
+
+
+def test_deep_analyze_with_debate():
+    """debate=True：PM 合成 → Bull → Bear → 大师裁定覆盖。"""
+    orch = AgentOrchestrator()
+    responses = [
+        _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(),
+        _pm_ok(),
+        _bull_ok(), _bear_ok(), _master_ok(),
+    ]
+    adapter = MockAdapter(responses)
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    llm_port.register_adapter(adapter)
+    try:
+        result = asyncio.run(orch.deep_analyze(
+            "000001", _kline(), debate=True))
+        assert result.mode == "deep"
+        # 大师裁定覆盖 PM：方向转空、分数 45、仓位 6%
+        assert result.direction == "bearish"
+        assert result.overall_strength_score == 45.0
+        assert result.suggested_max_position_pct == 6.0
+        assert result.master_verdict is not None
+        assert result.master_verdict["master_style"] == "反身性"
+        assert result.debate is not None
+        assert len(result.debate["bull"]["bull_points"]) == 3
+        assert len(result.debate["bear"]["bear_points"]) == 3
+        assert "回调风险" in result.key_risks
+    finally:
+        llm_port.register_adapter(orig)
+
+
+def test_deep_analyze_debate_master_fails_keeps_pm():
+    """大师裁定失败 → 保留 PM 结论（不破坏主流程）。"""
+    orch = AgentOrchestrator()
+    responses = [
+        _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(),
+        _pm_ok(),
+        _bull_ok(), _bear_ok(),
+        {"final_direction": "lol", "final_strength_score": -5},
+    ]
+    adapter = MockAdapter(responses)
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    llm_port.register_adapter(adapter)
+    try:
+        result = asyncio.run(orch.deep_analyze(
+            "000001", _kline(), debate=True))
+        # PM 结论保留
+        assert result.direction == "bullish"
+        assert result.overall_strength_score == 68.0
+        # 辩论部分仍记录（bull/bear 成功）
+        assert result.debate is not None
+        assert result.master_verdict is None
+    finally:
+        llm_port.register_adapter(orig)
+
+
+def test_deep_analyze_debate_off_no_extra_calls():
+    """debate=False：不调用辩论（调用次数 = 诊断? + 5 + PM）。"""
+    orch = AgentOrchestrator()
+    responses = [
+        _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(), _analyst_ok(),
+        _pm_ok(),
+    ]
+    adapter = MockAdapter(responses)
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    llm_port.register_adapter(adapter)
+    try:
+        result = asyncio.run(orch.deep_analyze("000001", _kline()))
+        assert result.master_verdict is None
+        assert result.debate is None
+        assert len(adapter.calls) == 6
+    finally:
+        llm_port.register_adapter(orig)
+
+
 def test_deep_analyze_with_diagnosis_injection():
     """集成：诊断注入 + 5 分析师 + PM 合成，校验重试生效。"""
     orch = AgentOrchestrator()

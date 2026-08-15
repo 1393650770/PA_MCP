@@ -209,6 +209,107 @@ def test_save_history_evaluate(tmp_path):
     assert all(h["actual_return_pct"] is not None for h in hist2)
 
 
+def test_brier_score_calibration(tmp_path):
+    """Brier + 气候学技能分：混合涨跌样本下 1 - brier/baseline。"""
+    db = tmp_path / "brier_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+
+    # 4 条确定性预测：600000 涨行情、600001 跌行情，各配 up/down
+    for sym, d, pu, pd_, ps in (
+            ("600000", "up", 1.0, 0.0, 0.0), ("600001", "up", 1.0, 0.0, 0.0),
+            ("600000", "down", 0.0, 1.0, 0.0), ("600001", "down", 0.0, 1.0, 0.0)):
+        svc.save_prediction(PredictionResult(
+            symbol=sym, predict_date="2026-08-01", horizon="5d",
+            direction=d, prob_up=pu, prob_down=pd_, prob_sideways=ps))
+
+    dates = pd.date_range("2026-07-28", periods=10, freq="B")
+
+    def kline(symbol):
+        sign = 1 if symbol == "600000" else -1
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + sign * 0.06 * i for i in range(10)],
+            "high": [10.5 + sign * 0.06 * i for i in range(10)],
+            "low": [9.5 + sign * 0.06 * i for i in range(10)],
+            "close": [10.0 + sign * 0.06 * i for i in range(10)],
+            "volume": [1e6] * 10,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=kline, today="2026-08-15"))
+    # 实际类别：600000 涨 → y_up=1；600001 跌 → y_down=1（混合 2/2）
+    #  brier：up/600000 命中 0；up/600001 未中 2；down/600000 未中 2；down/600001 命中 0
+    #  mean = 1.0
+    assert summary["brier_score"] == 1.0
+    # 气候学基准（频率 [0.5,0.5,0]）：每个样本 brier = 0.25+0.25 = 0.5 → base=0.5
+    # 技能分 = 1 - 1.0/0.5 = -1.0（反方向预测劣于气候学基准）
+    assert summary["baseline_brier"] == 0.5
+    assert summary["brier_skill_score"] == -1.0
+    assert summary["hit_rate"] == 0.5
+
+
+def test_brier_perfect_prediction(tmp_path):
+    """全部预测命中 → Brier=0，技能分=1（完美校准）。"""
+    db = tmp_path / "brier_test2.duckdb"
+    svc = PredictionService(store_path=str(db))
+    svc.save_prediction(PredictionResult(
+        symbol="600000", predict_date="2026-08-01", horizon="5d",
+        direction="up", prob_up=1.0, prob_down=0.0, prob_sideways=0.0))
+
+    dates = pd.date_range("2026-07-28", periods=10, freq="B")
+
+    def rising_kline(symbol):
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + 0.06 * i for i in range(10)],
+            "high": [10.5 + 0.06 * i for i in range(10)],
+            "low": [9.5 + 0.06 * i for i in range(10)],
+            "close": [10.0 + 0.06 * i for i in range(10)],
+            "volume": [1e6] * 10,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=rising_kline, today="2026-08-15"))
+    assert summary["brier_score"] == 0.0
+    # 单样本时气候学基准=0（样本全同类别）→ 技能分无定义（正确行为）
+    assert summary["brier_skill_score"] is None
+    # expected_return_pct 默认 0.0（常数）→ 相关性不计算
+    assert summary["return_correlation"] is None
+
+
+def test_return_correlation(tmp_path):
+    """期望收益与涨幅正相关 → 相关性 > 0。
+
+    注：同日预测共享同一行情 → 实际收益相同 → 相关无定义。
+    用 3 只不同股票（不同涨速行情）制造差异化实际收益。
+    """
+    db = tmp_path / "corr_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+    # 期望收益递增：1.0 / 3.0 / 6.0
+    for exp_ret, sym in ((1.0, "600000"), (3.0, "600001"), (6.0, "600002")):
+        svc.save_prediction(PredictionResult(
+            symbol=sym, predict_date="2026-08-01", horizon="5d",
+            direction="up", prob_up=0.6, prob_down=0.2, prob_sideways=0.2,
+            expected_return_pct=exp_ret))
+
+    dates = pd.date_range("2026-07-28", periods=10, freq="B")
+    slopes = {"600000": 0.01, "600001": 0.03, "600002": 0.06}
+
+    def kline(symbol):
+        m = slopes[symbol]
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + m * i for i in range(10)],
+            "high": [10.5 + m * i for i in range(10)],
+            "low": [9.5 + m * i for i in range(10)],
+            "close": [10.0 + m * i for i in range(10)],
+            "volume": [1e6] * 10,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=kline, today="2026-08-15"))
+    # 实际 5 日收益：+0.5% / +1.5% / +3.0%（与期望单调一致）→ 强正相关
+    assert summary["return_correlation"] is not None
+    assert summary["return_correlation"] > 0.99
+
+
 def test_evaluate_sideways_threshold(tmp_path):
     db = tmp_path / "pred_test2.duckdb"
     svc = PredictionService(store_path=str(db))

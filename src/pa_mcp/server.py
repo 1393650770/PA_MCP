@@ -1507,12 +1507,13 @@ async def watchlist_overview() -> dict[str, Any]:
 # ---- MCP Tools: Agent (Full Integration) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep"] = "fast") -> dict[str, Any]:
+async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep","debate"] = "fast") -> dict[str, Any]:
     """AI-powered multi-dimensional stock analysis.
 
     Args:
         symbol: Stock code (e.g., '000001')
-        depth: 'fast' (single call, ~15s) or 'deep' (5 analysts + debate, ~60s)
+        depth: 'fast' (single call, ~15s) or 'deep' (5 analysts + PM, ~60s)
+               or 'debate' (deep + Bull/Bear 辩论 + 投资大师裁定, ~90s)
     """
     try:
         from pa_mcp.agent.orchestrator import get_orchestrator
@@ -1559,6 +1560,9 @@ async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep"] = "fast
             result = await orchestrator.fast_analyze(
                 symbol, kline_df, market_state=market_state, fundamental_data=fundamental,
             )
+        elif depth == "debate":
+            result = await orchestrator.deep_analyze(
+                symbol, kline_df, market_state=market_state, debate=True)
         else:
             result = await orchestrator.deep_analyze(symbol, kline_df, market_state=market_state)
 
@@ -1573,6 +1577,8 @@ async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep"] = "fast
             "risk_reward_assessment": result.risk_reward_assessment,
             "suggested_max_position_pct": result.suggested_max_position_pct,
             "analysis_time_ms": result.analysis_time_ms,
+            "master_verdict": result.master_verdict,
+            "debate": result.debate,
                 })
 
     except Exception as e:

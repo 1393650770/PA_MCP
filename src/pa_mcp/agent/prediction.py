@@ -718,12 +718,11 @@ class PredictionService:
 
     @staticmethod
     def _summary(store) -> dict[str, Any]:
-        """评估汇总（全部预测 + 已评估部分）。"""
+        """评估汇总（全部预测 + 已评估部分，含 Brier 概率校准分数）。"""
         total = store.query_df("SELECT COUNT(*) AS c FROM prediction_log", [])
-        ev = store.query_df(
-            "SELECT COUNT(*) AS c FROM prediction_log WHERE status != 'pending'", [])
         ev_df = store.query_df(
-            "SELECT direction, status, actual_return_pct FROM prediction_log "
+            "SELECT direction, status, actual_return_pct, prob_up, prob_down, "
+            "prob_sideways, expected_return_pct FROM prediction_log "
             "WHERE status != 'pending'", [])
         n = int(ev_df.shape[0])
         out: dict[str, Any] = {
@@ -731,6 +730,9 @@ class PredictionService:
             "evaluated": n,
             "hit_rate": 0.0,
             "brier_score": None,
+            "baseline_brier": None,      # 气候学基准（按历史频率预测）
+            "brier_skill_score": None,   # 1 - brier/baseline（>0 = 优于基准）
+            "return_correlation": None,  # 预测期望收益 vs 实际收益相关系数
             "by_direction": {},
             "avg_actual_return_pct": None,
             "direction_agreement_pct": None,
@@ -747,6 +749,38 @@ class PredictionService:
                 lambda r: (r["direction"] == "up" and r["actual_return_pct"] > 0)
                 or (r["direction"] == "down" and r["actual_return_pct"] < 0), axis=1)
             out["direction_agreement_pct"] = round(float(agree.mean()), 3)
+
+        # Brier 分数（三分类概率校准）：
+        # 实际类别：up = 涨超阈值、down = 跌超阈值、sideways = 其余
+        # Brier_i = Σ_c (p_c - y_c)²，范围 [0,2]，越小越准
+        prob_cols = ("prob_up", "prob_down", "prob_sideways")
+        if ev_df[list(prob_cols)].notna().all().all():
+            y_up = (ev_df["actual_return_pct"] > SIDEWAYS_THRESHOLD_PCT).astype(float)
+            y_down = (ev_df["actual_return_pct"] < -SIDEWAYS_THRESHOLD_PCT).astype(float)
+            y_side = ((ev_df["actual_return_pct"].abs() <= SIDEWAYS_THRESHOLD_PCT)
+                      ).astype(float)
+            brier = float(((ev_df["prob_up"] - y_up) ** 2
+                           + (ev_df["prob_down"] - y_down) ** 2
+                           + (ev_df["prob_sideways"] - y_side) ** 2).mean())
+            out["brier_score"] = round(brier, 4)
+            # 气候学基准：用样本频率作为恒定预测
+            f_up, f_down = float(y_up.mean()), float(y_down.mean())
+            f_side = float(y_side.mean())
+            base = float(((f_up - y_up) ** 2 + (f_down - y_down) ** 2
+                          + (f_side - y_side) ** 2).mean())
+            out["baseline_brier"] = round(base, 4)
+            if base > 0:
+                out["brier_skill_score"] = round(1 - brier / base, 4)
+
+        # 预测期望收益 vs 实际收益 相关性（Spearman 稳健版用 pandas rank）
+        exp = pd.to_numeric(ev_df["expected_return_pct"], errors="coerce")
+        act = pd.to_numeric(ev_df["actual_return_pct"], errors="coerce")
+        valid = exp.notna() & act.notna()
+        if valid.sum() >= 3:
+            corr = exp[valid].corr(act[valid], method="pearson")
+            if pd.notna(corr):
+                out["return_correlation"] = round(float(corr), 4)
+
         by_dir: dict[str, dict] = {}
         for d in ("up", "down", "sideways"):
             sub = ev_df[ev_df["direction"] == d]

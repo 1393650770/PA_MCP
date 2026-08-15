@@ -371,6 +371,30 @@ def chat_reply(message: str, history: list[dict]) -> str:
         return f"LLM 调用失败（{str(e)[:120]}），已降级为规则分析：\n\n{_rule_based_reply(message)}"
 
 
+def _prediction_brief(symbol: str, df: pd.DataFrame, horizon: str = "5d") -> str:
+    """未来走势预测摘要（供持仓分析/看板复用，失败返回空串）。"""
+    try:
+        from pa_mcp.agent.prediction import get_prediction_service
+        result = asyncio.run(get_prediction_service().predict(symbol, df, horizon=horizon))
+        p = result.to_dict()
+        dist = p["probability_distribution"]
+        rng = p["expected_range_pct"]
+        lines = [
+            f"🔮 **未来 {horizon} 走势预测**：{DIRECTION_ZH.get(p['direction'], p['direction'])}"
+            f"（{p['probability']:.0%}）",
+            f"涨 {dist['up']:.0%} / 跌 {dist['down']:.0%} / 震荡 {dist['sideways']:.0%}，"
+            f"期望 {p['expected_return_pct']:+.1f}%（区间 {rng[0]:+.1f}~{rng[1]:+.1f}%），"
+            f"周期 {p['cycle_position_zh']}→{p['cycle_forecast_zh']}，置信 {p['confidence']:.0%}"
+            f"（{'AI' if p['mode'] == 'llm' else '统计'}模式）",
+        ]
+        if p.get("key_levels", {}).get("support"):
+            lines.append(f"支撑 {p['key_levels']['support']} / "
+                         f"压力 {p['key_levels']['resistance']}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def portfolio_ai_analysis(symbol: str) -> str:
     """对持仓股生成 AI 综合分析（LLM 或规则降级）。"""
     symbol = symbol.strip()
@@ -446,7 +470,19 @@ def portfolio_ai_analysis(symbol: str) -> str:
                 if result.key_evidence:
                     ev = result.key_evidence[0]
                     ai_text += f"关键依据：{ev.get('finding', '')}\n"
+                pred = _prediction_brief(symbol, df)
+                if pred:
+                    ai_text += "\n" + pred + "\n"
                 return "\n\n".join(parts[:2]) + "\n\n---\n💡 **AI 分析师团解读**：\n" + ai_text
+    except Exception:
+        pass
+    # 无 LLM：规则分析 + 确定性预测
+    try:
+        df = _load_long_history(symbol)
+        if not df.empty:
+            pred = _prediction_brief(symbol, df)
+            if pred:
+                parts.append(f"---\n{pred}")
     except Exception:
         pass
     return "\n\n".join(parts)
@@ -1159,8 +1195,18 @@ def evaluate_predictions_ui() -> str:
             f"{f'{summary['direction_agreement_pct']:.0%}' if summary['direction_agreement_pct'] is not None else '—'}",
             f"- **平均实际收益**："
             f"{f'{summary['avg_actual_return_pct']:+.2f}%' if summary['avg_actual_return_pct'] is not None else '—'}",
-            "",
-            "### 分方向表现",
+        ])
+        if summary.get("brier_score") is not None:
+            brier_line = f"- **Brier 分数（概率校准）**：{summary['brier_score']}"
+            if summary.get("baseline_brier") is not None:
+                brier_line += (f"（基准 {summary['baseline_brier']}，"
+                               f"技能分 **{summary['brier_skill_score']:+.3f}**"
+                               + (" ✅ 优于随机" if (summary.get("brier_skill_score") or -9) > 0
+                                  else " ⚠️ 不优于随机") + "）")
+            lines.append(brier_line)
+        if summary.get("return_correlation") is not None:
+            lines.append(f"- **期望收益 vs 实际收益相关**：{summary['return_correlation']:+.3f}")
+        lines.extend(["", "### 分方向表现",
             "| 方向 | 数量 | 命中率 | 平均收益% |",
             "|---|---|---|---|",
         ])

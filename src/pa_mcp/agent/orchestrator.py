@@ -252,6 +252,9 @@ class AnalysisResult:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     # 两阶段分析：市场诊断结果（Stage 1 输出，注入分析 prompt）
     market_diagnosis: Optional[dict] = None
+    # 辩论阶段（TradingAgents 风格）：多头/空头论点 + 投资大师裁定
+    debate: Optional[dict] = None
+    master_verdict: Optional[dict] = None
 
 
 class AgentOrchestrator:
@@ -493,15 +496,18 @@ class AgentOrchestrator:
     async def analyze_with_diagnosis(
         self, symbol: str, kline_df: pd.DataFrame,
         market_context: Optional[dict] = None,
+        debate: bool = False,
         **kwargs,
     ) -> AnalysisResult:
         """两阶段分析：Stage 1 市场诊断 → Stage 2 深度分析（诊断注入）。
 
         诊断结论（市场状态 + 策略路由）写入 AnalysisResult.market_diagnosis，
         并注入 5 位分析师的 prompt 作为市场环境上下文。
+        debate=True 时额外执行 Bull/Bear 辩论 + 投资大师裁定。
         """
         diagnosis = await self.market_diagnosis(market_context)
         kwargs["diagnosis"] = diagnosis
+        kwargs["debate"] = debate
         return await self.deep_analyze(symbol, kline_df, **kwargs)
 
     # 分析师角色配置（借鉴 ai-hedge-fund 的多 agent 模式）
@@ -517,6 +523,70 @@ class AgentOrchestrator:
         ("event", EVENT_ANALYST_PROMPT,
          lambda k, c, d, f, e, m: f"事件数据：\n{f.get('events', '无') if isinstance(f, dict) else '无'}"),
     ]
+
+    # ---- 辩论阶段（借鉴 TradingAgents bull/bear/debate 机制） ----
+
+    BULL_ARGUMENT_PROMPT = """你是多头代表（Bull），为 {symbol} 的多头立场辩护。
+
+    分析师结论：
+    {analyst_results}
+
+    你的任务（输出 JSON）：
+    1. 从所有看涨证据中提炼 **3 个最强多头论点**（含数据支撑）
+    2. 预判空头会攻击的 2 个点，并逐一反驳
+    3. 给出你认为合理的**目标仓位上限**（0-20）
+
+    输出 JSON（仅 JSON）：
+    {{
+      "bull_points": [{{"point": "...", "evidence": "..."}}],
+      "bear_rebuttals": [{{"attack": "...", "rebuttal": "..."}}],
+      "suggested_position_pct": 0-20
+    }}"""
+
+    BEAR_ARGUMENT_PROMPT = """你是空头代表（Bear），为 {symbol} 的空头立场辩护。
+
+    分析师结论：
+    {analyst_results}
+    多头观点：
+    {bull_arguments}
+
+    你的任务（输出 JSON）：
+    1. 从所有看跌证据中提炼 **3 个最强空头论点**（含数据支撑）
+    2. 逐一反驳多头的 3 个论点
+    3. 指出多头忽略的最大风险
+
+    输出 JSON（仅 JSON）：
+    {{
+      "bear_points": [{{"point": "...", "evidence": "..."}}],
+      "bull_rebuttals": [{{"attack": "...", "rebuttal": "..."}}],
+      "biggest_missed_risk": "..."
+    }}"""
+
+    # 投资大师最终裁定（综合分析师 + 辩论，输出确定性结论）
+    MASTER_VERDICT_PROMPT = """你是投资大师（综合格雷厄姆的安全边际、索罗斯的反身性与证伪、利弗莫尔的关键点与趋势），对 {symbol} 做最终裁定。
+
+    分析师结论：
+    {analyst_results}
+
+    辩论观点：
+    {debate_summary}
+
+    裁定要求：
+    1. 不追求完美预测，只追求「风险调整后赔率是否值得参与」
+    2. 明确证伪条件（什么情况下你的判断是错的）
+    3. 仓位建议必须考虑市场环境与集中度风险
+    4. 输出 JSON（仅 JSON）：
+    {{
+      "final_direction": "bullish|bearish|neutral",
+      "final_strength_score": 0-100,
+      "suggested_max_position_pct": 0-20,
+      "master_style": "价值|趋势|反身性|混合（简短说明采用了哪种思想）",
+      "verdict_reason": "一句话结论（中文）",
+      "key_evidence_used": ["使用的关键证据"],
+      "falsification_conditions": ["什么情况下判断错误"],
+      "final_risks": ["最终风险清单"]
+    }}
+    DO NOT output buy/sell orders. Output scores and evidence only."""
 
     # 组合经理 prompt（汇总 5 分析师）
     PORTFOLIO_MANAGER_PROMPT = """你是投资组合经理，汇总 5 位分析师对 {symbol} 的分析，做出综合决策。
@@ -550,13 +620,15 @@ DO NOT output buy/sell. Output scores and evidence only."""
         event_data: Optional[dict] = None,
         market_state: Optional[str] = None,
         diagnosis: Optional[dict] = None,
+        debate: bool = False,
     ) -> AnalysisResult:
         """Deep mode: 5 parallel LLM analysts + portfolio manager synthesis.
 
         Stage 1: Market diagnosis (optional, via analyze_with_diagnosis)
         Stage 2: 5 analysts in parallel (asyncio.gather) with JSON retry
         Stage 3: Portfolio manager synthesis (with JSON retry)
-        Stage 4: RiskGuard clamp (position cap)
+        Stage 4: Bull/Bear debate + master verdict (optional, TradingAgents 风格)
+        Stage 5: RiskGuard clamp (position cap)
         """
         t0 = datetime.now()
 
@@ -663,6 +735,12 @@ DO NOT output buy/sell. Output scores and evidence only."""
                 "bearish" if result.overall_strength_score <= 40 else "neutral")
             result.suggested_max_position_pct = 5.0
 
+        # Stage 4: Bull/Bear 辩论 + 投资大师裁定（可选，TradingAgents 风格）
+        if debate and analyst_results:
+            await self._run_debate(
+                symbol, analyst_results, result, pm_resp,
+                diagnosis=diagnosis, history_text=history_text)
+
         # 自动写入经验库（best-effort）
         self._save_to_experience(symbol, result)
 
@@ -673,6 +751,131 @@ DO NOT output buy/sell. Output scores and evidence only."""
             elapsed_ms=round(result.analysis_time_ms),
         )
         return result
+
+    # ---- 辩论 + 投资大师裁定（TradingAgents 风格） ----
+
+    @staticmethod
+    def _validate_bull_bear_json(raw: dict) -> list[str]:
+        errors = []
+        if not isinstance(raw.get("bull_points", raw.get("bear_points", [])), list) \
+                or not raw.get("bull_points", raw.get("bear_points", [])):
+            errors.append("缺少论点数组（bull_points 或 bear_points）")
+        return errors
+
+    @staticmethod
+    def _validate_master_json(raw: dict) -> list[str]:
+        errors = []
+        if str(raw.get("final_direction", "")).lower() not in ("bullish", "bearish", "neutral"):
+            errors.append("final_direction 必须是 bullish/bearish/neutral")
+        try:
+            s = float(raw.get("final_strength_score", -1))
+            if not (0 <= s <= 100):
+                errors.append("final_strength_score 应为 0-100")
+        except Exception:
+            errors.append("final_strength_score 非数值")
+        return errors
+
+    async def _run_debate(self, symbol: str, analyst_results: dict,
+                          result: AnalysisResult, pm_resp: Optional[dict],
+                          diagnosis: Optional[dict] = None,
+                          history_text: str = "") -> None:
+        """Bull 论证 → Bear 反驳 → 投资大师裁定；失败不影响主流程。"""
+        try:
+            from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+            adapter = get_llm_adapter()
+            if adapter is None:
+                return
+            if pm_resp is not None and "error" not in pm_resp:
+                pm_line = (f"组合经理结论：方向={pm_resp.get('direction')} "
+                           f"强度={pm_resp.get('overall_strength_score')} "
+                           f"仓位上限={pm_resp.get('suggested_max_position_pct')}%")
+            else:
+                pm_line = "组合经理结论：未生成（降级用分析师均值）"
+            analyst_text = "\n".join(
+                f"[{dim}] 分数={d.get('strength_score', 50)} 风险={d.get('risks', [])}"
+                for dim, d in analyst_results.items()
+            ) + f"\n{pm_line}"
+            if history_text:
+                analyst_text += f"\n\n{history_text}"
+
+            # 1) Bull 论证
+            bull_params = LLMCallParams(
+                system_prompt=self.BULL_ARGUMENT_PROMPT.format(
+                    symbol=symbol, analyst_results=analyst_text),
+                user_prompt=f"请为 {symbol} 的多头立场辩护",
+                mode="fast", max_tokens=900,
+            )
+            bull = await self._chat_json_with_retry(
+                adapter, bull_params, self._validate_bull_bear_json)
+            bull_txt = "多头论证不可用"
+            if bull:
+                bull_txt = "\n".join(
+                    f"- {p.get('point', '')}（{p.get('evidence', '')}）"
+                    for p in bull.get("bull_points", []))
+                bull_txt += "\n空头反驳预案：" + "; ".join(
+                    f"{r.get('attack', '')} → {r.get('rebuttal', '')}"
+                    for r in bull.get("bear_rebuttals", []))
+
+            # 2) Bear 反驳（能看到多头论点）
+            bear_params = LLMCallParams(
+                system_prompt=self.BEAR_ARGUMENT_PROMPT.format(
+                    symbol=symbol, analyst_results=analyst_text,
+                    bull_arguments=bull_txt),
+                user_prompt=f"请反驳 {symbol} 的多头观点并论证空头立场",
+                mode="fast", max_tokens=900,
+            )
+            bear = await self._chat_json_with_retry(
+                adapter, bear_params, self._validate_bull_bear_json)
+            bear_txt = "空头论证不可用"
+            if bear:
+                bear_txt = "\n".join(
+                    f"- {p.get('point', '')}（{p.get('evidence', '')}）"
+                    for p in bear.get("bear_points", []))
+                bear_txt += "\n最大遗漏风险：" + str(bear.get("biggest_missed_risk", ""))
+                bear_txt += "\n对多头反驳：" + "; ".join(
+                    f"{r.get('attack', '')} → {r.get('rebuttal', '')}"
+                    for r in bear.get("bull_rebuttals", []))
+
+            result.debate = {"bull": bull, "bear": bear}
+
+            # 3) 投资大师裁定
+            master_params = LLMCallParams(
+                system_prompt=self.MASTER_VERDICT_PROMPT.format(
+                    symbol=symbol, analyst_results=analyst_text,
+                    debate_summary=f"【多头】\n{bull_txt}\n\n【空头】\n{bear_txt}"),
+                user_prompt=f"请对 {symbol} 做出最终裁定",
+                mode="deep", max_tokens=900,
+            )
+            master = await self._chat_json_with_retry(
+                adapter, master_params, self._validate_master_json)
+            if not master:
+                return
+            result.master_verdict = master
+            # 大师裁定生效（RiskGuard 20% 硬上限保留）
+            d = str(master.get("final_direction", "")).lower()
+            if d in ("bullish", "bearish", "neutral"):
+                result.direction = d
+            try:
+                score = float(master.get("final_strength_score", result.overall_strength_score))
+                result.overall_strength_score = round(min(100, max(0, score)), 1)
+            except Exception:
+                pass
+            try:
+                pos = float(master.get("suggested_max_position_pct",
+                                       result.suggested_max_position_pct))
+                result.suggested_max_position_pct = round(min(20, max(0, pos)), 1)
+            except Exception:
+                pass
+            risks = master.get("final_risks")
+            if isinstance(risks, list) and risks:
+                result.key_risks = [str(r) for r in risks][:8]
+            logger.info(
+                "Debate + master verdict done", symbol=symbol,
+                direction=result.direction, score=result.overall_strength_score,
+                style=master.get("master_style", ""),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Debate failed, keeping PM result", symbol=symbol, error=str(e))
 
     def _rule_based_deep(
         self, symbol: str, kline_df: pd.DataFrame,

@@ -121,8 +121,9 @@ python scripts/bootstrap_universe.py --limit 100
 
 - **LLM Ports & Adapters**：Anthropic 官方 SDK（Messages API）、OpenAI-compatible（doubao/ark 通用回退）、DeepSeek、智谱、通义
 - **多 Agent 深度分析**（借鉴 ai-hedge-fund）：5 分析师并行（技术/资金/情绪/基本面/事件）+ 组合经理合成 + RiskGuard 仓位上限
+- **Bull/Bear 辩论**（借鉴 TradingAgents）：多头论证 → 空头反驳 → 投资大师裁定（证伪条件/风格/结论），`depth='debate'` 可开关（成本+3次调用）
 - **两阶段分析**：市场诊断（高潮/发酵/启动/低迷/冰点）→ 策略路由 → 决策；JSON 校验失败自动重试
-- **🔮 市场预测**（借鉴 PA_Agent 未来走势预期）：周期位置 + 方向概率分布 + 期望收益区间 + 多场景推演；预测落盘可验证命中率（命中/未中/Brier）——预测可检验，非算命
+- **🔮 市场预测**（借鉴 PA_Agent 未来走势预期）：周期位置 + 方向概率分布 + 期望收益区间 + 多场景推演；预测落盘可验证（命中率/Brier 概率校准/技能分）——预测可检验，非算命
 - **经验库（RAG）**（借鉴 PA_Agent 经验库）：每次分析自动沉淀，后续分析自动参考相似历史案例（含事后验证）
 - **理财专业 prompts**：估值分析 / 持仓体检 / 财报解读 / 投资备忘录
 - **QMT BrokerPort 骨架**：券商确认后接入实盘（风控 ID 不可绕过、订单幂等）
