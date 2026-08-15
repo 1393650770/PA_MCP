@@ -2084,6 +2084,123 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def research_event_study_sector(symbol: str,
+                                      strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
+    """板块基准事件研究（风格匹配，学术标准）。
+
+    信号后 N 日收益 vs **同板块等权基准**（而非无条件市场平均）——
+    检验信号是否有「板块内 alpha」：跑赢板块才算真预测力。
+
+    Args:
+        symbol: 股票代码
+        strategy: 策略名（默认 bollinger_mean_reversion）
+    """
+    try:
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        from pa_mcp.research.event_study import signal_forward_returns
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 300", [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=300)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        # 策略信号
+        registry = StrategyRegistry()
+        registry.auto_discover()
+        cls = registry.get(strategy)
+        if cls is None:
+            return _response(success=False, error=f"策略 {strategy} 未注册",
+                             error_type="NOT_FOUND")
+        try:
+            signals = cls.generate_signals(kline_df.copy())
+        except Exception as e:
+            return _response(success=False, error=f"信号生成失败：{e}",
+                             error_type="INTERNAL_ERROR")
+        if not signals:
+            return _response(data={"symbol": symbol, "strategy": strategy,
+                                   "n_signals": 0,
+                                   "message": "无信号（该策略当前无触发）"})
+        sig_df = pd.DataFrame([{
+            "symbol": symbol,
+            "date": (getattr(s, "signal_time", None)
+                     or str(getattr(s, "timestamp", ""))[:10]),
+            "direction": getattr(s, "direction", "neutral").value
+                        if hasattr(getattr(s, "direction", None), "value")
+                        else str(getattr(s, "direction", "neutral")),
+            "strategy_name": strategy,
+        } for s in signals])
+
+        # 板块基准序列：{horizon: {date: 板块等权 N 日收益}}
+        bench_maps = {}
+        try:
+            sb = _store.query_df(
+                "SELECT sector FROM stock_basic WHERE symbol = ?", [symbol])
+            sector = sb.iloc[0]["sector"] if not sb.empty else None
+            if sector:
+                peers = _store.query_df(
+                    "SELECT symbol FROM stock_basic WHERE sector = ?", [sector])
+                peer_syms = [str(s) for s in peers["symbol"]
+                             if str(s) != symbol][:10]
+                for h in (5, 10, 20):
+                    series = {}
+                    for psym in peer_syms:
+                        pdf = _store.query_df(
+                            "SELECT date, close FROM kline_daily WHERE symbol = ? "
+                            "ORDER BY date", [psym])
+                        if len(pdf) < h + 1:
+                            continue
+                        pd_ = pdf.sort_values("date").reset_index(drop=True)
+                        closes = pd_["close"].astype(float)
+                        for i in range(len(pd_) - h):
+                            series.setdefault(
+                                str(pd_["date"].iloc[i])[:10], []).append(
+                                (closes.iloc[i + h] / closes.iloc[i] - 1) * 100)
+                    if series:
+                        bench_maps[h] = pd.Series({
+                            d: sum(v) / len(v) for d, v in series.items()})
+        except Exception:
+            pass
+
+        results = signal_forward_returns(
+            kline_df, sig_df, [5, 10, 20],
+            benchmark_returns=bench_maps or None)
+        if not results:
+            return _response(data={"symbol": symbol, "strategy": strategy,
+                                   "n_signals": len(sig_df),
+                                   "message": "信号无法定位到行情"})
+
+        return _response(data={
+            "symbol": symbol,
+            "strategy": strategy,
+            "benchmark_type": "同板块等权" if bench_maps else "无条件（板块数据缺失）",
+            "n_signals": len(sig_df),
+            "results": [
+                {"horizon": r.horizon, "n_events": r.n_events,
+                 "win_rate_pct": r.win_rate_pct,
+                 "avg_return_pct": r.avg_return_pct,
+                 "benchmark_avg_return_pct": r.benchmark_avg_return_pct,
+                 "excess_return_pct": r.excess_return_pct,
+                 "has_edge": r.has_edge}
+                for r in results],
+            "has_edge": any(r.has_edge for r in results),
+        })
+    except Exception as e:
+        logger.error("research_event_study_sector failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def chan_beichi_backtest(symbols: str) -> dict[str, Any]:
     """缠论背驰信号组合回测验证。
 

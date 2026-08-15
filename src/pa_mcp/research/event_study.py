@@ -55,6 +55,7 @@ def signal_forward_returns(
     kline_df: pd.DataFrame,
     signals: pd.DataFrame,
     horizons: list[int] = (5, 10, 20),
+    benchmark_returns: Optional[pd.Series] = None,
 ) -> list[EventStudyResult]:
     """计算信号后 N 日收益。
 
@@ -62,6 +63,9 @@ def signal_forward_returns(
         kline_df: [symbol, date, close] 升序
         signals: [symbol, date, direction]（bullish 信号）
         horizons: 前瞻交易日数
+        benchmark_returns: 可选风格基准序列（日期(str)→基准 N 日收益%），
+            缺省 = 无条件基准（全部交易日平均）。传入同板块基准可检验
+            「信号是否有板块内 alpha」（学术标准风格匹配）。
     """
     if kline_df.empty or signals.empty:
         return []
@@ -71,12 +75,26 @@ def signal_forward_returns(
     close = df["close"].values
     dates = df["date_str"].values
 
-    # 基准：全部交易日的无条件 N 日收益
+    # 基准：无条件 N 日收益；或外部传入的风格基准（按信号日对齐）
+    # 支持两种形态：Series（所有 horizon 共用）或 {horizon: Series}
+    bench_maps: Optional[dict[int, dict[str, float]]] = None
+    if benchmark_returns is not None:
+        if isinstance(benchmark_returns, dict):
+            bench_maps = {
+                int(h): {str(d)[:10]: float(v)
+                         for d, v in series.items()}
+                for h, series in benchmark_returns.items()
+                if series is not None and not series.empty}
+        elif not benchmark_returns.empty:
+            one = {str(d)[:10]: float(v)
+                   for d, v in benchmark_returns.items()}
+            bench_maps = {h: one for h in horizons}
+
     results = []
     bullish = signals[signals["direction"] == "bullish"] if "direction" in signals.columns else signals
 
     for horizon in horizons:
-        # 基准收益（全部 bar）
+        # 基准收益（全部 bar，无条件）
         bench_returns = []
         for i in range(len(df) - horizon):
             bench_returns.append((close[i + horizon] / close[i] - 1) * 100)
@@ -108,6 +126,17 @@ def signal_forward_returns(
                 verdict="样本不足",
             ))
             continue
+
+        # 风格基准：按信号日对齐外部基准（horizon 匹配序列）
+        if bench_maps is not None:
+            bmap = bench_maps.get(horizon)
+            if bmap:
+                matched = [bmap.get(str(sig.get("date", ""))[:10])
+                           for _, sig in bullish.iterrows()]
+                matched = [m for m in matched if m is not None]
+                if matched:
+                    bench_avg = sum(matched) / len(matched)
+                    bench_win = sum(1 for m in matched if m > 0) / len(matched) * 100
 
         wins = sum(1 for r in returns if r > 0)
         results.append(EventStudyResult(

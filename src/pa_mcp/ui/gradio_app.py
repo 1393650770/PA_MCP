@@ -1062,6 +1062,107 @@ def walk_forward_ui(symbol: str, strategy: str) -> str:
         return f"评估失败：{str(e)[:200]}"
 
 
+def event_study_sector_ui(symbol: str, strategy: str) -> str:
+    """板块基准事件研究：信号超额 vs 同板块等权（板块内 alpha）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        from pa_mcp.research.event_study import signal_forward_returns
+        from pa_mcp.config import get_settings
+        from pa_mcp.data.store import DuckDBStore
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+
+        registry = StrategyRegistry()
+        registry.auto_discover()
+        cls = registry.get(strategy)
+        if cls is None:
+            return f"策略 {strategy} 未注册"
+        try:
+            signals = cls.generate_signals(df.copy())
+        except Exception:
+            return f"{strategy} 信号生成失败"
+        if not signals:
+            return f"{strategy} × {symbol}：无信号"
+
+        sig_df = pd.DataFrame([{
+            "symbol": symbol,
+            "date": (getattr(s, "signal_time", None)
+                     or str(getattr(s, "timestamp", ""))[:10]),
+            "direction": getattr(s, "direction", "neutral").value
+                        if hasattr(getattr(s, "direction", None), "value")
+                        else str(getattr(s, "direction", "neutral")),
+            "strategy_name": strategy,
+        } for s in signals])
+
+        # 板块基准（stock_basic.sector 同行股票）
+        bench_maps = {}
+        bench_note = "无条件（板块数据缺失）"
+        try:
+            store = DuckDBStore(get_settings().database.path)
+            store.connect()
+            sb = store.query_df(
+                "SELECT sector FROM stock_basic WHERE symbol = ?", [symbol])
+            if not sb.empty and sb.iloc[0]["sector"]:
+                sector = sb.iloc[0]["sector"]
+                peers = store.query_df(
+                    "SELECT symbol FROM stock_basic WHERE sector = ?", [sector])
+                peer_syms = [str(s) for s in peers["symbol"]
+                             if str(s) != symbol][:10]
+                if peer_syms:
+                    bench_note = f"同板块（{sector}，{len(peer_syms)} 只）"
+                for h in (5, 10, 20):
+                    series: dict[str, list] = {}
+                    for psym in peer_syms:
+                        pdf = store.query_df(
+                            "SELECT date, close FROM kline_daily WHERE symbol = ? "
+                            "ORDER BY date", [psym])
+                        if len(pdf) < h + 1:
+                            continue
+                        pd_ = pdf.sort_values("date").reset_index(drop=True)
+                        closes = pd_["close"].astype(float)
+                        for i in range(len(pd_) - h):
+                            series.setdefault(
+                                str(pd_["date"].iloc[i])[:10], []).append(
+                                (closes.iloc[i + h] / closes.iloc[i] - 1) * 100)
+                    if series:
+                        bench_maps[h] = pd.Series({
+                            d: sum(v) / len(v) for d, v in series.items()})
+            store.close()
+        except Exception:
+            pass
+
+        results = signal_forward_returns(
+            df, sig_df, [5, 10, 20], benchmark_returns=bench_maps or None)
+        if not results:
+            return f"{strategy} × {symbol}：信号无法定位到行情"
+
+        lines = [
+            f"## 📊 板块基准事件研究：{strategy} × {symbol}",
+            f"**基准**：{bench_note}（跑赢板块才算板块内 alpha）",
+            f"信号数 {len(sig_df)}",
+            "",
+            "| 前瞻日 | 信号数 | 胜率% | 平均收益% | 板块基准% | 超额% |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in results:
+            lines.append(
+                f"| {r.horizon} | {r.n_events} | {r.win_rate_pct:.1f} | "
+                f"{r.avg_return_pct:+.2f} | {r.benchmark_avg_return_pct:+.2f} | "
+                f"{r.excess_return_pct:+.2f} |")
+        verdict = "✅ 有板块内 alpha" if any(r.has_edge for r in results) \
+            else "❌ 无板块内 alpha（跑不赢板块）"
+        lines.append(f"\n**结论：{verdict}**")
+        lines.append("\n*风格匹配基准：同板块等权，学术标准。研究参考，非投资建议。*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"板块基准事件研究失败：{str(e)[:200]}"
+
+
 def event_study_ui(symbol: str, strategy: str) -> str:
     """信号事件研究：检验策略信号的预测力（信号后 5/10/20 日收益 vs 基准）。"""
     symbol = symbol.strip()
@@ -2852,6 +2953,12 @@ def build_app():
                                variant="secondary")
             of_out = gr.Markdown()
             of_btn.click(overfit_ui, outputs=[of_out])
+
+            sb_btn = gr.Button("📊 板块基准事件研究（板块内 alpha 检验）",
+                               variant="secondary")
+            sb_out = gr.Markdown()
+            sb_btn.click(event_study_sector_ui, inputs=[wf_sym, wf_strategy],
+                         outputs=[sb_out])
 
             with gr.Row():
                 fn_pool = gr.Textbox(
