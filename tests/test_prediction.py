@@ -501,6 +501,40 @@ def test_predict_1d_horizon():
     assert w1 < w5
 
 
+def test_by_horizon_grouping(tmp_path):
+    """预测验证按周期分组：1d 与 5d 分开统计。"""
+    db = tmp_path / "horizon_test.duckdb"
+    svc = PredictionService(store_path=str(db))
+    # 3 条 1d + 3 条 5d（全 up 预测，行情上涨 → 全中）
+    for i in range(3):
+        svc.save_prediction(PredictionResult(
+            symbol="600000", predict_date="2026-08-01", horizon="1d",
+            direction="up", prob_up=0.7, prob_down=0.15, prob_sideways=0.15))
+    for i in range(3):
+        svc.save_prediction(PredictionResult(
+            symbol="600000", predict_date="2026-08-01", horizon="5d",
+            direction="up", prob_up=0.7, prob_down=0.15, prob_sideways=0.15))
+    dates = pd.date_range("2026-07-28", periods=12, freq="B")
+
+    def rising_kline(symbol):
+        # 每日 +1.5%（1d 收益 > 1.0% 模糊阈值 → 正常命中判定）
+        return pd.DataFrame({
+            "date": dates, "open": [10.0 + 0.15 * i for i in range(12)],
+            "high": [10.5 + 0.15 * i for i in range(12)],
+            "low": [9.5 + 0.15 * i for i in range(12)],
+            "close": [10.0 + 0.15 * i for i in range(12)],
+            "volume": [1e6] * 12,
+        })
+
+    summary = asyncio.run(svc.evaluate_predictions(
+        kline_provider=rising_kline, today="2026-08-15"))
+    assert "by_horizon" in summary
+    assert summary["by_horizon"]["1d"]["count"] == 3
+    assert summary["by_horizon"]["5d"]["count"] == 3
+    assert summary["by_horizon"]["1d"]["hit_rate"] == 1.0
+    assert "brier_score" in summary["by_horizon"]["1d"]
+
+
 def test_multi_predict_compare():
     """批量预测：多股票对比结果结构正确（确定性模式，无网络）。"""
     import numpy as np

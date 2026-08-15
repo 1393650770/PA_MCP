@@ -1427,6 +1427,15 @@ def evaluate_predictions_ui() -> str:
                 lines.append(f"| {label} | {info['count']} | {info['hit_rate']:.0%} | "
                              f"{info['avg_return_pct']:+.2f} | "
                              f"{info.get('brier_score', '—')} |")
+        if summary.get("by_horizon"):
+            lines.append("\n### 周期对比（短 vs 中）")
+            lines.append("| 周期 | 样本 | 命中率 | 平均收益% | Brier |")
+            lines.append("|---|---|---|---|---|")
+            for h, info in summary["by_horizon"].items():
+                label = {"1d": "次日", "5d": "5日", "20d": "20日"}.get(h, h)
+                lines.append(f"| {label} | {info['count']} | {info['hit_rate']:.0%} | "
+                             f"{info['avg_return_pct']:+.2f} | "
+                             f"{info.get('brier_score', '—')} |")
         lines.extend(["", "### 分方向表现",
             "| 方向 | 数量 | 命中率 | 平均收益% |",
             "|---|---|---|---|",

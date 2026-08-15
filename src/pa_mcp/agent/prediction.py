@@ -773,7 +773,7 @@ class PredictionService:
         ev_df = store.query_df(
             "SELECT direction, status, actual_return_pct, probability, "
             "prob_up, prob_down, prob_sideways, expected_return_pct, "
-            "predict_date, mode "
+            "predict_date, mode, horizon "
             "FROM prediction_log WHERE status != 'pending'", [])
         n = int(ev_df.shape[0])
         out: dict[str, Any] = {
@@ -910,6 +910,29 @@ class PredictionService:
                 entry["brier_score"] = round(b, 4)
             by_mode[m] = entry
         out["by_mode"] = by_mode
+
+        # ---- 按预测周期分组（1d/5d/20d 命中率对比） ----
+        by_horizon: dict[str, dict] = {}
+        for h in ("1d", "5d", "20d"):
+            sub = ev_df[ev_df["horizon"] == h]
+            if sub.empty:
+                continue
+            entry = {
+                "count": int(sub.shape[0]),
+                "hit_rate": round(float((sub["status"] == "hit").mean()), 3),
+                "avg_return_pct": round(float(sub["actual_return_pct"].mean()), 3),
+            }
+            sub_prob = sub[["prob_up", "prob_down", "prob_sideways"]]
+            if sub_prob.notna().all().all():
+                y_up = (sub["actual_return_pct"] > SIDEWAYS_THRESHOLD_PCT).astype(float)
+                y_down = (sub["actual_return_pct"] < -SIDEWAYS_THRESHOLD_PCT).astype(float)
+                y_side = (sub["actual_return_pct"].abs() <= SIDEWAYS_THRESHOLD_PCT).astype(float)
+                b = float(((sub["prob_up"] - y_up) ** 2
+                           + (sub["prob_down"] - y_down) ** 2
+                           + (sub["prob_sideways"] - y_side) ** 2).mean())
+                entry["brier_score"] = round(b, 4)
+            by_horizon[h] = entry
+        out["by_horizon"] = by_horizon
 
         by_dir: dict[str, dict] = {}
         for d in ("up", "down", "sideways"):
