@@ -182,7 +182,7 @@ def analyze_stock(symbol: str, days: int = 120) -> tuple[Any, str, str, str]:
             f"数据源：{source}，{len(df)} 根K线。"
         )
 
-        # 估值快照（腾讯实时）
+        # 估值快照（腾讯实时，失败自动跳过）
         valuation = ""
         try:
             from pa_mcp.data.sources.tencent_adapter import TencentAdapter
@@ -788,14 +788,27 @@ def _load_long_history(symbol: str, years: float = 5.0) -> pd.DataFrame:
         pass
 
     async def _fetch() -> pd.DataFrame:
+        from pa_mcp.data.router import DataSourceRouter, CircuitBreakerConfig
         from pa_mcp.data.sources.tencent_adapter import TencentAdapter
-        a = TencentAdapter()
+        from pa_mcp.data.sources.sina_adapter import SinaAdapter
+        from pa_mcp.config import get_settings
+
+        # 多源 router：腾讯被风控(501)时自动切新浪
+        settings = get_settings()
+        cfg = CircuitBreakerConfig(
+            failure_threshold=settings.router.circuit.failure_threshold,
+            cooldown_seconds=settings.router.circuit.cooldown_seconds,
+        )
+        router = DataSourceRouter(
+            [("tencent", TencentAdapter()), ("sina", SinaAdapter())],
+            {n: cfg for n, _ in [("tencent", None), ("sina", None)]},
+        )
         try:
             segments = []
             end_d = today
             for _ in range(4):
                 start_d = end_d - timedelta(days=700)
-                df = await a.get_daily_kline(
+                df, src = await router.fetch_daily_kline(
                     symbol, start_date=start_d.strftime("%Y%m%d"),
                     end_date=end_d.strftime("%Y%m%d"), adjust="qfq",
                 )
@@ -811,7 +824,7 @@ def _load_long_history(symbol: str, years: float = 5.0) -> pd.DataFrame:
             merged = pd.concat(segments).drop_duplicates(subset=["date"]).sort_values("date")
             return merged
         finally:
-            await a.close()
+            pass
 
     try:
         return asyncio.run(_fetch())
