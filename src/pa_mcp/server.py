@@ -789,6 +789,151 @@ async def agent_earnings_analysis(symbol: str, report_period: str = "") -> dict[
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
+# ---- MCP Tools: 研究/扫描/组合（与 UI 功能对齐）----
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def scan_market(strategy: str = "bollinger_mean_reversion",
+                      top_n: int = 10) -> dict[str, Any]:
+    """市场扫描：板块漏斗（热门+冷门板块成分股）+ 策略买入信号候选。
+
+    与 UI「📡 市场扫描」一致：
+    1. 东财板块排行 → 热门/冷门板块成分股（失败用内置8板块）
+    2. 合并持仓股（📌）+ 内置白马
+    3. 策略近10日买入信号 → 强度排序 TOP-N
+    4. 每信号附历史5日胜率
+
+    Args:
+        strategy: 策略名（默认 bollinger_mean_reversion）
+        top_n: 返回候选数（默认10）
+    """
+    try:
+        from pa_mcp.ui.gradio_app import scan_market_ui
+        result = await asyncio.to_thread(scan_market_ui, strategy, top_n)
+        return _response(data={"report": result, "strategy": strategy,
+                               "top_n": top_n}, source="multi")
+    except Exception as e:
+        logger.error("scan_market failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def research_event_study(symbol: str, strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
+    """信号事件研究：检验策略信号的预测力（信号后5/10/20日收益 vs 基准）。
+
+    与 UI「🧪 研究评估」一致。判断策略信号是否真有预测力。
+
+    Args:
+        symbol: 6位股票代码
+        strategy: 策略名
+    """
+    try:
+        from pa_mcp.ui.gradio_app import event_study_ui
+        result = await asyncio.to_thread(event_study_ui, symbol, strategy)
+        return _response(data={"report": result, "symbol": symbol,
+                               "strategy": strategy})
+    except Exception as e:
+        logger.error("research_event_study failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def research_walk_forward(symbol: str, strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
+    """Walk-Forward OOS 评估：多fold真实数据验证策略可交易性。
+
+    与 UI「🧪 研究评估」一致。晋级门槛 = 多数fold正收益。
+
+    Args:
+        symbol: 6位股票代码
+        strategy: 策略名
+    """
+    try:
+        from pa_mcp.ui.gradio_app import walk_forward_ui
+        result = await asyncio.to_thread(walk_forward_ui, symbol, strategy)
+        return _response(data={"report": result, "symbol": symbol,
+                               "strategy": strategy})
+    except Exception as e:
+        logger.error("research_walk_forward failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def portfolio_backtest(symbols: str, strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
+    """组合构建回测：多票共享账本组合（信号→约束权重→联合执行）。
+
+    与 UI「📦 组合构建」一致。
+
+    Args:
+        symbols: 逗号分隔的股票池（如 '000001,600036,300750,000858'）
+        strategy: 策略名
+    """
+    try:
+        from pa_mcp.ui.gradio_app import portfolio_build_ui
+        fig, report = await asyncio.to_thread(portfolio_build_ui, symbols, strategy)
+        return _response(data={"report": report, "symbols": symbols,
+                               "strategy": strategy})
+    except Exception as e:
+        logger.error("portfolio_backtest failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_strategy_info(strategy: str = "") -> dict[str, Any]:
+    """策略说明与最优策略检测。
+
+    无参数时返回全部策略列表+说明；传策略名返回该策略 tips+参数空间。
+
+    Args:
+        strategy: 策略名（空 = 全部策略 + 当前最优）
+    """
+    try:
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        from pa_mcp.engine.strategies.tips import STRATEGY_TIPS, get_strategy_tip
+
+        registry = StrategyRegistry()
+        registry.auto_discover()
+
+        if strategy:
+            cls = registry.get(strategy)
+            params = []
+            if cls is not None:
+                for p in cls.get_params_space():
+                    params.append({"name": p.name, "min": p.min_val,
+                                   "max": p.max_val, "step": p.step})
+            return _response(data={
+                "strategy": strategy,
+                "tip": get_strategy_tip(strategy),
+                "params": params,
+            })
+
+        return _response(data={
+            "strategies": list(STRATEGY_TIPS.keys()),
+            "tips": STRATEGY_TIPS,
+        })
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_stock_name(symbol: str) -> dict[str, Any]:
+    """股票代码 → 名称（DB优先+内置字典兜底）。"""
+    try:
+        from pa_mcp.data.symbols import get_stock_name as _name
+        return _response(data={"symbol": symbol, "name": _name(symbol)})
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_data_source_health() -> dict[str, Any]:
+    """数据源健康状态：各源熔断/成功/失败统计。"""
+    try:
+        from pa_mcp.ui.gradio_app import source_health_ui
+        report = await asyncio.to_thread(source_health_ui)
+        return _response(data={"report": report}, source="multi")
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
 # ---- MCP Tools: Review ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
