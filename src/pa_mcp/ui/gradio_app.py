@@ -371,6 +371,35 @@ def chat_reply(message: str, history: list[dict]) -> str:
         return f"LLM 调用失败（{str(e)[:120]}），已降级为规则分析：\n\n{_rule_based_reply(message)}"
 
 
+def _market_context_brief() -> str:
+    """市场环境综述摘要（情绪×轮动矩阵 + 研报综述，供持仓分析复用）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.regime_matrix import RegimeMatrixAnalyzer
+        m = RegimeMatrixAnalyzer().analyze()
+        brief = (f"🌐 **市场环境**：{m['matrix_cell']} → {m['regime_label']}"
+                 f"（建议：{m['advice']}）")
+        # LLM 综述（best-effort，快速失败不影响）
+        try:
+            from pa_mcp.research.ai_report import get_ai_report_generator
+            report = _asyncio.run(get_ai_report_generator().generate(
+                ["000001", "600036", "300750", "000858", "600519"]))
+            llm = report.get("llm_analysis")
+            if llm and llm.get("summary"):
+                brief += f"\n📋 **市场综述**：{llm['summary']}"
+                if llm.get("focus_areas"):
+                    brief += "\n关注：" + "、".join(
+                        f.get("area", "") for f in llm["focus_areas"][:3])
+                if llm.get("risks"):
+                    brief += "\n风险：" + "；".join(
+                        r.get("risk", "") for r in llm["risks"][:3])
+        except Exception:
+            pass
+        return brief
+    except Exception:
+        return ""
+
+
 def _prediction_brief(symbol: str, df: pd.DataFrame, horizon: str = "5d") -> str:
     """未来走势预测摘要（供持仓分析/看板复用，失败返回空串）。"""
     try:
@@ -473,6 +502,10 @@ def portfolio_ai_analysis(symbol: str) -> str:
                 pred = _prediction_brief(symbol, df)
                 if pred:
                     ai_text += "\n" + pred + "\n"
+                # 市场环境综述（LLM 或模板）
+                ctx = _market_context_brief()
+                if ctx:
+                    ai_text += "\n" + ctx + "\n"
                 return "\n\n".join(parts[:2]) + "\n\n---\n💡 **AI 分析师团解读**：\n" + ai_text
     except Exception:
         pass
@@ -483,6 +516,9 @@ def portfolio_ai_analysis(symbol: str) -> str:
             pred = _prediction_brief(symbol, df)
             if pred:
                 parts.append(f"---\n{pred}")
+        ctx = _market_context_brief()
+        if ctx:
+            parts.append(f"---\n{ctx}")
     except Exception:
         pass
     return "\n\n".join(parts)
