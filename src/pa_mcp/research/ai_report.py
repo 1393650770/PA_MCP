@@ -149,6 +149,21 @@ class AiMarketReport:
         except Exception:
             out["prediction_eval"] = "无预测验证数据"
 
+        # 市场结构（指数缠论 × 情绪，best-effort）
+        try:
+            from pa_mcp.research.market_structure import MarketStructureAnalyzer
+            import asyncio
+            ms = asyncio.run(MarketStructureAnalyzer(
+                self._store_path).analyze(use_network=False))
+            if ms["index"]["rows"] > 0:
+                out["market_structure"] = (
+                    f"指数 {ms['index']['last_close']}（{ms['index']['last_date']}），"
+                    f"联合判断：{ms['joint']['bias']}——{ms['joint']['verdict'][:80]}")
+            else:
+                out["market_structure"] = "指数数据不可用"
+        except Exception:
+            out["market_structure"] = "指数数据不可用"
+
         # 持仓风险（best-effort，无持仓时跳过）
         try:
             from pa_mcp.research.portfolio_risk import PortfolioRiskDashboard
@@ -247,6 +262,7 @@ class AiMarketReport:
         lines = [
             f"## 📋 AI 市场研究报告（{date.today().isoformat()}）",
             f"- **市场状态**：{sections.get('market_state', '—')}",
+            f"- **市场结构**：{sections.get('market_structure', '—')}",
             f"- **情绪×轮动**：{sections.get('matrix', '—')}",
             f"- **板块轮动**：{sections.get('sector_rotation', '—')}",
             f"- **因子选股**：{sections.get('factor_selection', '—')}",

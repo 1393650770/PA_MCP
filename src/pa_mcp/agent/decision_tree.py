@@ -55,10 +55,20 @@ def build_decision_tree(
     analysis: Optional[Any] = None,
     prediction: Optional[dict] = None,
     stock_name: str = "",
+    market_bias: Optional[str] = None,
 ) -> dict:
     """构建决策树：根 → 市场闸门 → 策略路由 → 方向闸门 → 仓位闸门 → 叶结论。
 
     任何一层输入缺失时用确定性规则补全，保证始终可出树（可追溯）。
+
+    Args:
+        symbol: 股票代码
+        diagnosis: 市场诊断（含策略路由）
+        analysis: 分析结果（含建议仓位）
+        prediction: 预测 dict（方向/概率/区间）
+        stock_name: 股票名称
+        market_bias: 指数结构方向（"偏多"/"偏空"/"中性"，
+            来自 market_structure 联合分析）——市场闸门增强维度
     """
     # ---- 层 1：市场状态（闸门） ----
     market_state = "unknown"
@@ -77,6 +87,22 @@ def build_decision_tree(
         market_state, market_zh = "dull", "未知（保守假设低迷）"
         pos_cap, risk_level = 30, "medium"
         observations = ["无市场诊断数据，保守判定"]
+
+    # 市场闸门增强：指数结构方向（缠论，来自 market_structure）
+    if market_bias:
+        bias_note = {
+            "偏多": "指数多头结构（缠论），顺大势",
+            "偏空": "指数空头结构（缠论），逆风环境",
+            "中性": "指数结构中性",
+        }.get(market_bias, f"指数结构：{market_bias}")
+        observations.append(bias_note)
+        # 偏空环境收紧仓位上限与风险等级
+        if market_bias == "偏空":
+            pos_cap = min(pos_cap, 30)
+            risk_level = "high" if risk_level in ("medium", "low") else risk_level
+            observations.append("指数偏空 → 总仓位上限收紧至 30%")
+        elif market_bias == "偏多":
+            pos_cap = max(pos_cap, 40)
 
     # 市场闸门：极端状态（冰点）→ 直接到观望叶
     if market_state in ("frozen",):
@@ -121,7 +147,18 @@ def build_decision_tree(
         cycle_pos = str(prediction.get("cycle_position", "unknown"))
         cycle_forecast = str(prediction.get("cycle_forecast", "unknown"))
 
-    if direction == "up":
+    # 指数结构修正预测方向（偏空环境看涨降级为中性提醒）
+    if market_bias == "偏空" and direction == "up":
+        direction = "sideways"
+        dir_zh = f"➡️ 震荡（{prob:.0%}，指数偏空修正）"
+        dir_reason = (f"预测看涨 {prob:.0%}，但指数空头结构——逆风环境"
+                      f"降级为中性（期望 {exp_ret:+.1f}%）")
+    elif market_bias == "偏多" and direction == "down":
+        direction = "sideways"
+        dir_zh = f"➡️ 震荡（{prob:.0%}，指数偏多修正）"
+        dir_reason = (f"预测看跌 {prob:.0%}，但指数多头结构——"
+                      f"顺势环境降级为中性（期望 {exp_ret:+.1f}%）")
+    elif direction == "up":
         dir_zh = f"📈 看涨（{prob:.0%}）"
         dir_reason = f"预测期望收益 {exp_ret:+.1f}%，多头信号占优"
     elif direction == "down":

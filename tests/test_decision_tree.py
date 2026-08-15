@@ -100,6 +100,32 @@ def test_tree_down_direction():
     assert "0%" in pos_node["detail"]
 
 
+def test_tree_with_market_bias():
+    """指数偏空：看涨预测降级中性 + 仓位上限收紧。"""
+    pred = {
+        "direction": "up", "probability": 0.7, "horizon": "5d",
+        "expected_return_pct": 3.0, "expected_range_pct": [-1, 5],
+        "cycle_position": "normal_channel", "cycle_forecast": "broad_channel",
+        "key_levels": {}, "scenarios": [], "key_risks": [],
+    }
+    tree = build_decision_tree("000001", prediction=pred,
+                               market_bias="偏空")
+    # 方向节点：看涨被降级为中性
+    dir_node = tree["tree"]["children"][0]["children"][0]["children"][0]
+    assert "指数偏空修正" in dir_node["label"]
+    # 观察含指数结构说明
+    assert any("指数空头" in o for o in tree["observations"])
+    # 仓位上限收紧到 30
+    assert tree["position_cap_pct"] <= 30
+
+    # 偏多：看跌降级 + 上限不低于 40
+    pred2 = dict(pred, direction="down")
+    tree2 = build_decision_tree("000001", prediction=pred2,
+                                market_bias="偏多")
+    assert "指数偏多修正" in tree2["tree"]["children"][0]["children"][0]["children"][0]["label"]
+    assert tree2["position_cap_pct"] >= 40
+
+
 def test_tree_summary_text():
     """文本摘要含各层标签。"""
     pred = {"direction": "sideways", "probability": 0.5, "horizon": "5d",
