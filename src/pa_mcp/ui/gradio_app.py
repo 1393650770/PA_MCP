@@ -1701,6 +1701,23 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def value_momentum_ui(symbols: str) -> str:
+    """价值×动量复合选股（格雷厄姆 × 60 日动量）。"""
+    try:
+        from pa_mcp.research.value_momentum import (
+            get_value_momentum_screen, format_value_momentum)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if not pool:
+            return "请输入股票代码"
+        result = get_value_momentum_screen().screen(pool)
+        if "error" in result:
+            return result["error"]
+        return format_value_momentum(result)
+    except Exception as e:
+        return f"价值×动量复合失败：{str(e)[:200]}"
+
+
 def graham_ui(symbols: str) -> str:
     """格雷厄姆价值筛选（防御性 7 条 + 安全边际）。"""
     try:
@@ -2626,6 +2643,11 @@ def build_app():
                                 variant="secondary")
             gra_out = gr.Markdown()
             gra_btn.click(graham_ui, inputs=[fs_pool], outputs=[gra_out])
+
+            vm_btn = gr.Button("⚖️ 价值×动量复合选股（便宜且走强）",
+                               variant="secondary")
+            vm_out = gr.Markdown()
+            vm_btn.click(value_momentum_ui, inputs=[fs_pool], outputs=[vm_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 

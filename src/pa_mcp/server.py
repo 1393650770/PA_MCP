@@ -2016,6 +2016,40 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def value_momentum_screen(symbols: str, top_n: int = 10,
+                                value_weight: float = 0.5) -> dict[str, Any]:
+    """价值 × 动量 复合选股（Asness et al. 2013 学术框架）。
+
+    价值分（格雷厄姆评分标准化）与 60 日动量 z-score 按权重复合 →
+    排序 + 四象限（价值+动量双高 = 最佳候选「便宜且正在走强」）。
+
+    Args:
+        symbols: 股票池（逗号分隔）
+        top_n: 返回数量
+        value_weight: 价值权重 0-1（动量 = 1 - value_weight）
+    """
+    try:
+        from pa_mcp.research.value_momentum import (
+            get_value_momentum_screen, format_value_momentum)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if not pool:
+            return _response(success=False, error="请输入股票代码",
+                             error_type="INVALID_ARGUMENT")
+        w = max(0.0, min(1.0, value_weight))
+        result = get_value_momentum_screen().screen(
+            pool, top_n=top_n, value_weight=w)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result,
+                               "report": format_value_momentum(result)})
+    except Exception as e:
+        logger.error("value_momentum_screen failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def graham_screen(symbols: str) -> dict[str, Any]:
     """格雷厄姆价值筛选（《聪明的投资者》防御性投资标准）。
 
