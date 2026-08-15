@@ -91,7 +91,9 @@ def init_llm_adapter(config_path: Optional[str] = None) -> Optional[LLMPort]:
             api_key=api_key if api_key else None,  # None = use SDK default creds
         )
     else:
-        # OpenAI, DeepSeek, Zhipu, Qwen, etc. — all use /chat/completions
+        # OpenAI-compatible 协议通用回退：
+        # OpenAI, DeepSeek, Zhipu, Qwen, 豆包(doubao/ark), 以及任意
+        # 配置了 base_url 的 OpenAI 兼容供应商
         from pa_mcp.agent.llm_openai_compat import OpenAICompatibleAdapter
 
         if not base_url:

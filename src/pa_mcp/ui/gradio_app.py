@@ -315,8 +315,17 @@ def chat_reply(message: str, history: list[dict]) -> str:
     if not message.strip():
         return "请输入问题"
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    # LLM 可用性：优先已初始化的 adapter；否则尝试从
+    # config/llm_config.json 或环境变量初始化
+    from pa_mcp.agent.llm_port import get_llm_adapter
+    adapter = get_llm_adapter()
+    if adapter is None:
+        try:
+            from pa_mcp.agent.llm_factory import init_llm_adapter
+            adapter = init_llm_adapter("config/llm_config.json")
+        except Exception:
+            adapter = None
+    if adapter is None:
         return _rule_based_reply(message)
 
     try:
