@@ -535,6 +535,23 @@ def test_by_horizon_grouping(tmp_path):
     assert "brier_score" in summary["by_horizon"]["1d"]
 
 
+def test_calibration_figure_build():
+    """校准曲线图构建：柱状 + 参考线，过度自信红色标记。"""
+    from pa_mcp.ui.gradio_app import _build_calibration_figure
+    bins = [
+        {"prob_range": "50%-60%", "n": 10, "actual_hit_rate": 0.55,
+         "mid_prob": 0.55, "overconfident": False},
+        {"prob_range": "70%-80%", "n": 8, "actual_hit_rate": 0.5,
+         "mid_prob": 0.75, "overconfident": True},
+    ]
+    fig = _build_calibration_figure(bins)
+    assert len(fig.data) == 2  # 柱状 + 参考线
+    assert fig.data[0]["name"] == "实际命中率"
+    assert fig.data[1]["name"].startswith("完美校准")
+    # 红色（过度自信）在颜色列表中
+    assert "#e03131" in fig.data[0].marker.color
+
+
 def test_multi_predict_compare():
     """批量预测：多股票对比结果结构正确（确定性模式，无网络）。"""
     import numpy as np

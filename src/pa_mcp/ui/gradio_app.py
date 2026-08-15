@@ -1292,6 +1292,70 @@ def data_quality_ui() -> str:
         return f"数据体检失败：{str(e)[:200]}"
 
 
+def _build_calibration_figure(bins: list[dict]) -> Any:
+    """校准曲线图（纯构建，供测试）。"""
+    fig = go.Figure()
+    x = [b["prob_range"] for b in bins]
+    y = [b["actual_hit_rate"] for b in bins]
+    colors = ["#e03131" if b["overconfident"] else "#2b8a3e"
+              for b in bins]
+    fig.add_trace(go.Bar(
+        x=x, y=y, name="实际命中率",
+        marker=dict(color=colors),
+        text=[f"{v:.0%}" for v in y], textposition="auto"))
+    fig.add_trace(go.Scatter(
+        x=x, y=[b["mid_prob"] for b in bins],
+        mode="lines+markers", name="完美校准（概率=命中率）",
+        line=dict(color="#1c7ed6", dash="dot", width=2)))
+    fig.update_layout(
+        title="🎯 预测校准曲线（概率桶 vs 实际命中率）",
+        xaxis_title="预测概率桶", yaxis_title="实际命中率",
+        yaxis_tickformat=".0%", yaxis_range=[0, 1],
+        height=420, template="plotly_white",
+        legend=dict(orientation="h", y=1.12),
+        margin=dict(l=10, r=10, t=60, b=10))
+    return fig
+
+
+def calibration_fig_ui() -> tuple[Any, str]:
+    """预测校准曲线图：概率桶 vs 实际命中率（过度自信直观检验）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.agent.prediction import get_prediction_service
+        summary = _asyncio.run(get_prediction_service().evaluate_predictions())
+        bins = summary.get("calibration_bins") or []
+        if not bins:
+            return None, "暂无已评估的方向性预测（校准曲线需要 ≥4 条有方向的预测）"
+
+        fig = _build_calibration_figure(bins)
+        x = [b["mid_prob"] for b in bins]
+        y = [b["actual_hit_rate"] for b in bins]
+        labels = [b["prob_range"] for b in bins]
+        colors = ["#e03131" if b["overconfident"] else "#2b8a3e"
+                  for b in bins]
+        fig.add_trace(go.Bar(
+            x=labels, y=y, name="实际命中率",
+            marker=dict(color=colors),
+            text=[f"{v:.0%}" for v in y], textposition="auto"))
+        # 完美校准参考线（预测概率 = 实际频率）
+        fig.add_trace(go.Scatter(
+            x=labels, y=[b["mid_prob"] for b in bins],
+            mode="lines+markers", name="完美校准（概率=命中率）",
+            line=dict(color="#1c7ed6", dash="dot", width=2)))
+        fig.update_layout(
+            title="🎯 预测校准曲线（概率桶 vs 实际命中率）",
+            xaxis_title="预测概率桶", yaxis_title="实际命中率",
+            yaxis_tickformat=".0%", yaxis_range=[0, 1],
+            height=420, template="plotly_white",
+            legend=dict(orientation="h", y=1.12),
+            margin=dict(l=10, r=10, t=60, b=10))
+        note = ("绿色 = 校准合理；**红色 = 过度自信**（报的概率高于实际命中）。\n"
+                f"样本：{summary.get('evaluated', 0)} 条已评估。研究参考，非投资建议。")
+        return fig, note
+    except Exception as e:
+        return None, f"校准图生成失败：{str(e)[:200]}"
+
+
 def predict_multi_ui(symbols: str) -> str:
     """多股票批量预测对比（方向/概率/区间并排）。"""
     symbols = symbols.strip()
@@ -3221,6 +3285,12 @@ def build_app():
             evp_out = gr.Markdown()
             diag_btn.click(market_diagnosis_ui, outputs=[diag_out])
             evp_btn.click(evaluate_predictions_ui, outputs=[evp_out])
+
+            calib_btn = gr.Button("🎯 校准曲线图（过度自信检验）",
+                                  variant="secondary")
+            calib_fig = gr.Plot()
+            calib_out = gr.Markdown()
+            calib_btn.click(calibration_fig_ui, outputs=[calib_fig, calib_out])
 
             hist_btn = gr.Button("📜 历史预测记录", variant="secondary")
             hist_out = gr.Markdown()
