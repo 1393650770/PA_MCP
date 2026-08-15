@@ -1654,10 +1654,23 @@ def decision_tree_fig(symbol: str) -> tuple[Any, str]:
         except Exception:
             pass
 
+        # 综合决策信号（best-effort，优先级最高）
+        consensus = None
+        try:
+            from pa_mcp.research.consensus import ConsensusAnalyzer
+            con = asyncio.run(ConsensusAnalyzer().analyze(
+                symbol, kline_df=df))
+            if "error" not in con:
+                consensus = {"signal": con["signal"],
+                             "strength": con["strength"],
+                             "level": con["level"]}
+        except Exception:
+            pass
+
         tree = build_decision_tree(
             symbol, diagnosis=diagnosis, prediction=prediction,
             stock_name=get_stock_name(symbol), market_bias=market_bias,
-            resonance=resonance)
+            resonance=resonance, consensus=consensus)
         summary = tree_summary(tree)
 
         # 布局 + 画图

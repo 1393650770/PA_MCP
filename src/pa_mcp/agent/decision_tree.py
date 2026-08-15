@@ -57,6 +57,7 @@ def build_decision_tree(
     stock_name: str = "",
     market_bias: Optional[str] = None,
     resonance: Optional[dict] = None,
+    consensus: Optional[dict] = None,
 ) -> dict:
     """构建决策树：根 → 市场闸门 → 策略路由 → 方向闸门 → 仓位闸门 → 叶结论。
 
@@ -72,6 +73,8 @@ def build_decision_tree(
             来自 market_structure 联合分析）——市场闸门增强维度
         resonance: 多周期共振 dict（signal/strength，来自 resonance）——
             强共振（strength ≥0.7）覆盖单周期预测方向
+        consensus: 综合决策信号 dict（signal/strength，来自 consensus）——
+            强融合（strength ≥0.6）覆盖方向（优先级高于共振）
     """
     # ---- 层 1：市场状态（闸门） ----
     market_state = "unknown"
@@ -150,9 +153,17 @@ def build_decision_tree(
         cycle_pos = str(prediction.get("cycle_position", "unknown"))
         cycle_forecast = str(prediction.get("cycle_forecast", "unknown"))
 
-    # 多周期共振覆盖：强共振（≥70%）以共振方向为准（趋势确认更稳）
+    # 综合决策信号覆盖（优先级最高）：强融合（≥60%）以投票方向为准
     resonance_note = ""
-    if resonance and resonance.get("strength", 0) >= 0.7:
+    if consensus and consensus.get("strength", 0) >= 0.6:
+        con_sig = str(consensus.get("signal", ""))
+        if con_sig in ("up", "down", "sideways") and con_sig != direction:
+            direction = con_sig
+            resonance_note = f"（综合信号 {consensus.get('level', '')}强度覆盖）"
+            prob = max(prob, float(consensus.get("strength", 0.6)))
+
+    # 多周期共振覆盖：强共振（≥70%）以共振方向为准（趋势确认更稳）
+    if not resonance_note and resonance and resonance.get("strength", 0) >= 0.7:
         res_sig = str(resonance.get("signal", ""))
         if res_sig in ("up", "down", "sideways") and res_sig != direction:
             direction = res_sig

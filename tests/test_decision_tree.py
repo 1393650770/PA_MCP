@@ -148,6 +148,31 @@ def test_tree_with_resonance_override():
     assert "看跌" in dir2["label"]
 
 
+def test_tree_with_consensus_override():
+    """综合信号（≥60%）覆盖方向，优先级高于共振。"""
+    pred = {
+        "direction": "down", "probability": 0.6, "horizon": "5d",
+        "expected_return_pct": -2.0, "expected_range_pct": [-5, 1],
+        "cycle_position": "trading_range", "cycle_forecast": "trading_range",
+        "key_levels": {}, "scenarios": [], "key_risks": [],
+    }
+    # 综合信号强看涨 + 共振看跌 → 综合信号优先
+    consensus = {"signal": "up", "strength": 0.75, "level": "强"}
+    resonance = {"signal": "down", "strength": 0.9, "resonance": "强共振看跌"}
+    tree = build_decision_tree("000001", prediction=pred,
+                               consensus=consensus, resonance=resonance)
+    dir_node = tree["tree"]["children"][0]["children"][0]["children"][0]
+    assert "综合信号" in dir_node["label"]
+    assert "看涨" in dir_node["label"]
+    # 弱综合（<60%）不覆盖 → 共振覆盖生效（预测 up、共振 down 强）
+    pred_up = dict(pred, direction="up", probability=0.6)
+    con2 = {"signal": "up", "strength": 0.4, "level": "弱"}
+    tree2 = build_decision_tree("000001", prediction=pred_up,
+                                consensus=con2, resonance=resonance)
+    dir2 = tree2["tree"]["children"][0]["children"][0]["children"][0]
+    assert "强共振看跌" in dir2["label"]
+
+
 def test_tree_summary_text():
     """文本摘要含各层标签。"""
     pred = {"direction": "sideways", "probability": 0.5, "horizon": "5d",

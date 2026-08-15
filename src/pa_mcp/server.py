@@ -2097,10 +2097,22 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
         except Exception:
             pass
 
+        # 综合决策信号（best-effort，优先级最高）
+        consensus = None
+        try:
+            from pa_mcp.research.consensus import ConsensusAnalyzer
+            con = await ConsensusAnalyzer().analyze(symbol, kline_df=kline_df)
+            if "error" not in con:
+                consensus = {"signal": con["signal"],
+                             "strength": con["strength"],
+                             "level": con["level"]}
+        except Exception:
+            pass
+
         tree = build_decision_tree(
             symbol, diagnosis=diagnosis, prediction=prediction,
             stock_name=get_stock_name(symbol), market_bias=market_bias,
-            resonance=resonance)
+            resonance=resonance, consensus=consensus)
         return _response(data={
             "symbol": symbol,
             "tree": tree["tree"],
