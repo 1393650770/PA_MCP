@@ -510,6 +510,83 @@ def portfolio_build_ui(symbols_str: str, strategy: str) -> tuple[Any, str]:
 
 # ---- 市场扫描（当前信号候选清单）----
 
+# ---- 板块数据（东财动态 + 内置兜底） ----
+
+# 内置板块模板（东财接口不可用时兜底）
+BUILTIN_SECTORS: dict[str, list[str]] = {
+    "银行": ["000001", "600036", "601398", "601288", "601988"],
+    "白酒": ["600519", "000858", "000568", "600809"],
+    "新能源": ["300750", "002594", "601012", "600438", "300274"],
+    "医药": ["600276", "000538", "300760", "600196"],
+    "科技": ["002415", "688981", "688001", "603986", "002230"],
+    "消费电子": ["002475", "601138", "000725", "002241"],
+    "基建能源": ["600900", "601857", "600028", "601088"],
+    "汽车家电": ["601633", "600104", "000333", "000651"],
+}
+
+
+def fetch_sector_universe(hot_count: int = 6, cold_count: int = 3,
+                          stocks_per_sector: int = 6) -> tuple[dict[str, str], dict[str, list[str]], str]:
+    """获取板块 → 成分股映射（东财动态优先，内置兜底）。
+
+    Returns:
+        (sector_info: {板块名: 涨跌幅}, sector_stocks: {板块名: [代码]},
+         source: 'eastmoney' | 'builtin')
+    """
+    sector_info: dict[str, str] = {}
+    sector_stocks: dict[str, list[str]] = {}
+    source = "builtin"
+
+    try:
+        import urllib.request
+        # 东财板块列表（按涨跌幅排序，fid=f3 从高到低；pn 换页取冷门）
+        all_sectors = []
+        for page in (1, 2):
+            url = (f"https://push2.eastmoney.com/api/qt/clist/get"
+                   f"?pn={page}&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3"
+                   f"&fs=m:90+t:2&fields=f2,f3,f12,f14")
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            rows = data.get("data", {}).get("diff") or []
+            for r in rows:
+                if r.get("f12") and r.get("f14"):
+                    all_sectors.append((r["f12"], r["f14"], r.get("f3", 0)))
+        if not all_sectors:
+            raise RuntimeError("no sectors")
+
+        # 热门 = 涨幅前 hot_count；冷门 = 跌幅最深 cold_count
+        hot = all_sectors[:hot_count]
+        cold = all_sectors[-cold_count:]
+        picked = hot + cold
+
+        for sec_code, sec_name, pct in picked:
+            sector_info[sec_name] = f"{pct:+.1f}%"
+            # 板块成分股
+            url = (f"https://push2.eastmoney.com/api/qt/clist/get"
+                   f"?pn=1&pz={stocks_per_sector}&po=1&np=1&fltt=2&invt=2&fid=f3"
+                   f"&fs=m:90+t:2+f:!50&fields=f12,f14&fi={sec_code}")
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            stocks = []
+            for r in (data.get("data", {}).get("diff") or []):
+                code = str(r.get("f12", ""))
+                if code and code.isdigit() and len(code) == 6:
+                    stocks.append(code)
+            if stocks:
+                sector_stocks[sec_name] = stocks
+        if sector_stocks:
+            source = "eastmoney"
+    except Exception:
+        # 内置兜底
+        for name, codes in BUILTIN_SECTORS.items():
+            sector_info[name] = "—"
+            sector_stocks[name] = codes
+
+    return sector_info, sector_stocks, source
+
+
 def scan_market_ui(strategy: str, top_n: int = 10,
                     universe_size: int = 30) -> str:
     """扫描股票池：找当前处于买入信号状态的股票，输出候选清单。
@@ -522,8 +599,16 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     from pa_mcp.engine.strategies.tips import get_strategy_tip
     from pa_mcp.research.event_study import signal_forward_returns
 
-    # 股票池：内置常用股 ∪ 用户持仓股（持仓优先扫描）
-    symbols = list(COMMON_NAMES.keys())[:universe_size]
+    # 股票池：板块成分（热门+冷门）∪ 用户持仓股 ∪ 内置常用股
+    sector_info, sector_stocks, sector_source = fetch_sector_universe(
+        hot_count=6, cold_count=3, stocks_per_sector=6)
+
+    symbols = []
+    for codes in sector_stocks.values():
+        for c in codes:
+            if c not in symbols:
+                symbols.append(c)
+
     holdings = []
     try:
         store = _get_store()
@@ -533,9 +618,19 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     except Exception:
         pass
     if holdings:
-        # 持仓股排在最前（优先扫描），且不受 universe_size 限制
+        # 持仓股排在最前（优先扫描）
         symbols = [s for s in holdings if s not in symbols] + symbols
-        universe_size = len(symbols)
+
+    # 补充内置常用股（覆盖板块外的白马）
+    for c in list(COMMON_NAMES.keys())[:universe_size]:
+        if c not in symbols:
+            symbols.append(c)
+
+    universe_size = len(symbols)
+    sector_name_of: dict[str, str] = {}
+    for sec, codes in sector_stocks.items():
+        for c in codes:
+            sector_name_of.setdefault(c, sec)
 
     registry = StrategyRegistry()
     registry.auto_discover()
@@ -589,6 +684,7 @@ def scan_market_ui(strategy: str, top_n: int = 10,
                 "symbol": sym, "name": get_stock_name(sym),
                 "signal_date": sig_date, "strength": strength,
                 "win_rate": win_rate,
+                "sector": sector_name_of.get(sym, ""),
             })
         except Exception:
             continue
@@ -638,19 +734,32 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     rows = rows[:top_n]
 
     held_set = set(holdings) if holdings else set()
+    if sector_source == "eastmoney":
+        hot_sectors = list(sector_info.items())[:6]
+        cold_sectors = list(sector_info.items())[-3:]
+        env_line = (f"**板块环境**（东财实时）：热门 "
+                    + " ".join(f"{n} {p}" for n, p in hot_sectors)
+                    + ("｜冷门 " + " ".join(f"{n} {p}" for n, p in cold_sectors)
+                       if cold_sectors else ""))
+    else:
+        env_line = f"**板块环境**（内置模板）：{' '.join(sector_info.keys())}（东财板块接口暂不可用，已用内置板块兜底）"
+
     lines = [
         f"## 📡 市场扫描：{strategy} 当前买入信号候选（TOP {len(rows)}）",
-        f"*扫描 {universe_size} 只（常用股 + {'持仓' if holdings else '无持仓'}"
-        f"）· 信号日期 = 最近触发日（近10日）*",
+        f"*扫描 {universe_size} 只（板块 + 持仓"
+        f"{'📌' if holdings else ''}）· 信号日期 = 最近触发日（近10日）*",
         "",
-        "| 代码 | 名称 | 信号日期 | 强度 | 历史5日胜率 | 来源策略 | 持仓 |",
-        "|---|---|---|---|---|---|---|",
+        env_line,
+        "",
+        "| 代码 | 名称 | 板块 | 信号日期 | 强度 | 历史5日胜率 | 来源策略 | 持仓 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         wr = f"{r['win_rate']:.0f}%" if r["win_rate"] else "样本不足"
         src = r.get("alt_strategy", strategy)
         is_held = "📌" if r["symbol"] in held_set else ""
-        lines.append(f"| {r['symbol']} | {r['name']} | {r['signal_date']} | "
+        sector = r.get("sector", "") or "—"
+        lines.append(f"| {r['symbol']} | {r['name']} | {sector} | {r['signal_date']} | "
                      f"{r['strength']:.0f} | {wr} | {src} | {is_held} |")
     tip = get_strategy_tip(strategy)
     lines.append(f"\n**策略说明**：{tip.splitlines()[0] if tip else ''}")
