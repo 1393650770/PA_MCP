@@ -10,6 +10,15 @@ echo.
 set PYTHON=python
 if exist "venv\Scripts\python.exe" set PYTHON=venv\Scripts\python.exe
 
+:: Verify UI deps in chosen python; fall back to system python if missing
+%PYTHON% -c "import gradio, plotly, duckdb" >nul 2>&1
+if errorlevel 1 (
+    if "%PYTHON%"=="venv\Scripts\python.exe" (
+        echo [WARN] venv missing deps, falling back to system python.
+        set PYTHON=python
+    )
+)
+
 set PYTHONIOENCODING=utf-8
 
 echo [INFO] Using: %PYTHON%
