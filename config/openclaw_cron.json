@@ -40,6 +40,15 @@
         "delivery": { "mode": "none" }
       },
       {
+        "name": "pamcp-data-load",
+        "_description": "每日收盘后：数据自动更新（8-phase 调度 + 数据体检）",
+        "cron": "5 15 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具做每日数据更新：\n1. 调 run_daily_update() 运行 8-phase 调度（日历/股票池/日线/分钟线/财务/资金流/龙虎榜/指标）\n2. 调 data_quality_report() 体检数据完整性（表覆盖/OHLC/缺口）\n3. 评分<70 时对问题表重试或记录告警\n输出：各 phase 状态/行数/耗时/数据质量评分/告警。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
         "name": "pamcp-prediction-evaluate",
         "_description": "每日收盘后：自动回填预测验证（成绩单自动更新）",
         "cron": "23 15 * * 1-5",

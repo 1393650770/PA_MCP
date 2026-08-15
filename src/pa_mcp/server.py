@@ -2470,6 +2470,42 @@ async def export_research_data(what: Literal["selection", "prediction",
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
+@mcp.tool(annotations={"readOnlyHint": False})
+async def run_daily_update(force_full: bool = False) -> dict[str, Any]:
+    """每日数据自动更新：调度器 8-phase 全链路（日历/股票池/日线/
+    分钟线/财务/资金流/龙虎榜/指标）。
+
+    收盘后运行保证研究数据当日新鲜。耗时约 2 分钟（种子池）至
+    数分钟（全市场）。
+
+    Args:
+        force_full: True = 强制全量（缺省增量）
+    """
+    try:
+        from pa_mcp.data.scheduler import DataUpdateScheduler
+        scheduler = DataUpdateScheduler()
+        report = await scheduler.run(force_full=force_full)
+        phases = {}
+        for p in report.phases:
+            phases[p.phase_name] = {
+                "status": p.status.value if hasattr(p.status, "value")
+                else str(p.status),
+                "rows": p.rows_updated,
+                "elapsed_seconds": round(p.elapsed_seconds, 1),
+                "error": p.error,
+            }
+        return _response(data={
+            "success": report.all_success,
+            "duration_seconds": round(report.total_elapsed, 1),
+            "blocking_failures": report.blocking_failures,
+            "phases": phases,
+            "note": "调度完成；可调 data_quality_report() 验证数据完整性",
+        })
+    except Exception as e:
+        logger.error("run_daily_update failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 async def data_quality_report() -> dict[str, Any]:
     """数据质量体检：表覆盖 + K 线完整性（OHLC 一致性/非正/NaN/缺口）。
