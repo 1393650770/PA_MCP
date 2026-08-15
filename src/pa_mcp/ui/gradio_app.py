@@ -1566,6 +1566,23 @@ def sector_rotation_ui(load_data: bool = False) -> str:
         return f"板块轮动失败：{str(e)[:200]}"
 
 
+def factor_neutralize_ui(symbols: str) -> str:
+    """因子正交化：剔除市值/板块风格后的纯 alpha 排名。"""
+    try:
+        from pa_mcp.research.orthogonalize import (
+            get_factor_neutralizer, format_neutralized)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 3:
+            return "至少需要 5 只股票（截面回归自由度要求）"
+        result = get_factor_neutralizer().neutralize(pool)
+        if "error" in result:
+            return result["error"]
+        return format_neutralized(result)
+    except Exception as e:
+        return f"因子中性化失败：{str(e)[:200]}"
+
+
 def overfit_ui(symbol: str = "000001", strategy: str = "bollinger_mean_reversion") -> str:
     """回测过拟合诊断：对现有策略在历史数据上的调参空间做 DSR 检查。
 
@@ -2385,6 +2402,17 @@ def build_app():
                                variant="secondary")
             of_out = gr.Markdown()
             of_btn.click(overfit_ui, outputs=[of_out])
+
+            with gr.Row():
+                fn_pool = gr.Textbox(
+                    label="中性化股票池（逗号分隔，≥5 只，同板块更佳）",
+                    value="000001,600036,601398,601288,600016,601166",
+                    scale=2)
+                fn_btn = gr.Button("🧮 因子中性化（剔风格找纯 alpha）",
+                                   variant="secondary", scale=1)
+            fn_out = gr.Markdown()
+            fn_btn.click(factor_neutralize_ui, inputs=[fn_pool],
+                         outputs=[fn_out])
 
         with gr.Tab("📦 组合构建"):
             pb_in = gr.Textbox(label="股票池（逗号分隔）",

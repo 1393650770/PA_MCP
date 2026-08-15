@@ -1948,6 +1948,37 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def factor_neutralize(symbols: str, lookback: int = 120) -> dict[str, Any]:
+    """因子正交化（风格中性化，借鉴 factor-orthogonalize）。
+
+    对股票池逐日 OLS 回归风格暴露（市值 + 板块收益），残差 = 剔除
+    风格后的纯个股 alpha。输出 alpha 排名（IR 排序）+ 风格 beta 诊断
+    （市值 β / 板块 β / 残差波动）——避免「押中板块」被误认为「个股 alpha」。
+
+    Args:
+        symbols: 股票代码（逗号分隔，≥5 只，同板块内效果最佳）
+        lookback: 回溯交易日数（默认 120）
+    """
+    try:
+        from pa_mcp.research.orthogonalize import (
+            get_factor_neutralizer, format_neutralized)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 3:
+            return _response(success=False,
+                             error="至少需要 5 只股票（截面回归自由度要求）",
+                             error_type="INVALID_ARGUMENT")
+        result = get_factor_neutralizer().neutralize(pool, lookback=lookback)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result, "report": format_neutralized(result)})
+    except Exception as e:
+        logger.error("factor_neutralize failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def backtest_overfit_diagnosis(sharpe_obs: float, n_trials: int,
                                      periods: int,
                                      returns_matrix: str = "") -> dict[str, Any]:
