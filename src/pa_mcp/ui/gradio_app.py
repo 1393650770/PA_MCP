@@ -329,24 +329,27 @@ def chat_reply(message: str, history: list[dict]) -> str:
         return _rule_based_reply(message)
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        # 通过 adapter 调用（支持 Anthropic SDK / OpenAI-compatible / 豆包等）
+        from pa_mcp.agent.llm_port import LLMCallParams
 
-        msgs = []
-        for h in history[-10:]:
-            msgs.append({"role": "user", "content": h.get("content", "")})
-            if h.get("role") == "assistant":
-                msgs.append({"role": "assistant", "content": h.get("content", "")})
-        msgs.append({"role": "user", "content": message})
+        # 构建对话历史
+        user_content = message
+        if history:
+            user_content = "\n".join(
+                f"{'用户' if h.get('role') == 'user' else '助手'}: {h.get('content', '')}"
+                for h in history[-6:]
+            ) + f"\n用户: {message}"
 
-        resp = client.messages.create(
-            model=os.environ.get("PA_MCP_LLM_MODEL", "claude-opus-5"),
+        params = LLMCallParams(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_content,
+            mode="fast",
             max_tokens=2000,
-            system=SYSTEM_PROMPT,
-            messages=msgs,
         )
-        text = "".join(b.text for b in resp.content if b.type == "text")
-        return text or "（模型无输出）"
+        resp = asyncio.run(adapter.chat(params))
+        if resp.content and not resp.content.startswith('{"error"'):
+            return resp.content
+        return f"LLM 调用失败（{resp.content[:100]}），已降级为规则分析：\n\n{_rule_based_reply(message)}"
     except Exception as e:
         return f"LLM 调用失败（{str(e)[:120]}），已降级为规则分析：\n\n{_rule_based_reply(message)}"
 
