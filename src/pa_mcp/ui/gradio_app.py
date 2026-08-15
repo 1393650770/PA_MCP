@@ -654,6 +654,28 @@ STRATEGY_OPTIONS = [
     "range_grid", "roe_pb_value", "dragon_second_wave",
 ]
 
+def detect_best_strategy() -> str:
+    """检测最优策略（事件研究快速评分），失败回退 bollinger。
+
+    惰性调用（仅 UI 构建时一次，避免模块导入副作用）。
+    """
+    try:
+        from pa_mcp.engine.strategies.tips import pick_best_strategy
+        _df = _load_long_history("000001")
+        _best = pick_best_strategy(_df)
+        if _best in STRATEGY_OPTIONS:
+            return _best
+    except Exception:
+        pass
+    return "bollinger_mean_reversion"
+
+
+def strategy_tip_ui(strategy: str) -> str:
+    """策略说明（tips）。"""
+    from pa_mcp.engine.strategies.tips import get_strategy_tip
+    tip = get_strategy_tip(strategy)
+    return tip or f"`{strategy}` 暂无详细说明"
+
 
 def run_backtest_ui(symbol: str, strategy: str, initial_cash: float) -> tuple[Any, str]:
     """策略回测：事件驱动引擎 + 净值曲线。"""
@@ -1041,10 +1063,14 @@ def build_app():
 
         with gr.Tab("🧪 研究评估"):
             wf_sym = gr.Textbox(label="股票代码", value="000001")
-            wf_strategy = gr.Dropdown(STRATEGY_OPTIONS, value="bollinger_mean_reversion",
+            wf_strategy = gr.Dropdown(STRATEGY_OPTIONS,
+                                      value=detect_best_strategy(),
                                       label="策略（Walk-Forward OOS）")
+            wf_tip = gr.Markdown()
             wf_btn = gr.Button("运行 Walk-Forward", variant="primary")
             wf_out = gr.Markdown()
+            wf_strategy.change(strategy_tip_ui, inputs=[wf_strategy],
+                               outputs=[wf_tip])
             wf_btn.click(walk_forward_ui, inputs=[wf_sym, wf_strategy],
                          outputs=[wf_out])
             es_btn = gr.Button("📊 信号事件研究（预测力检验）", variant="secondary")
@@ -1056,11 +1082,15 @@ def build_app():
             pb_in = gr.Textbox(label="股票池（逗号分隔）",
                                value="000001,600036,300750,000858",
                                placeholder="000001,600036,300750,000858")
-            pb_strategy = gr.Dropdown(STRATEGY_OPTIONS, value="bollinger_mean_reversion",
+            pb_strategy = gr.Dropdown(STRATEGY_OPTIONS,
+                                      value=detect_best_strategy(),
                                       label="策略")
+            pb_tip = gr.Markdown()
             pb_btn = gr.Button("构建组合", variant="primary")
             pb_fig = gr.Plot()
             pb_out = gr.Markdown()
+            pb_strategy.change(strategy_tip_ui, inputs=[pb_strategy],
+                               outputs=[pb_tip])
             pb_btn.click(portfolio_build_ui, inputs=[pb_in, pb_strategy],
                          outputs=[pb_fig, pb_out])
             pb_in.submit(portfolio_build_ui, inputs=[pb_in, pb_strategy],
@@ -1069,12 +1099,17 @@ def build_app():
         with gr.Tab("🛠️ 策略回测"):
             with gr.Row():
                 bt_sym = gr.Textbox(label="股票代码", value="000001")
-                bt_strategy = gr.Dropdown(STRATEGY_OPTIONS, value="ma_golden_cross",
-                                          label="策略")
+                bt_strategy = gr.Dropdown(STRATEGY_OPTIONS,
+                                          value=detect_best_strategy(),
+                                          label="策略（⭐=推荐）")
                 bt_cash = gr.Number(value=100000, label="初始资金", precision=0)
                 bt_btn = gr.Button("运行回测", variant="primary")
+            bt_tip = gr.Markdown()   # 策略说明
             bt_fig = gr.Plot()
             bt_summary = gr.Markdown()
+            bt_strategy.change(strategy_tip_ui, inputs=[bt_strategy],
+                               outputs=[bt_tip])
+            app.load(strategy_tip_ui, inputs=[bt_strategy], outputs=[bt_tip])
             bt_btn.click(run_backtest_ui,
                          inputs=[bt_sym, bt_strategy, bt_cash],
                          outputs=[bt_fig, bt_summary])
