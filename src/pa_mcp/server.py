@@ -2016,6 +2016,63 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def strategy_compare(symbols: str = "") -> dict[str, Any]:
+    """全策略事件研究对比（多策略同台检验）。
+
+    全部注册策略（10 个，含 CANSLIM/缠论/海龟/利弗莫尔等大牛方法）在
+    股票池上生成信号 → 事件研究（5/10/20 日超额 vs 无条件基准）→
+    聚合对比表 + 有效策略判定（5日超额>0 且多数股票 has_edge）。
+
+    Args:
+        symbols: 股票池（逗号分隔）；空 = 数据库内有行情的全部股票
+    """
+    try:
+        from pa_mcp.research.strategy_compare import (
+            compare_all_strategies, format_compare)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        klines = {}
+        if pool:
+            for sym in pool:
+                try:
+                    df = _store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 300", [sym]) if _store else None
+                    if df is None or df.empty:
+                        kdf, _ = await _get_kline_fallback(sym, days=300)
+                        df = kdf
+                    if df is not None and not df.empty:
+                        klines[sym] = df
+                except Exception:
+                    continue
+        else:
+            if _store:
+                try:
+                    syms = _store.query_df(
+                        "SELECT DISTINCT symbol FROM kline_daily LIMIT 20", [])
+                    for sym in syms["symbol"]:
+                        df = _store.query_df(
+                            "SELECT * FROM kline_daily WHERE symbol = ? "
+                            "ORDER BY date DESC LIMIT 300", [str(sym)])
+                        if not df.empty:
+                            klines[str(sym)] = df
+                except Exception:
+                    pass
+        if len(klines) < 1:
+            return _response(success=False, error="无行情数据（先运行调度装载）",
+                             error_type="DATA_UNAVAILABLE")
+
+        result = compare_all_strategies(klines)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result, "report": format_compare(result)})
+    except Exception as e:
+        logger.error("strategy_compare failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def factor_portfolio_backtest(symbols: str, top_n: int = 5,
                                     horizon: int = 5,
                                     train_window: int = 120) -> dict[str, Any]:

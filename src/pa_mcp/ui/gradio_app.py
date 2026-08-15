@@ -1701,6 +1701,28 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def strategy_compare_ui(symbols: str) -> str:
+    """全策略事件研究对比（10 策略同台检验预测力）。"""
+    try:
+        from pa_mcp.research.strategy_compare import (
+            compare_all_strategies, format_compare)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        klines = {}
+        for sym in pool:
+            df = _load_long_history(sym)
+            if not df.empty:
+                klines[sym] = df
+        if not klines:
+            return "无行情数据（请输入 ≥1 只股票或先装载）"
+        result = compare_all_strategies(klines)
+        if "error" in result:
+            return result["error"]
+        return format_compare(result)
+    except Exception as e:
+        return f"策略对比失败：{str(e)[:200]}"
+
+
 def factor_portfolio_ui(symbols: str) -> str:
     """因子选股组合回测（滚动选股 → 共享账本组合）。"""
     try:
@@ -2534,6 +2556,12 @@ def build_app():
             fpb_out = gr.Markdown()
             fpb_btn.click(factor_portfolio_ui, inputs=[fs_pool],
                           outputs=[fpb_out])
+
+            cmp_btn = gr.Button("🏁 全策略事件研究对比（10 策略同台检验）",
+                                variant="secondary")
+            cmp_out = gr.Markdown()
+            cmp_btn.click(strategy_compare_ui, inputs=[fs_pool],
+                          outputs=[cmp_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
