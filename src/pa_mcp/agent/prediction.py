@@ -405,6 +405,10 @@ class PredictionService:
         """LLM 预测 + JSON 校验 + 一次修复重试。"""
         user_prompt = PREDICTION_PROMPT.format(
             symbol=symbol, horizon=horizon, features=format_features(features))
+        # 板块轮动融合：注入所属板块 RS 上下文（best-effort，无数据跳过）
+        sector_ctx = self._sector_context(symbol)
+        if sector_ctx:
+            user_prompt += f"\n\n【所属板块环境】\n{sector_ctx}"
         params = LLMCallParams(
             system_prompt=(
                 "你是有经验的 A 股量化研究员。只输出合法 JSON，不输出任何其他文本。"
@@ -444,6 +448,47 @@ class PredictionService:
         result.resistance_levels = features.get("resistance_20d") and [
             features["resistance_20d"]] + [x for x in result.resistance_levels if x] or result.resistance_levels
         return result
+
+    def _sector_context(self, symbol: str) -> str:
+        """查询股票所属板块的 RS 强弱（板块轮动 → 个股预测上下文）。
+
+        依赖 stock_basic（sector 映射）与 sector_daily（板块日线），
+        任一缺失返回空串（best-effort，不阻塞预测）。
+        """
+        try:
+            from pa_mcp.config import get_settings
+            from pa_mcp.data.store import DuckDBStore
+            path = self._store_path or get_settings().database.path
+            store = DuckDBStore(path)
+            store.connect()
+            try:
+                sb = store.query_df(
+                    "SELECT sector FROM stock_basic WHERE symbol = ?", [symbol])
+                if sb.empty or not sb.iloc[0]["sector"]:
+                    return ""
+                sector = str(sb.iloc[0]["sector"])
+                # 板块 RS（20 日几何涨幅 + 加速）：查 sector_daily 中名称匹配
+                df = store.query_df(
+                    "SELECT date, close FROM sector_daily "
+                    "WHERE name = ? ORDER BY date", [sector])
+                if len(df) < 21:
+                    return ""
+                close = df["close"].astype(float)
+                now = float(close.iloc[-1])
+                rs = (now / float(close.iloc[-21]) - 1) * 100
+                acc = ((now / float(close.iloc[-6])) ** 0.2 - 1) * 100 \
+                    - ((now / float(close.iloc[-21])) ** (1 / 20) - 1) * 100
+                state = ("强势（RS 为正且加速）" if rs > 0 and acc > 0
+                         else "强势但减速" if rs > 0 else
+                         "弱势（RS 为负）" if rs < 0 else "中性")
+                return (f"所属板块：{sector}（20 日涨幅 {rs:+.1f}%，"
+                        f"加速 {acc:+.3f}）→ {state}。"
+                        f"板块强弱应影响个股预测的置信与方向权重。")
+            finally:
+                store.close()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("sector context unavailable", symbol=symbol, error=str(e))
+            return ""
 
     @staticmethod
     def _validate_llm_json(raw: dict) -> list[str]:

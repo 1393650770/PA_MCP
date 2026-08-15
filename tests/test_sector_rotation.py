@@ -102,6 +102,89 @@ def test_save_and_evaluate(tmp_path):
     assert summary["hit_rate"] == 1.0
 
 
+def _seed_stock_basic(tmp_path, db):
+    """灌 stock_basic 板块映射 + 每板块 2 只股票行情。"""
+    from pa_mcp.data.store import DuckDBStore
+    store = DuckDBStore(db)
+    store.connect()
+    dates = pd.date_range("2026-05-01", periods=80, freq="B")
+    specs = {
+        ("000001", "平安银行", "银行"): 0.01,
+        ("000002", "招商银行", "银行"): 0.005,
+        ("600519", "贵州茅台", "白酒"): 0.008,
+        ("000858", "五粮液", "白酒"): -0.002,
+        ("601012", "隆基绿能", "光伏"): -0.008,
+    }
+    sb_rows = [{"symbol": s, "name": n, "sector": sec, "industry": sec,
+                "is_st": False} for s, n, sec in specs]
+    store.insert_df("stock_basic", pd.DataFrame(sb_rows))
+    k_rows = []
+    for (sym, _, _), daily in specs.items():
+        close = 10.0
+        for i in range(80):
+            close *= 1 + daily
+            k_rows.append({
+                "symbol": sym, "date": dates[i], "open": close * 0.99,
+                "close": close, "high": close * 1.01, "low": close * 0.99,
+                "volume": 1e6, "amount": 1e7, "pct_change": daily * 100,
+                "turnover": 1.0, "change": 0.1, "amplitude": 2.0,
+                "adjust_factor": 1.0,
+            })
+    store.insert_df("kline_daily", pd.DataFrame(k_rows))
+    store.close()
+
+
+def test_leaders_in_sector(tmp_path):
+    from pa_mcp.data.store import DuckDBStore
+    db = str(tmp_path / "leaders_test.duckdb")
+    _seed_stock_basic(tmp_path, db)
+    analyzer = SectorRotationAnalyzer(store_path=db)
+    r = analyzer.leaders_in_sector("银行", top_n=5)
+    assert "error" not in r
+    assert r["leader_count"] == 2
+    assert r["leaders"][0]["symbol"] == "000001"  # 平安银行涨更快
+    assert r["leaders"][0]["rs60_pct"] > r["leaders"][1]["rs60_pct"]
+    # 上涨 60 日 → 接近新高
+    assert r["leaders"][0]["near_60d_high"] is True
+
+
+def test_leaders_in_sector_no_mapping(tmp_path):
+    db = str(tmp_path / "leaders_empty.duckdb")
+    analyzer = SectorRotationAnalyzer(store_path=db)
+    r = analyzer.leaders_in_sector("不存在板块")
+    assert "error" in r
+
+
+def test_sector_context_injection(tmp_path):
+    """预测 prompt 板块上下文：_sector_context 返回板块 RS 文本。"""
+    from pa_mcp.data.store import DuckDBStore
+    db = str(tmp_path / "ctx_test.duckdb")
+    _seed_stock_basic(tmp_path, db)
+    # 板块日线：银行上涨（模拟）
+    store = DuckDBStore(db)
+    store.connect()
+    dates = pd.date_range("2026-05-01", periods=40, freq="B")
+    close = 100.0
+    rows = []
+    for i in range(40):
+        close *= 1.008
+        rows.append({"sector_code": "BK0001", "name": "银行",
+                     "date": dates[i], "open": close * 0.99, "close": close,
+                     "high": close * 1.01, "low": close * 0.99,
+                     "volume": 1e7, "amount": 1e9, "pct_change": 0.8,
+                     "turnover": 2.0})
+    store.insert_df("sector_daily", pd.DataFrame(rows))
+    store.close()
+
+    from pa_mcp.agent.prediction import PredictionService
+    svc = PredictionService(store_path=db)
+    ctx = svc._sector_context("000001")
+    assert "银行" in ctx
+    assert "强势" in ctx  # 板块上涨且加速→强势
+    # 无映射股票 → 空串
+    assert svc._sector_context("999999") == ""
+
+
 def test_format_rotation():
     pred = {
         "mode": "deterministic", "predict_date": "2026-08-15",

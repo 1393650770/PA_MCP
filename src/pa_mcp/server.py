@@ -1894,6 +1894,32 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def sector_leaders(sector: str, top_n: int = 8) -> dict[str, Any]:
+    """板块领涨股挖掘（板块轮动 → 个股闭环）。
+
+    板块内按 60 日 RS 排名取领涨股，标记是否接近 60 日新高
+    （强势突破候选）。配合 predict_sector_rotation 使用：
+    先预测强势板块，再挖板块内领涨股。
+
+    Args:
+        sector: 板块名称（与 stock_basic.sector 一致，如 '银行'）
+        top_n: 返回数量
+    """
+    try:
+        from pa_mcp.research.sector_rotation import (
+            get_sector_rotation_analyzer)
+        result = get_sector_rotation_analyzer().leaders_in_sector(
+            sector, top_n=top_n)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data=result)
+    except Exception as e:
+        logger.error("sector_leaders failed", sector=sector, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def evaluate_sector_predictions() -> dict[str, Any]:
     """板块轮动预测验证：回填已到期预测的 top3 超额收益（vs 全板块平均）。"""
     try:

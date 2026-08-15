@@ -164,6 +164,54 @@ class SectorRotationAnalyzer:
         finally:
             store.close()
 
+    # ---- 板块领涨股挖掘（板块轮动 → 个股闭环） ----
+    def leaders_in_sector(self, sector: str, top_n: int = 8) -> dict[str, Any]:
+        """板块内领涨股：60 日 RS 排名 + 当前处于突破/强势状态。
+
+        依赖 stock_basic.sector 映射 + kline_daily；数据缺失返回 error。
+        与 CANSLIM 交叉：返回带 canslim_score（数据可得时）。
+        """
+        store = self._store()
+        try:
+            sb = store.query_df(
+                "SELECT symbol, name FROM stock_basic WHERE sector = ? "
+                "AND (is_st IS NULL OR is_st = FALSE)", [sector])
+            if sb.empty:
+                return {"error": f"stock_basic 无板块 {sector} 映射（先运行调度装载）"}
+
+            rows = []
+            for _, r in sb.iterrows():
+                sym = str(r["symbol"])
+                df = store.query_df(
+                    "SELECT date, close, high, low, volume FROM kline_daily "
+                    "WHERE symbol = ? ORDER BY date DESC LIMIT 80", [sym])
+                if len(df) < 61:
+                    continue
+                d = df.sort_values("date").reset_index(drop=True)
+                now = float(d["close"].iloc[-1])
+                rs60 = (now / float(d["close"].iloc[-61]) - 1) * 100
+                rs20 = (now / float(d["close"].iloc[-21]) - 1) * 100
+                hi60 = float(d["high"].iloc[-60:].max())
+                near_high = now >= hi60 * 0.97
+                rows.append({
+                    "symbol": sym, "name": str(r["name"]) or sym,
+                    "rs60_pct": round(rs60, 2), "rs20_pct": round(rs20, 2),
+                    "near_60d_high": near_high,
+                    "close": round(now, 3),
+                })
+            if not rows:
+                return {"error": f"{sector} 无足够行情数据"}
+
+            ranked = sorted(rows, key=lambda x: x["rs60_pct"], reverse=True)[:top_n]
+            return {
+                "sector": sector,
+                "leaders": ranked,
+                "leader_count": len(ranked),
+                "note": "按 60 日 RS 排序；near_60d_high = 现价距 60 日高点 -3% 内",
+            }
+        finally:
+            store.close()
+
     # ---- LLM 预测（融合板块特征 + 大盘状态） ----
     async def predict(self, analysis: Optional[dict] = None) -> dict[str, Any]:
         """板块轮动预测：LLM 优先，无 LLM 降级动量延续规则。
