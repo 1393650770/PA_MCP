@@ -35,11 +35,14 @@ class PortfolioRiskDashboard:
         store.connect()
         return store
 
-    async def analyze(self, use_llm: bool = False) -> dict[str, Any]:
+    async def analyze(self, use_llm: bool = False,
+                      use_market_bias: bool = True) -> dict[str, Any]:
         """持仓风险分析。
 
         Args:
             use_llm: 预测是否用 LLM（默认 False 控制成本）
+            use_market_bias: 是否注入指数结构方向（偏空上调风险，
+                偏多下调；库中无指数数据时跳过）
         """
         store = self._store()
         try:
@@ -152,6 +155,25 @@ class PortfolioRiskDashboard:
             score += min(10, max(0, 100 - len(holdings) * 10))  # 数量少
             score = round(min(100, max(0, score)), 1)
 
+            # 市场结构方向注入（指数缠论：偏空逆风上调，偏多顺风下调）
+            market_bias = None
+            bias_adjust = 0.0
+            if use_market_bias:
+                try:
+                    from pa_mcp.research.market_structure import (
+                        MarketStructureAnalyzer)
+                    ms = await MarketStructureAnalyzer(
+                        self._store_path).analyze(use_network=False)
+                    if ms["index"]["rows"] > 0:
+                        market_bias = ms["joint"]["bias"]
+                        if market_bias == "偏空":
+                            bias_adjust = 10
+                        elif market_bias == "偏多":
+                            bias_adjust = -5
+                        score = round(min(100, max(0, score + bias_adjust)), 1)
+                except Exception:
+                    pass
+
             return {
                 "total_value": round(total_value, 2),
                 "total_cost": round(total_cost, 2),
@@ -174,15 +196,23 @@ class PortfolioRiskDashboard:
                 "risk_level": ("低" if score < 30 else "中" if score < 60
                                else "高"),
                 "risk_notes": self._risk_notes(score, holdings,
-                                               top_weight, top_sector),
+                                               top_weight, top_sector,
+                                               market_bias, bias_adjust),
+                "market_bias": market_bias,
+                "market_bias_adjust": bias_adjust,
             }
         finally:
             store.close()
 
     @staticmethod
     def _risk_notes(score: float, holdings: list, top_weight: float,
-                    top_sector: tuple) -> list[str]:
+                    top_sector: tuple, market_bias: Optional[str] = None,
+                    bias_adjust: float = 0.0) -> list[str]:
         notes = []
+        if market_bias == "偏空":
+            notes.append(f"指数偏空（缠论结构）→ 风险上调 {bias_adjust:+.0f} 分")
+        elif market_bias == "偏多":
+            notes.append(f"指数偏多（缠论结构）→ 风险下调 {bias_adjust:+.0f} 分")
         if top_weight > 30:
             notes.append(f"单票 {top_weight:.0f}% 集中度过高（>30%）")
         if top_sector[1] > 50:
@@ -217,7 +247,10 @@ def format_risk_dashboard(result: dict[str, Any]) -> str:
         f"## 🛡️ 持仓风险面板",
         f"**总市值 {result['total_value']:,.0f} 元 | 成本 {result['total_cost']:,.0f} 元 | "
         f"盈亏 {result['total_pnl_pct']:+.1f}%**",
-        f"**风险评分：{result['risk_score']}（{result['risk_level']}）**",
+        f"**风险评分：{result['risk_score']}（{result['risk_level']}）**"
+        + (f"（指数{'偏空' if result.get('market_bias') == '偏空' else '偏多'}"
+           f"调整 {result.get('market_bias_adjust', 0):+.0f}）"
+           if result.get("market_bias") else ""),
         "",
         "### 持仓明细",
         "| 代码 | 成本 | 现价 | 盈亏% | 占比% | 板块 | 预测(5d) |",

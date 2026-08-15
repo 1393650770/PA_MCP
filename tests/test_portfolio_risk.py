@@ -89,6 +89,42 @@ def test_risk_dashboard(tmp_path):
     assert "持仓风险面板" in text and "风险评分" in text
 
 
+def test_market_bias_adjustment(tmp_path):
+    """市场结构偏空 → 风险上调；偏多 → 下调；无指数 → 不变。"""
+    db = _seed(tmp_path)
+    base = asyncio.run(PortfolioRiskDashboard(
+        store_path=db).analyze(use_market_bias=False))
+
+    # 灌指数数据构造偏空结构（下跌趋势 → 空头）
+    from pa_mcp.data.store import DuckDBStore
+    store = DuckDBStore(db)
+    store.connect()
+    # 先横盘形成中枢 → 后 90 根跌破 → 明确空头结构
+    import numpy as np
+    rng = np.random.default_rng(11)
+    close = 3000.0
+    rows = []
+    for i in range(150):
+        if i < 60:
+            close *= 1 + rng.normal(0, 0.003)     # 横盘（中枢）
+        else:
+            close *= 0.99                         # 跌破
+        rows.append({"symbol": "sh000001",
+                     "date": pd.Timestamp("2025-09-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e8})
+    store.insert_df("index_daily", pd.DataFrame(rows))
+    store.close()
+
+    r_bear = asyncio.run(PortfolioRiskDashboard(
+        store_path=db).analyze(use_market_bias=True))
+    # 下跌指数 → 偏空 → 风险上调
+    assert r_bear["market_bias"] == "偏空"
+    assert r_bear["market_bias_adjust"] == 10
+    assert r_bear["risk_score"] >= base["risk_score"]
+    assert any("指数偏空" in n for n in r_bear["risk_notes"])
+
+
 def test_risk_dashboard_empty(tmp_path):
     r = asyncio.run(PortfolioRiskDashboard(
         store_path=str(tmp_path / "empty.duckdb")).analyze())
