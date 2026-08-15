@@ -535,6 +535,39 @@ def test_by_horizon_grouping(tmp_path):
     assert "brier_score" in summary["by_horizon"]["1d"]
 
 
+def test_market_bias_context_injection():
+    """大盘环境注入：库内指数数据 → 返回方向文本；无数据 → 空串。"""
+    import tempfile, os
+    import numpy as np
+    from pa_mcp.data.store import DuckDBStore
+    db = os.path.join(tempfile.mkdtemp(), "mb.duckdb")
+    store = DuckDBStore(db)
+    store.connect()
+    # 横盘后跌破 → 偏空结构
+    rng = np.random.default_rng(21)
+    close = 3000.0
+    rows = []
+    for i in range(150):
+        close *= (1 + rng.normal(0, 0.003)) if i < 60 else 0.99
+        rows.append({"symbol": "sh000001",
+                     "date": pd.Timestamp("2025-09-01") + pd.Timedelta(days=i),
+                     "open": close * 0.995, "high": close * 1.01,
+                     "low": close * 0.99, "close": close, "volume": 1e8})
+    store.insert_df("index_daily", pd.DataFrame(rows))
+    store.close()
+
+    import asyncio as _asyncio
+    from pa_mcp.agent.prediction import PredictionService
+    svc = PredictionService(store_path=db)
+    ctx = _asyncio.run(svc._market_bias_context())
+    assert "上证指数" in ctx
+    assert "偏空" in ctx or "偏多" in ctx or "中性" in ctx
+
+    # 无指数数据 → 空串（不阻塞）
+    svc2 = PredictionService(store_path=":memory:")
+    assert _asyncio.run(svc2._market_bias_context()) == ""
+
+
 def test_calibration_figure_build():
     """校准曲线图构建：柱状 + 参考线，过度自信红色标记。"""
     from pa_mcp.ui.gradio_app import _build_calibration_figure

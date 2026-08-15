@@ -414,6 +414,10 @@ class PredictionService:
         sector_ctx = self._sector_context(symbol)
         if sector_ctx:
             user_prompt += f"\n\n【所属板块环境】\n{sector_ctx}"
+        # 市场结构融合：注入指数缠论方向（大盘环境）
+        mkt_ctx = await self._market_bias_context()
+        if mkt_ctx:
+            user_prompt += f"\n\n【大盘环境】\n{mkt_ctx}"
         params = LLMCallParams(
             system_prompt=(
                 "你是有经验的 A 股量化研究员。只输出合法 JSON，不输出任何其他文本。"
@@ -453,6 +457,26 @@ class PredictionService:
         result.resistance_levels = features.get("resistance_20d") and [
             features["resistance_20d"]] + [x for x in result.resistance_levels if x] or result.resistance_levels
         return result
+
+    async def _market_bias_context(self) -> str:
+        """查询指数缠论结构方向（大盘环境，注入个股预测 prompt）。
+
+        库内指数数据优先（不触发网络）；无数据返回空串。
+        """
+        try:
+            from pa_mcp.research.market_structure import (
+                MarketStructureAnalyzer)
+            ms = await MarketStructureAnalyzer(
+                self._store_path).analyze(use_network=False)
+            if ms["index"]["rows"] <= 0:
+                return ""
+            j = ms["joint"]
+            return (f"上证指数 {ms['index']['last_close']}"
+                    f"（{ms['index']['last_date']}）：{j['bias']}——"
+                    f"{j['structure']}。大盘方向应影响个股预测的置信与方向权重。")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("market bias context unavailable", error=str(e))
+            return ""
 
     def _sector_context(self, symbol: str) -> str:
         """查询股票所属板块的 RS 强弱（板块轮动 → 个股预测上下文）。
