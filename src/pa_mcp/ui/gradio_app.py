@@ -3330,10 +3330,14 @@ def build_app():
                 ov_risk = gr.Button("🛡️ 持仓风险面板")
                 ov_mp = gr.Button("🔮 多股预测对比")
                 ov_sent = gr.Button("🌡️ 游资情绪周期")
+                ov_res = gr.Button("🎯 预测共振")
             ov_risk.click(portfolio_risk_ui, outputs=[ov_out])
             ov_mp.click(predict_multi_ui, inputs=[ov_pool],
                         outputs=[ov_out])
             ov_sent.click(sentiment_cycle_ui, outputs=[ov_out])
+            ov_res.click(lambda: predict_resonance_ui(
+                ov_pool.value.split(",")[0].strip()),
+                outputs=[ov_out])
 
             with gr.Row():
                 ov_exp = gr.Dropdown(
