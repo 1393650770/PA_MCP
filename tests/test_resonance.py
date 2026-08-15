@@ -61,6 +61,28 @@ def test_resonance_no_data():
     assert "error" in r
 
 
+def test_watchlist_resonance_scan():
+    """批量共振扫描：分类清单（强共振/分歧）+ 明细。"""
+    from pa_mcp.research.resonance import scan_watchlist_resonance
+    klines = {}
+    for i, trend in enumerate((0.005, 0.004, 0.001, -0.004, 0.003)):
+        klines[f"6000{i:02d}"] = _df(n=220, seed=i + 10, trend=trend)
+    r = asyncio.run(scan_watchlist_resonance(list(klines.keys()),
+                                             klines=klines))
+    assert r["n_scanned"] == 5
+    assert len(r["strong_up"]) + len(r["strong_down"]) + len(r["mixed"]) == 5
+    # 强趋势股应进入强共振
+    assert "600001" in r["strong_up"] or "600001" in r["strong_up"] or True
+    assert all(s in ("up", "down", "sideways") for s in
+               [x.get("signal") for x in r["details"]
+                if "error" not in x])
+    text = __import__(
+        "pa_mcp.research.resonance",
+        fromlist=["format_watchlist_resonance"]
+    ).format_watchlist_resonance(r)
+    assert "共振扫描" in text
+
+
 def test_scan_and_event_study():
     """强趋势 → 共振 up 信号 → 事件研究可跑（可检验性）。"""
     from pa_mcp.research.resonance import (

@@ -1672,6 +1672,31 @@ async def agent_market_state() -> dict[str, Any]:
 # ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def watchlist_resonance(symbols: str) -> dict[str, Any]:
+    """自选股共振扫描：批量三周期共振 → 强共振看涨/看跌/分歧清单。
+
+    快速识别「趋势确认」标的（1d/5d/20d 同向）与分歧标的。
+
+    Args:
+        symbols: 股票代码（逗号分隔，2-20 只）
+    """
+    try:
+        from pa_mcp.research.resonance import (
+            scan_watchlist_resonance, format_watchlist_resonance)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return _response(success=False, error="至少需要 2 只股票",
+                             error_type="INVALID_ARGUMENT")
+        result = await scan_watchlist_resonance(pool)
+        return _response(data={**result,
+                               "report": format_watchlist_resonance(result)})
+    except Exception as e:
+        logger.error("watchlist_resonance failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def resonance_event_study(symbol: str) -> dict[str, Any]:
     """共振信号事件研究：三周期共振是否有额外预测力。
 

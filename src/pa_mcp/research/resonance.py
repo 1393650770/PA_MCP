@@ -225,6 +225,84 @@ def format_resonance_event_study(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+async def scan_watchlist_resonance(
+    symbols: list[str],
+    klines: Optional[dict[str, pd.DataFrame]] = None,
+) -> dict[str, Any]:
+    """自选股批量共振扫描：强共振 / 分歧分类清单。
+
+    Args:
+        symbols: 股票代码列表（2-20 只）
+        klines: 可选行情覆盖（缺省每只从库拉取）
+    """
+    analyzer = ResonanceAnalyzer()
+    rows = []
+    for sym in symbols[:20]:
+        try:
+            df = klines.get(sym) if klines else None
+            if df is None:
+                df = analyzer._load_kline(sym)
+            if df is None or df.empty:
+                rows.append({"symbol": sym, "error": "无数据"})
+                continue
+            r = await analyzer.analyze(sym, kline_df=df)
+            if "error" in r:
+                rows.append({"symbol": sym, "error": r["error"]})
+                continue
+            rows.append({
+                "symbol": sym,
+                "signal": r["signal"],
+                "strength": r["strength"],
+                "resonance": r["resonance"],
+                "up": r["direction_summary"]["up"],
+                "down": r["direction_summary"]["down"],
+            })
+        except Exception as e:  # noqa: BLE001
+            rows.append({"symbol": sym, "error": str(e)[:60]})
+
+    strong_up = [r for r in rows if r.get("signal") == "up"
+                 and r.get("strength", 0) >= 0.7]
+    strong_down = [r for r in rows if r.get("signal") == "down"
+                   and r.get("strength", 0) >= 0.7]
+    mixed = [r for r in rows if "error" not in r
+             and r.get("strength", 1) < 0.7]
+    return {
+        "n_scanned": len(rows),
+        "strong_up": [r["symbol"] for r in strong_up],
+        "strong_down": [r["symbol"] for r in strong_down],
+        "mixed": [r["symbol"] for r in mixed],
+        "details": rows,
+        "note": ("强共振 = 1d/5d/20d 三周期同向（趋势确认）；"
+                 "mixed = 分歧/未确认。研究参考，非投资建议。"),
+    }
+
+
+def format_watchlist_resonance(result: dict[str, Any]) -> str:
+    """批量共振 → markdown。"""
+    lines = [
+        f"## 🎯 自选股共振扫描（{result['n_scanned']} 只）",
+        f"- **📈 强共振看涨**（{len(result['strong_up'])}）："
+        + ("、".join(result["strong_up"]) or "无"),
+        f"- **📉 强共振看跌**（{len(result['strong_down'])}）："
+        + ("、".join(result["strong_down"]) or "无"),
+        f"- **➡️ 分歧/未确认**（{len(result['mixed'])}）："
+        + ("、".join(result["mixed"]) or "无"),
+        "",
+        "| 代码 | 信号 | 强度 | 共振描述 |",
+        "|---|---|---|---|",
+    ]
+    dir_zh = {"up": "📈", "down": "📉", "sideways": "➡️"}
+    for r in result["details"]:
+        if "error" in r:
+            lines.append(f"| {r['symbol']} | ❌ {r['error']} |")
+            continue
+        lines.append(
+            f"| {r['symbol']} | {dir_zh.get(r['signal'], r['signal'])} | "
+            f"{r['strength']:.0%} | {r['resonance']} |")
+    lines.append(f"\n*{result['note']}*")
+    return "\n".join(lines)
+
+
 _analyzer: Optional[ResonanceAnalyzer] = None
 
 

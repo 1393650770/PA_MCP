@@ -1356,6 +1356,22 @@ def calibration_fig_ui() -> tuple[Any, str]:
         return None, f"校准图生成失败：{str(e)[:200]}"
 
 
+def watchlist_resonance_ui(symbols: str) -> str:
+    """自选股共振扫描（批量强共振清单）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.resonance import (
+            scan_watchlist_resonance, format_watchlist_resonance)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return "至少需要 2 只股票"
+        result = _asyncio.run(scan_watchlist_resonance(pool))
+        return format_watchlist_resonance(result)
+    except Exception as e:
+        return f"共振扫描失败：{str(e)[:200]}"
+
+
 def resonance_event_study_ui(symbol: str) -> str:
     """共振信号事件研究（三周期同向信号的预测力）。"""
     symbol = symbol.strip()
@@ -3425,6 +3441,16 @@ def build_app():
             res_es_btn = gr.Button("🎯 共振信号事件研究（预测力检验）",
                                    variant="secondary")
             res_es_btn.click(resonance_event_study_ui, inputs=[pred_sym],
+                             outputs=[res_out])
+
+            with gr.Row():
+                wl_res_in = gr.Textbox(
+                    label="共振扫描股票（逗号分隔，2-20 只）",
+                    value="000001,600036,300750,000858,600519,601318",
+                    scale=2)
+                wl_res_btn = gr.Button("🎯 自选股共振扫描", variant="secondary",
+                                       scale=1)
+            wl_res_btn.click(watchlist_resonance_ui, inputs=[wl_res_in],
                              outputs=[res_out])
 
             with gr.Row():
