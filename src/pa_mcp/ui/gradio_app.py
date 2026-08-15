@@ -1499,6 +1499,47 @@ def chan_fig(symbol: str) -> tuple[Any, str]:
         return None, f"缠论分析失败：{str(e)[:200]}"
 
 
+def turtle_position_ui(symbol: str, account_value: float) -> str:
+    """海龟 ATR 仓位计算（1 单位 = 账户×1% ÷ ATR）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.engine.strategies.turtle import TurtleBreakoutStrategy
+        from pa_mcp.data.symbols import get_stock_name
+
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+        data = df.sort_values("date").reset_index(drop=True)
+        strat = TurtleBreakoutStrategy()
+        atr = float(strat._atr(data, strat.atr_period).iloc[-1])
+        last_close = float(data["close"].iloc[-1])
+        exit_level = float(data["low"].tail(strat.exit_period).min())
+        atr_pct = atr / last_close * 100 if last_close > 0 else 0.0
+
+        acct = float(account_value or 100000)
+        risk_amount = acct * 0.01
+        units = risk_amount / atr if atr > 0 else 0
+        shares = int(units // 100 * 100)
+        pos_value = shares * last_close
+        pos_pct = min(10.0, pos_value / acct * 100)
+
+        return (
+            f"## 🐢 海龟仓位（{symbol} {get_stock_name(symbol)}，账户 {acct:,.0f} 元）\n"
+            f"- **ATR(20)**：{atr:.4f}（{atr_pct:.2f}%），现价 {last_close:.2f}\n"
+            f"- **1 单位风险**：账户 × 1% = **{risk_amount:,.0f} 元**\n"
+            f"- **建议股数**：**{shares} 股**（≈{pos_value:,.0f} 元，"
+            f"仓位 {pos_pct:.1f}%，≤10% 上限）\n"
+            f"- **止损参考**：{exit_level:.2f}（10 日通道，"
+            f"距离 {max(0, (last_close - exit_level) / last_close * 100):.1f}%）\n"
+            f"- 波动越大仓位越小——趋势跟踪的波动率目标核心。\n"
+            f"*研究参考，非投资建议。*"
+        )
+    except Exception as e:
+        return f"海龟仓位计算失败：{str(e)[:200]}"
+
+
 def canslim_ui(top_n: int = 20, pool: str = "") -> str:
     """CANSLIM 成长股扫描（欧奈尔七要素）。"""
     try:
@@ -1622,7 +1663,7 @@ def market_diagnosis_ui() -> str:
 STRATEGY_OPTIONS = [
     "ma_golden_cross", "platform_breakout", "first_board_breakout",
     "bollinger_mean_reversion", "volume_price_momentum", "oversold_bounce",
-    "range_grid", "roe_pb_value", "dragon_second_wave",
+    "range_grid", "roe_pb_value", "dragon_second_wave", "turtle",
 ]
 
 def detect_best_strategy() -> str:
@@ -2201,6 +2242,13 @@ def build_app():
             bt_btn.click(run_backtest_ui,
                          inputs=[bt_sym, bt_strategy, bt_cash],
                          outputs=[bt_fig, bt_summary])
+
+            with gr.Row():
+                tk_btn = gr.Button("🐢 海龟仓位计算（ATR 波动率目标）",
+                                   variant="secondary")
+            tk_out = gr.Markdown()
+            tk_btn.click(turtle_position_ui, inputs=[bt_sym, bt_cash],
+                         outputs=[tk_out])
 
         with gr.Tab("🔮 市场预测"):
             gr.Markdown("**AI 未来走势预测**：基于 K 线技术特征预测方向/概率/关键价位，"

@@ -112,6 +112,7 @@
 |---|---|---|---|---|---|
 | CANSLIM 成长股扫描 | implemented_verified | `research/canslim.py` CanslimScanner, MCP `scan_canslim`, UI「市场扫描」Tab | 欧奈尔七要素：C净利同比≥20% / A 4期均值≥25%或ROE≥17% / N 250日新高 / S突破放量≥1.5 / L池内RS前20% / M市场状态(冰点否决)；I机构数据暂缺不评分 | 要素判定/冰点否决/池扫描排序/空库 4项 | 财务数据需调度器装载；RS 为池内相对排名 |
 | 缠论结构分析 | implemented_verified | `engine/indicators/chan.py`, MCP `chan_analysis`, UI「数据看板」Tab | 缠中说禅体系：K线包含合并→分型(顶/底)→笔(交替连接)→中枢(3笔重叠区间)→背驰(MACD面积对比，上涨/下跌衰竭信号)+价位相对中枢位置 | 合并/分型/笔交替/中枢重叠/端到端 5项 | 简化实现（非完整缠论；背驰用笔级近似）；真实行情冒烟通过 |
+| 海龟交易策略 | implemented_verified | `engine/strategies/turtle.py`, MCP `turtle_position_size`, UI「策略回测」Tab | 唐奇安20日突破入场/10日通道离场参考 + ATR波动率目标仓位（1单位=账户×1%÷ATR，≤10%上限）+ 突破强度评分；自动注册进回测/事件研究/市场扫描 | 突破信号/横盘无信号/参数空间/自动注册/时间排序 5项 | 真实行情冒烟（601728→13信号）；A股不做空，仅做多信号 |
 
 ## 研究与实验
 

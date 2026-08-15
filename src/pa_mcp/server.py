@@ -1835,6 +1835,75 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def turtle_position_size(symbol: str, account_value: float = 100000.0,
+                               risk_pct: float = 1.0) -> dict[str, Any]:
+    """海龟交易仓位计算（ATR 波动率目标）。
+
+    1 单位 = 账户 × risk_pct% ÷ ATR（元）；返回建议股数（100 股整手）、
+    止损位（唐奇安 10 日通道）、以及单票仓位占比（受 10% 上限约束）。
+
+    Args:
+        symbol: 股票代码
+        account_value: 账户资金（默认 10 万）
+        risk_pct: 每单风险预算（账户 %，经典 1%）
+    """
+    try:
+        from pa_mcp.engine.strategies.turtle import TurtleBreakoutStrategy
+        from pa_mcp.data.symbols import get_stock_name
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 80",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=80)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        data = kline_df.sort_values("date").reset_index(drop=True)
+        strat = TurtleBreakoutStrategy(risk_percent=risk_pct)
+        atr = float(strat._atr(data, strat.atr_period).iloc[-1])
+        last_close = float(data["close"].iloc[-1])
+        exit_level = float(data["low"].tail(strat.exit_period).min())
+        atr_pct = atr / last_close * 100 if last_close > 0 else 0.0
+
+        # 1 单位 = 账户 × 风险% ÷ ATR(元)；向下取整到 100 股
+        risk_amount = account_value * risk_pct / 100
+        units = risk_amount / atr if atr > 0 else 0
+        shares = int(units // 100 * 100)
+        position_value = shares * last_close
+        position_pct = min(10.0, position_value / account_value * 100) \
+            if account_value > 0 else 0.0
+
+        return _response(data={
+            "symbol": symbol,
+            "name": get_stock_name(symbol),
+            "last_close": round(last_close, 3),
+            "atr": round(atr, 4),
+            "atr_pct": round(atr_pct, 2),
+            "risk_amount_per_unit": round(risk_amount, 2),
+            "suggested_shares": shares,
+            "suggested_position_value": round(position_value, 2),
+            "suggested_position_pct": round(position_pct, 2),
+            "stop_loss_level": round(exit_level, 3),
+            "stop_loss_pct": round((last_close - exit_level) / last_close * 100, 2)
+            if last_close > 0 else 0.0,
+            "note": ("1 单位 = 账户 × 风险预算 ÷ ATR，回测中受单票 10% 上限约束。"
+                     "研究参考，非投资建议。"),
+        })
+    except Exception as e:
+        logger.error("turtle_position_size failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def scan_canslim(top_n: int = 20, pool: str = "") -> dict[str, Any]:
     """CANSLIM 成长股扫描（欧奈尔《笑傲股市》七要素选股法）。
 
