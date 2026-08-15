@@ -1701,6 +1701,22 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def factor_scan_ui(symbol: str) -> str:
+    """因子批量扫描：全部注册因子的 IC/分层检验排行。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入股票代码"
+    try:
+        from pa_mcp.research.factors import scan_factors, format_scan
+        df = _load_long_history(symbol)
+        if df.empty:
+            return f"{symbol} 无行情数据"
+        results = scan_factors(df, horizon=5)
+        return format_scan(results) + f"\n\n*扫描标的：{symbol}*"
+    except Exception as e:
+        return f"因子扫描失败：{str(e)[:200]}"
+
+
 def regime_matrix_ui() -> str:
     """情绪×轮动联合矩阵：市场状态标签 + 操作建议。"""
     try:
@@ -2443,6 +2459,14 @@ def build_app():
                                variant="secondary")
             rm_out = gr.Markdown()
             rm_btn.click(regime_matrix_ui, outputs=[rm_out])
+
+            with gr.Row():
+                fc_sym = gr.Textbox(label="因子扫描股票代码",
+                                    value="000001", scale=2)
+                fc_btn = gr.Button("🧬 因子批量扫描（IC/分层检验）",
+                                   variant="secondary", scale=1)
+            fc_out = gr.Markdown()
+            fc_btn.click(factor_scan_ui, inputs=[fc_sym], outputs=[fc_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 

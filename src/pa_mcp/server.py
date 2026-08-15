@@ -1948,6 +1948,119 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def factor_library(category: str = "") -> dict[str, Any]:
+    """因子库清单（借鉴 factor-skill-factory）：已注册因子列表。
+
+    Args:
+        category: 类别过滤（momentum/mean_reversion/volatility/volume/
+                  trend），空 = 全部
+    """
+    try:
+        from pa_mcp.research.factors import get_factor_registry
+        registry = get_factor_registry()
+        factors = registry.list_by_category(category) if category \
+            else registry.list_all()
+        return _response(data={
+            "count": len(factors),
+            "factors": [f.to_dict() for f in factors],
+        })
+    except Exception as e:
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def evaluate_factor(factor_name: str, symbol: str,
+                          horizon: int = 5) -> dict[str, Any]:
+    """单因子检验（量化标准）：IC + 分层（Q1-Q5）+ 单调性 + 覆盖率。
+
+    Args:
+        factor_name: 因子名（factor_library 查看全部）
+        symbol: 股票代码
+        horizon: 前瞻交易日数（默认 5）
+    """
+    try:
+        from pa_mcp.research.factors import (
+            evaluate_factor as run_eval, get_factor_registry,
+            format_factor_report)
+        fd = get_factor_registry().get(factor_name)
+        if fd is None:
+            return _response(success=False,
+                             error=f"因子 {factor_name} 未注册（factor_library 查看）",
+                             error_type="NOT_FOUND")
+
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 300",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=300)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        result = run_eval(fd, kline_df, horizon=horizon)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result, "symbol": symbol,
+                               "report": format_factor_report(result)})
+    except Exception as e:
+        logger.error("evaluate_factor failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def factor_scan(symbol: str, horizon: int = 5) -> dict[str, Any]:
+    """因子批量扫描：全部注册因子在一只股票上的 IC/分层检验排行。
+
+    输出有效因子清单（|IC|≥0.03），供选股/研究参考。
+
+    Args:
+        symbol: 股票代码
+        horizon: 前瞻交易日数（默认 5）
+    """
+    try:
+        from pa_mcp.research.factors import (
+            scan_factors, format_scan)
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date DESC LIMIT 300",
+                    [symbol])
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=300)
+            if df is not None and not df.empty:
+                kline_df = df
+        if kline_df is None or kline_df.empty:
+            return _response(success=False, error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+
+        results = scan_factors(kline_df, horizon=horizon)
+        useful = [r for r in results if r.get("useful")]
+        return _response(data={
+            "symbol": symbol,
+            "horizon": horizon,
+            "count": len(results),
+            "useful_count": len(useful),
+            "useful_factors": useful,
+            "ranking": results,
+            "report": format_scan(results),
+        })
+    except Exception as e:
+        logger.error("factor_scan failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def regime_matrix() -> dict[str, Any]:
     """情绪 × 轮动联合矩阵（Regime Matrix）。
 
