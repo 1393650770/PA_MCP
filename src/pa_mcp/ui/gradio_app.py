@@ -235,6 +235,10 @@ def _rule_based_reply(message: str) -> str:
         fig, summary = compare_stocks_ui(",".join(codes))
         return summary or "对比失败"
 
+    # 工具0.3: 深度分析（5分析师团，需 LLM）
+    if sym and ("深度" in message or "分析师" in message or "deep" in message.lower()):
+        return portfolio_ai_analysis(sym)
+
     # 工具0.5: 股票名称查询（"xxx是什么股票/代码xxx是什么"）
     if sym and ("什么股票" in message or "是什么" in message or "叫什么" in message):
         from pa_mcp.data.symbols import get_stock_name
