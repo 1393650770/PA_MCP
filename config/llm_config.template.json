@@ -1,0 +1,85 @@
+{
+  "_comment": "PA_MCP LLM 配置模板 — 使用方式：复制本文件为 llm_config.json（已被 gitignore，不会提交）后填写密钥",
+  "_instructions": "cp config/llm_config.template.json config/llm_config.json  (Windows: copy config\\llm_config.template.json config\\llm_config.json) 然后编辑 api_key。也可用环境变量 ANTHROPIC_API_KEY / DEEPSEEK_API_KEY 等，留空 api_key 即可。",
+  "_providers_note": "切换供应商：修改下方 active_provider 的值（如 'deepseek'）。Anthropic 走官方 Messages API（官方 SDK）；其余走 OpenAI-compatible 协议。",
+
+  "active_provider": "anthropic",
+
+  "providers": {
+    "anthropic": {
+      "api_key": "sk-ant-在此填入你的密钥，或留空用 ANTHROPIC_API_KEY 环境变量",
+      "_note": "使用官方 anthropic SDK / Messages API。base_url 留空走 SDK 默认；模型用有效别名（不带日期后缀）。",
+      "base_url": "",
+      "models": {
+        "fast": "claude-sonnet-5",
+        "deep": "claude-opus-5"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "openai_compatible": {
+      "api_key": "sk-在此填入你的密钥",
+      "base_url": "https://api.openai.com/v1",
+      "models": {
+        "fast": "gpt-4o-mini",
+        "deep": "gpt-4o"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "deepseek": {
+      "api_key": "sk-在此填入你的密钥",
+      "base_url": "https://api.deepseek.com/v1",
+      "models": {
+        "fast": "deepseek-chat",
+        "deep": "deepseek-reasoner"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "zhipu": {
+      "api_key": "在此填入你的密钥",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "models": {
+        "fast": "glm-4-flash",
+        "deep": "glm-4-plus"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    },
+    "qwen": {
+      "api_key": "sk-在此填入你的密钥",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "models": {
+        "fast": "qwen-turbo",
+        "deep": "qwen-plus"
+      },
+      "max_tokens": 4096,
+      "temperature": 0.1,
+      "timeout_seconds": 60
+    }
+  },
+
+  "token_budget": {
+    "fast_analysis_max": 8000,
+    "deep_analysis_max": 50000,
+    "daily_scan_budget": 200000,
+    "per_request_timeout": 90
+  },
+
+  "retry": {
+    "max_retries": 3,
+    "backoff_base_seconds": 2,
+    "backoff_multiplier": 2
+  },
+
+  "cache": {
+    "enable_response_cache": true,
+    "cache_ttl_minutes": 60,
+    "max_cached_responses": 500
+  }
+}
