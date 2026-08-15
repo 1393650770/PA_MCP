@@ -934,6 +934,104 @@ async def get_data_source_health() -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+async def portfolio_strategy_signals() -> dict[str, Any]:
+    """持仓股当前策略信号：检查每只持仓是否触发买入信号。
+
+    与 UI「💼 组合管理 → 持仓策略信号」一致。
+    对每只持仓跑 bollinger_mean_reversion + ma_golden_cross，
+    输出当前交易日触发的信号（含信号日/强度）。
+
+    Returns:
+        data.report: Markdown 报告
+        data.holdings: 结构化信号列表
+    """
+    try:
+        from pa_mcp.data.symbols import get_stock_name
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        from pa_mcp.ui.gradio_app import _load_long_history, _get_store
+
+        store = _get_store()
+        if not store.table_exists("portfolio"):
+            return _response(data={"report": "持仓为空", "holdings": []})
+        holdings = store.query_df("SELECT symbol FROM portfolio")
+        if holdings.empty:
+            return _response(data={"report": "持仓为空", "holdings": []})
+
+        registry = StrategyRegistry()
+        registry.auto_discover()
+        strategies = ["bollinger_mean_reversion", "ma_golden_cross"]
+
+        signals_out = []
+        for sym in holdings["symbol"]:
+            try:
+                df = await asyncio.to_thread(_load_long_history, sym)
+                if df is None or df.empty or len(df) < 60:
+                    continue
+                latest = str(df["date"].astype(str).str[:10].iloc[-1])
+                for s_name in strategies:
+                    inst = registry.get(s_name)
+                    if inst is None:
+                        continue
+                    try:
+                        sigs = inst.generate_signals(df.copy())
+                    except Exception:
+                        continue
+                    if not sigs:
+                        continue
+                    recent = [
+                        x for x in sigs
+                        if (getattr(x, "signal_time", None) or
+                            str(getattr(x, "timestamp", ""))[:10]) >= latest
+                    ]
+                    if recent:
+                        s = recent[-1]
+                        signals_out.append({
+                            "symbol": sym,
+                            "name": get_stock_name(sym),
+                            "strategy": s_name,
+                            "signal_date": getattr(s, "signal_time", "")[:10],
+                            "strength": float(getattr(s, "strength_score", 50)),
+                        })
+            except Exception:
+                continue
+
+        return _response(data={
+            "holdings": signals_out,
+            "count": len(signals_out),
+            "report": (
+                f"持仓策略信号：{len(signals_out)} 个触发\n"
+                + "\n".join(
+                    f"- {s['symbol']} {s['name']}｜{s['strategy']}｜"
+                    f"{s['signal_date']}｜强度{s['strength']:.0f}"
+                    for s in signals_out
+                ) if signals_out else "当前无持仓触发信号"
+            ),
+        })
+    except Exception as e:
+        logger.error("portfolio_strategy_signals failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def portfolio_ai_analysis(symbol: str) -> dict[str, Any]:
+    """持仓股 AI 综合分析：真实数据 + 策略信号 + LLM 解读。
+
+    与 UI「💼 组合管理 → AI 个股分析」一致。
+    无 LLM key 时返回规则分析（真实数据）。
+
+    Args:
+        symbol: 持仓股票代码（6位）
+    """
+    try:
+        from pa_mcp.ui.gradio_app import portfolio_ai_analysis as _ui_ai
+        report = await asyncio.to_thread(_ui_ai, symbol)
+        return _response(data={"symbol": symbol, "report": report})
+    except Exception as e:
+        logger.error("portfolio_ai_analysis failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
 # ---- MCP Tools: Review ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
