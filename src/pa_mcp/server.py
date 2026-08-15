@@ -2016,6 +2016,57 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def value_momentum_backtest(symbols: str, top_n: int = 3,
+                                  horizon: int = 5) -> dict[str, Any]:
+    """价值×动量组合回测验证（复合选股 → 滚动调仓组合）。
+
+    每 horizon 日用窗口内行情切片评分（动量无前视；财务/估值用最新
+    快照标注近似）→ top N 持仓 → 共享账本组合回测 vs 全池等权基准。
+
+    Args:
+        symbols: 股票池（逗号分隔，≥3 只）
+        top_n: 每期持仓数量
+        horizon: 调仓周期（交易日）
+    """
+    try:
+        from pa_mcp.research.value_momentum import (
+            backtest_value_momentum, format_vm_backtest)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 3:
+            return _response(success=False, error="至少需要 3 只股票",
+                             error_type="INVALID_ARGUMENT")
+        klines = {}
+        for sym in pool:
+            try:
+                df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 400", [sym]) if _store else None
+                if df is None or df.empty:
+                    kdf, _ = await _get_kline_fallback(sym, days=400)
+                    df = kdf
+                if df is not None and not df.empty:
+                    klines[sym] = df
+            except Exception:
+                continue
+        if len(klines) < 3:
+            return _response(success=False,
+                             error=f"仅 {len(klines)} 只股票有数据（需 ≥3）",
+                             error_type="DATA_UNAVAILABLE")
+
+        result = backtest_value_momentum(pool, klines, top_n=top_n,
+                                         horizon=horizon)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result,
+                               "report": format_vm_backtest(result)})
+    except Exception as e:
+        logger.error("value_momentum_backtest failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def value_momentum_screen(symbols: str, top_n: int = 10,
                                 value_weight: float = 0.5) -> dict[str, Any]:
     """价值 × 动量 复合选股（Asness et al. 2013 学术框架）。

@@ -32,7 +32,8 @@ class ValueMomentumScreen:
     def screen(self, symbols: list[str],
                quotes: Optional[dict[str, dict]] = None,
                top_n: int = 10,
-               value_weight: float = 0.5) -> dict[str, Any]:
+               value_weight: float = 0.5,
+               klines: Optional[dict[str, pd.DataFrame]] = None) -> dict[str, Any]:
         """复合选股。
 
         Args:
@@ -40,6 +41,8 @@ class ValueMomentumScreen:
             quotes: 估值快照（透传格雷厄姆筛选）
             top_n: 返回数量
             value_weight: 价值权重（动量 = 1 - value_weight）
+            klines: 可选 {symbol: DataFrame} 行情覆盖（滚动回测用——
+                窗口内切片注入，避免从 store 读全历史造成前视）
         """
         from pa_mcp.research.graham import GrahamScreener
 
@@ -55,7 +58,7 @@ class ValueMomentumScreen:
         # 2) 动量分（60 日收益，截面 z-score）
         mom: dict[str, float] = {}
         for sym in symbols:
-            df = self._load_kline(sym)
+            df = klines.get(sym) if klines else self._load_kline(sym)
             if df is None or len(df) < 61:
                 continue
             close = df["close"].astype(float)
@@ -135,6 +138,111 @@ class ValueMomentumScreen:
             return None
 
 
+# ---- 价值×动量组合回测（滚动调仓，复用 PortfolioBacktestEngine） ----
+
+def backtest_value_momentum(
+    symbols: list[str],
+    klines: dict[str, pd.DataFrame],
+    quotes: Optional[dict[str, dict]] = None,
+    top_n: int = 3,
+    horizon: int = 5,
+    train_window: int = 120,
+    value_weight: float = 0.5,
+    initial_cash: float = 100_000.0,
+) -> dict[str, Any]:
+    """滚动价值×动量组合回测。
+
+    每 horizon 日用窗口内行情切片评分（动量无前视；财务/估值用最新
+    快照——标注近似）→ top N 持仓 → 共享账本组合回测 vs 全池等权。
+
+    Args:
+        symbols: 股票池
+        klines: {symbol: 日线（升序）}（各股 ≥ train_window + 61 根）
+        quotes: 估值快照（缺省 None → 格雷厄姆估值标准 unavailable）
+        top_n: 每期持仓数量
+        horizon: 调仓周期
+        train_window: 动量窗口（滚动切片 = train_window 根）
+        value_weight: 价值权重
+        initial_cash: 初始资金
+    """
+    from pa_mcp.portfolio.backtest import PortfolioBacktestEngine
+
+    aligned: dict[str, pd.DataFrame] = {}
+    for sym, df in klines.items():
+        d = df.sort_values("date").reset_index(drop=True)
+        if len(d) >= train_window + 61:
+            aligned[sym] = d
+    if len(aligned) < 3:
+        return {"error": f"满足窗口的股票不足（{len(aligned)} < 3）"}
+
+    calendar = sorted(set().union(
+        *[set(df["date"].astype(str).str[:10]) for df in aligned.values()]))
+    n = len(calendar)
+    if n <= train_window + horizon:
+        return {"error": f"日历 {n} 天不足（需 > {train_window + horizon}）"}
+
+    screen = ValueMomentumScreen()
+    signals_by_symbol: dict[str, list[dict]] = {s: [] for s in aligned}
+    for t in range(train_window, n - 1, horizon):
+        end_date = calendar[t]
+        window_klines = {}
+        for sym, d in aligned.items():
+            sub = d[d["date"].astype(str).str[:10] <= end_date]
+            window_klines[sym] = sub.tail(train_window + 61)
+        sel = screen.screen(symbols, quotes=quotes, top_n=top_n,
+                            value_weight=value_weight,
+                            klines=window_klines)
+        if "error" in sel:
+            continue
+        top = sel["top_symbols"]
+        for sym in aligned:
+            signals_by_symbol[sym].append({
+                "date": end_date, "symbol": sym,
+                "direction": "bullish" if sym in top else "bearish",
+                "strength_score": 60.0 if sym in top else 40.0,
+            })
+
+    sig_dfs = {s: pd.DataFrame(lst) if lst else pd.DataFrame(
+        columns=["date", "symbol", "direction", "strength_score"])
+        for s, lst in signals_by_symbol.items()}
+
+    engine = PortfolioBacktestEngine(initial_cash=initial_cash)
+    result = engine.run(aligned, sig_dfs)
+
+    # 基准：全池等权
+    bench_signals = {}
+    for sym in aligned:
+        bench_signals[sym] = pd.DataFrame([
+            {"date": calendar[t], "symbol": sym, "direction": "bullish",
+             "strength_score": 50.0}
+            for t in range(train_window, n - 1, horizon)])
+    bench = PortfolioBacktestEngine(initial_cash=initial_cash).run(
+        aligned, bench_signals)
+
+    return {
+        "method": (f"滚动 {train_window} 日价值×动量评分（权重 {value_weight:.0%}）"
+                   f"→ 每 {horizon} 日调仓 top {top_n}，等权组合回测"),
+        "n_stock": len(aligned),
+        "n_rebalances": len(next(iter(sig_dfs.values()))),
+        "portfolio": {
+            "total_return_pct": getattr(result, "total_return_pct", None),
+            "annual_return_pct": getattr(result, "annual_return_pct", None),
+            "max_drawdown_pct": getattr(result, "max_drawdown_pct", None),
+            "sharpe_ratio": getattr(result, "sharpe_ratio", None),
+            "total_trades": getattr(result, "total_trades", None),
+        },
+        "benchmark": {
+            "total_return_pct": getattr(bench, "total_return_pct", None),
+            "max_drawdown_pct": getattr(bench, "max_drawdown_pct", None),
+        },
+        "excess_return_pct": round(
+            float(getattr(result, "total_return_pct", 0) or 0)
+            - float(getattr(bench, "total_return_pct", 0) or 0), 2),
+        "note": ("动量用窗口内切片（无前视）；财务/估值用最新快照（近似）。"
+                 "基准 = 全池等权。研究参考，非投资建议。"),
+    }
+
+
 _screener: Optional[ValueMomentumScreen] = None
 
 
@@ -168,3 +276,21 @@ def format_value_momentum(result: dict[str, Any]) -> str:
                      + "、".join(result["best_candidates"]))
     lines.append(f"\n*{result['note']}。研究参考，非投资建议。*")
     return "\n".join(lines)
+
+
+def format_vm_backtest(result: dict[str, Any]) -> str:
+    """组合回测 → markdown。"""
+    if "error" in result:
+        return f"价值×动量回测不可用：{result['error']}"
+    p, b = result["portfolio"], result["benchmark"]
+    return (
+        f"## 🏆 价值×动量组合回测\n"
+        f"**方法**：{result['method']}\n"
+        f"**样本**：{result['n_stock']} 只股票 × {result['n_rebalances']} 次调仓\n"
+        f"- **组合**：总收益 {p['total_return_pct']}% | 年化 {p['annual_return_pct']}% | "
+        f"回撤 {p['max_drawdown_pct']}% | Sharpe {p['sharpe_ratio']}\n"
+        f"- **基准**（全池等权）：{b['total_return_pct']}% | 回撤 {b['max_drawdown_pct']}%\n"
+        f"- **超额收益**：**{result['excess_return_pct']:+.2f}%**\n"
+        f"- 交易 {p['total_trades']} 笔\n"
+        f"*{result['note']}*"
+    )

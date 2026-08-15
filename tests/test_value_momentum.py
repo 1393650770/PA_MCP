@@ -92,3 +92,41 @@ def test_value_momentum_no_data(tmp_path):
     r = ValueMomentumScreen(store_path=str(tmp_path / "none.db")).screen(
         ["000001", "000002", "000003"])
     assert "error" in r
+
+
+def test_backtest_value_momentum(tmp_path):
+    """滚动回测：返回组合/基准/超额；窗口不足降级。"""
+    from pa_mcp.research.value_momentum import (
+        backtest_value_momentum, format_vm_backtest)
+    db = _seed(tmp_path)
+    # 从临时库取行情
+    from pa_mcp.data.store import DuckDBStore
+    store = DuckDBStore(db)
+    store.connect()
+    klines = {}
+    for sym in ("000001", "000002", "000003", "000004"):
+        df = store.query_df(
+            "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date", [sym])
+        klines[sym] = df
+    store.close()
+
+    r = backtest_value_momentum(
+        ["000001", "000002", "000003", "000004"], klines,
+        quotes={"000001": {"pe": 8, "pb": 0.9, "price": 10},
+                "000002": {"pe": 9, "pb": 1.0, "price": 10},
+                "000003": {"pe": 60, "pb": 8, "price": 50},
+                "000004": {"pe": -5, "pb": 1.5, "price": 3}},
+        top_n=2, horizon=5, train_window=30)
+    assert "error" not in r
+    assert r["n_stock"] == 4
+    assert r["n_rebalances"] >= 3
+    assert r["portfolio"]["total_return_pct"] is not None
+    assert r["excess_return_pct"] is not None
+    text = format_vm_backtest(r)
+    assert "价值×动量组合回测" in text
+
+    # 窗口不足
+    short = {s: klines[s].iloc[:80] for s in klines}
+    r2 = backtest_value_momentum(
+        list(short.keys()), short, top_n=2, horizon=5, train_window=120)
+    assert "error" in r2

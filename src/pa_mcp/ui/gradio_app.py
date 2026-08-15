@@ -1701,6 +1701,30 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def value_momentum_backtest_ui(symbols: str) -> str:
+    """价值×动量滚动调仓组合回测。"""
+    try:
+        from pa_mcp.research.value_momentum import (
+            backtest_value_momentum, format_vm_backtest)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 3:
+            return "至少需要 3 只股票"
+        klines = {}
+        for sym in pool:
+            df = _load_long_history(sym)
+            if not df.empty:
+                klines[sym] = df
+        if len(klines) < 3:
+            return f"仅 {len(klines)} 只股票有行情（需 ≥3）"
+        result = backtest_value_momentum(pool, klines, top_n=3, horizon=5)
+        if "error" in result:
+            return result["error"]
+        return format_vm_backtest(result)
+    except Exception as e:
+        return f"价值×动量回测失败：{str(e)[:200]}"
+
+
 def value_momentum_ui(symbols: str) -> str:
     """价值×动量复合选股（格雷厄姆 × 60 日动量）。"""
     try:
@@ -2648,6 +2672,12 @@ def build_app():
                                variant="secondary")
             vm_out = gr.Markdown()
             vm_btn.click(value_momentum_ui, inputs=[fs_pool], outputs=[vm_out])
+
+            vmb_btn = gr.Button("🏆 价值×动量组合回测（vs 全池等权）",
+                                variant="secondary")
+            vmb_out = gr.Markdown()
+            vmb_btn.click(value_momentum_backtest_ui, inputs=[fs_pool],
+                          outputs=[vmb_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
