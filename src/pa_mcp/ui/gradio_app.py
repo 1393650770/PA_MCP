@@ -367,6 +367,75 @@ def chat_reply(message: str, history: list[dict]) -> str:
         return f"LLM 调用失败（{str(e)[:120]}），已降级为规则分析：\n\n{_rule_based_reply(message)}"
 
 
+def portfolio_ai_analysis(symbol: str) -> str:
+    """对持仓股生成 AI 综合分析（LLM 或规则降级）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return "请输入持仓代码"
+
+    # 先取数据（真实）
+    from pa_mcp.data.symbols import get_stock_name
+    name = get_stock_name(symbol)
+
+    # 规则分析（确定性数据）
+    fig, summary, valuation, source = analyze_stock(symbol, 60)
+    parts = [f"### {symbol} {name} 综合分析", summary or "无数据"]
+    if valuation:
+        parts.append(valuation)
+
+    # 策略信号
+    try:
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+        registry = StrategyRegistry(); registry.auto_discover()
+        df = _load_long_history(symbol)
+        signals = []
+        for s_name in ["bollinger_mean_reversion", "ma_golden_cross"]:
+            inst = registry.get(s_name)
+            if inst is None or df is None or df.empty:
+                continue
+            try:
+                sigs = inst.generate_signals(df.copy())
+            except Exception:
+                continue
+            if not sigs:
+                continue
+            latest = str(df["date"].astype(str).str[:10].iloc[-1])
+            recent = [x for x in sigs if
+                      (getattr(x, "signal_time", None) or
+                       str(getattr(x, "timestamp", ""))[:10]) >= latest]
+            if recent:
+                s = recent[-1]
+                signals.append(f"**{s_name}**：买入信号（{getattr(s, 'signal_time', '')[:10]}，强度{getattr(s, 'strength_score', 50):.0f}）")
+        if signals:
+            parts.append("**当前策略信号**：" + "；".join(signals))
+        else:
+            parts.append("**当前策略信号**：无触发（当前交易日无买入信号）")
+    except Exception:
+        pass
+
+    parts.append("\n*研究参考，非投资建议*")
+
+    # 有 LLM 时用 LLM 增强解读
+    try:
+        from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+        adapter = get_llm_adapter()
+        if adapter is not None:
+            resp = asyncio.run(adapter.chat(LLMCallParams(
+                system_prompt=(
+                    "你是 A 股个股分析助手。基于用户提供的真实数据给出专业解读："
+                    "持仓逻辑/技术面/估值/风险。仅基于给定数据，禁止编造。"
+                    "输出简洁中文，标注研究参考非投资建议。"
+                ),
+                user_prompt=f"股票 {symbol} {name} 的数据如下：\n{summary}\n{valuation}\n{signals if signals else '无信号'}",
+                mode="fast", max_tokens=800,
+            )))
+            if resp.content and not resp.content.startswith('{"error'):
+                return "\n\n".join(parts[:2]) + "\n\n---\n💡 **AI 解读**：\n" + resp.content
+    except Exception:
+        pass
+    return "\n\n".join(parts)
+
+
 # ---- 多股对比（Tab 2.5）----
 
 def compare_stocks_ui(symbols_str: str) -> tuple[Any, str]:
@@ -1058,22 +1127,112 @@ def run_backtest_ui(symbol: str, strategy: str, initial_cash: float) -> tuple[An
 # ---- Tab 4: 组合管理 ----
 
 def portfolio_table() -> pd.DataFrame:
+    """持仓表：成本 + 实时价 + 盈亏 + 当日涨跌 + 策略信号。"""
     store = _get_store()
     try:
         if not store.table_exists("portfolio"):
-            return pd.DataFrame(columns=["symbol", "name", "cost", "shares", "added_date"])
+            return pd.DataFrame(columns=["symbol", "name", "cost", "shares",
+                                         "现价", "盈亏%", "当日%", "added_date"])
         df = store.query_df("SELECT * FROM portfolio ORDER BY added_date DESC")
-        # 补名称列
+        if df.empty:
+            return pd.DataFrame(columns=["symbol", "name", "cost", "shares",
+                                         "现价", "盈亏%", "当日%", "added_date"])
+
         from pa_mcp.data.symbols import get_stock_name
-        if "name" not in df.columns:
-            df.insert(0, "name", df["symbol"].map(get_stock_name))
-        # datetime 列转字符串（Gradio DataFrame 渲染友好）
+        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
+
+        # 补名称 + 实时行情（腾讯，失败显示 —）
+        names, prices, pnl_pcts, day_changes = [], [], [], []
+        for sym in df["symbol"]:
+            names.append(get_stock_name(sym))
+            price = pnl = day = None
+            try:
+                q = asyncio.run(TencentAdapter().get_realtime_quote(sym))
+                price = q.get("price")
+                cost = float(df[df["symbol"] == sym].iloc[0].get("cost", 0))
+                shares = int(df[df["symbol"] == sym].iloc[0].get("shares", 0))
+                if price and cost > 0:
+                    pnl = round((price / cost - 1) * 100, 1)
+                day = q.get("change_pct")
+            except Exception:
+                pass
+            prices.append(price)
+            pnl_pcts.append(pnl)
+            day_changes.append(day)
+
+        df.insert(0, "name", names)
+        df.insert(3, "现价", prices)
+        df.insert(4, "盈亏%", pnl_pcts)
+        df.insert(5, "当日%", day_changes)
+
+        # datetime 列转字符串
         for col in df.columns:
             if str(df[col].dtype).startswith("datetime"):
                 df[col] = df[col].astype(str).str[:10]
         return df
     except Exception:
-        return pd.DataFrame(columns=["symbol", "name", "cost", "shares", "added_date"])
+        return pd.DataFrame(columns=["symbol", "name", "cost", "现价", "盈亏%",
+                                     "当日%", "shares", "added_date"])
+
+
+def portfolio_strategy_signals() -> str:
+    """持仓股的当前策略信号（bollinger + 均线金叉）。"""
+    store = _get_store()
+    try:
+        if not store.table_exists("portfolio"):
+            return "持仓为空"
+        holdings = store.query_df("SELECT symbol FROM portfolio")
+        if holdings.empty:
+            return "持仓为空"
+
+        from pa_mcp.data.symbols import get_stock_name
+        from pa_mcp.engine.strategies.base import StrategyRegistry
+
+        registry = StrategyRegistry()
+        registry.auto_discover()
+        strategies = ["bollinger_mean_reversion", "ma_golden_cross"]
+        insts = {s: registry.get(s) for s in strategies}
+
+        lines = ["## 📡 持仓股策略信号",
+                 "| 代码 | 名称 | 策略 | 信号日 | 强度 |",
+                 "|---|---|---|---|---|"]
+        found = False
+        for sym in holdings["symbol"]:
+            try:
+                df = _load_long_history(sym)
+                if df.empty or len(df) < 60:
+                    continue
+                latest = str(df["date"].astype(str).str[:10].iloc[-1])
+                for s_name, inst in insts.items():
+                    if inst is None:
+                        continue
+                    try:
+                        signals = inst.generate_signals(df.copy())
+                    except Exception:
+                        continue
+                    if not signals:
+                        continue
+                    recent = [
+                        x for x in signals
+                        if (getattr(x, "signal_time", None) or
+                            str(getattr(x, "timestamp", ""))[:10]) >= latest
+                    ]
+                    if not recent:
+                        continue
+                    s = recent[-1]
+                    found = True
+                    lines.append(
+                        f"| {sym} | {get_stock_name(sym)} | {s_name} | "
+                        f"{getattr(s, 'signal_time', '')[:10]} | "
+                        f"{getattr(s, 'strength_score', 50):.0f} |")
+            except Exception:
+                continue
+        if not found:
+            lines.append("| — | 当前无持仓触发信号 | — | — | — |")
+        lines.append("\n*当前交易日触发买入信号的持仓。研究参考，非投资建议。*")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"信号查询失败：{str(e)[:120]}"
 
 
 def portfolio_add_ui(symbol: str, cost: float, shares: int) -> tuple[str, pd.DataFrame]:
@@ -1420,16 +1579,25 @@ def build_app():
                     p_del_sym = gr.Textbox(label="删除代码")
                     p_del = gr.Button("删除")
                     p_status = gr.Markdown()
+                    ai_sym = gr.Textbox(label="AI 分析代码", value="")
+                    ai_btn = gr.Button("🤖 AI 个股分析", variant="secondary")
                 with gr.Column(scale=2):
-                    p_table = gr.Dataframe(label="当前持仓", interactive=False)
+                    p_table = gr.Dataframe(label="当前持仓（实时价/盈亏/当日）",
+                                           interactive=False)
                     p_review_btn = gr.Button("🏥 持仓体检", variant="secondary")
                     p_review = gr.Markdown()
+                    p_sig_btn = gr.Button("📡 持仓策略信号", variant="secondary")
+                    p_sig = gr.Markdown()
+                    ai_out = gr.Markdown()
 
             p_add.click(portfolio_add_ui, inputs=[p_sym, p_cost, p_shares],
                         outputs=[p_status, p_table])
             p_del.click(portfolio_remove_ui, inputs=[p_del_sym],
                         outputs=[p_status, p_table])
             p_review_btn.click(portfolio_review_ui, outputs=[p_review])
+            p_sig_btn.click(portfolio_strategy_signals, outputs=[p_sig])
+            ai_btn.click(portfolio_ai_analysis, inputs=[ai_sym],
+                         outputs=[ai_out])
             app.load(portfolio_table, outputs=[p_table])
 
     return app
