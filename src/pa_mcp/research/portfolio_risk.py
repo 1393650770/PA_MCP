@@ -110,6 +110,25 @@ class PortfolioRiskDashboard:
                     logger.debug("prediction failed in risk dashboard",
                                  symbol=sym, error=str(e))
 
+                # 多周期共振（best-effort，独立拉行情）
+                resonance = None
+                try:
+                    from pa_mcp.research.resonance import ResonanceAnalyzer
+                    rdf = store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 160", [sym])
+                    if not rdf.empty:
+                        res = await ResonanceAnalyzer(
+                            self._store_path).analyze(sym, kline_df=rdf)
+                        if "error" not in res:
+                            resonance = {
+                                "signal": res["signal"],
+                                "strength": res["strength"],
+                                "resonance": res["resonance"],
+                            }
+                except Exception:
+                    pass
+
                 holdings.append({
                     "symbol": sym,
                     "cost": cost, "shares": shares,
@@ -120,6 +139,7 @@ class PortfolioRiskDashboard:
                     "weight_pct": 0.0,  # 最后统一算
                     "sector": sector,
                     "prediction": pred,
+                    "resonance": resonance,
                 })
 
             if not holdings or total_value <= 0:
@@ -221,6 +241,13 @@ class PortfolioRiskDashboard:
                 if h["prediction"] and h["prediction"]["direction"] == "down"]
         if down:
             notes.append("预测看跌持仓：" + "、".join(h["symbol"] for h in down))
+        res_down = [h for h in holdings
+                    if h.get("resonance")
+                    and h["resonance"]["signal"] == "down"
+                    and h["resonance"]["strength"] >= 0.7]
+        if res_down:
+            notes.append("**强共振看跌持仓**（三周期一致，优先减仓）："
+                         + "、".join(h["symbol"] for h in res_down))
         if len(holdings) < 3:
             notes.append("持仓数量过少（<3 只），非系统性风险高")
         if score >= 60:
@@ -253,8 +280,8 @@ def format_risk_dashboard(result: dict[str, Any]) -> str:
            if result.get("market_bias") else ""),
         "",
         "### 持仓明细",
-        "| 代码 | 成本 | 现价 | 盈亏% | 占比% | 板块 | 预测(5d) |",
-        "|---|---|---|---|---|---|---|",
+        "| 代码 | 成本 | 现价 | 盈亏% | 占比% | 板块 | 预测(5d) | 共振 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     dir_zh = {"up": "📈", "down": "📉", "sideways": "➡️"}
     for h in result["holdings"]:
@@ -262,10 +289,15 @@ def format_risk_dashboard(result: dict[str, Any]) -> str:
         pred_txt = (f"{dir_zh.get(p['direction'], '')} {p['probability']:.0%}"
                     f"({p['expected_return_pct']:+.1f}%)"
                     if p else "—")
+        res = h.get("resonance")
+        res_txt = ""
+        if res:
+            res_txt = (f"{dir_zh.get(res['signal'], '')} {res['strength']:.0%}"
+                       if res["strength"] >= 0.7 else f"分歧 {res['strength']:.0%}")
         lines.append(
             f"| {h['symbol']} | {h['cost']:.2f} | {h['price']:.2f} | "
             f"{h['pnl_pct']:+.1f}% | {h['weight_pct']:.1f}% | "
-            f"{h['sector'] or '—'} | {pred_txt} |")
+            f"{h['sector'] or '—'} | {pred_txt} | {res_txt or '—'} |")
     c = result["concentration"]
     lines.extend([
         "",
