@@ -219,6 +219,23 @@ TABLE_DEFINITIONS: dict[str, str] = {
         )
     """,
 
+    # 游资情绪周期日统计（涨停梯队/连板高度/晋级率）
+    "sentiment_daily": """
+        CREATE TABLE IF NOT EXISTS sentiment_daily (
+            date DATE PRIMARY KEY,
+            limit_up_count INTEGER,
+            limit_down_count INTEGER,
+            max_board_height INTEGER,
+            board2_count INTEGER,
+            board3_count INTEGER,
+            board4p_count INTEGER,
+            first_board_count INTEGER,
+            promotion_rate DOUBLE,
+            sentiment_score DOUBLE,
+            stage VARCHAR(20)
+        )
+    """,
+
     # 板块日线（东财 BK 板块指数，供板块轮动研究）
     "sector_daily": """
         CREATE TABLE IF NOT EXISTS sector_daily (

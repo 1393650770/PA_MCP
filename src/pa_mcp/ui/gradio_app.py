@@ -1600,6 +1600,19 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def sentiment_cycle_ui() -> str:
+    """游资情绪周期：涨停梯队/连板高度/晋级率/阶段。"""
+    try:
+        from pa_mcp.research.sentiment_cycle import (
+            get_sentiment_analyzer, format_sentiment)
+        result = get_sentiment_analyzer().analyze()
+        if "error" in result:
+            return result["error"]
+        return format_sentiment(result)
+    except Exception as e:
+        return f"情绪周期失败：{str(e)[:200]}"
+
+
 def canslim_ui(top_n: int = 20, pool: str = "") -> str:
     """CANSLIM 成长股扫描（欧奈尔七要素）。"""
     try:
@@ -2259,6 +2272,11 @@ def build_app():
             sr_btn.click(lambda: sector_rotation_ui(False), outputs=[sr_out])
             sr_load_btn.click(lambda: sector_rotation_ui(True),
                               outputs=[sr_out])
+
+            sc_btn = gr.Button("🌡️ 游资情绪周期（涨停梯队/连板/晋级率）",
+                               variant="secondary")
+            sc_out = gr.Markdown()
+            sc_btn.click(sentiment_cycle_ui, outputs=[sc_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 

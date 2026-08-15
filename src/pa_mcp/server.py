@@ -1938,6 +1938,31 @@ async def sector_rotation_status() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def sentiment_cycle(date: str = "") -> dict[str, Any]:
+    """游资情绪周期分析（涨停梯队/连板高度/晋级率/阶段判定）。
+
+    情绪四阶段（借鉴游资龙头战法）：启动期 → 发酵期 → 高潮期 → 退潮期
+    （+ 冰点期）。核心指标：连板高度（连续涨停天数）、梯队分布
+    （首板/2板/3板/4板+）、晋级率（今日≥2板 ÷ 昨日涨停）、情绪分（0-100）。
+    附近 5 日趋势与退潮预警。日线收盘涨停判定（≥9.5% 近似，无盘中炸板）。
+
+    Args:
+        date: 交易日（YYYY-MM-DD），空 = 最新
+    """
+    try:
+        from pa_mcp.research.sentiment_cycle import (
+            get_sentiment_analyzer, format_sentiment)
+        result = get_sentiment_analyzer().analyze(target_date=date or None)
+        if "error" in result:
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result, "report": format_sentiment(result)})
+    except Exception as e:
+        logger.error("sentiment_cycle failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def sector_leaders(sector: str, top_n: int = 8) -> dict[str, Any]:
     """板块领涨股挖掘（板块轮动 → 个股闭环）。
 

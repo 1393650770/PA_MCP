@@ -115,6 +115,7 @@
 | 海龟交易策略 | implemented_verified | `engine/strategies/turtle.py`, MCP `turtle_position_size`, UI「策略回测」Tab | 唐奇安20日突破入场/10日通道离场参考 + ATR波动率目标仓位（1单位=账户×1%÷ATR，≤10%上限）+ 突破强度评分；自动注册进回测/事件研究/市场扫描 | 突破信号/横盘无信号/参数空间/自动注册/时间排序 5项 | 真实行情冒烟（601728→13信号）；A股不做空，仅做多信号 |
 | 板块轮动分析+预测 | implemented_verified | `research/sector_rotation.py`, MCP `predict_sector_rotation`/`sector_rotation_status`/`evaluate_sector_predictions`/`sector_leaders`, UI「市场扫描」Tab | 东财板块(BK)行情/资金流 + RS排名(20日几何涨幅) + 动量加速(5日vs20日几何日均差) + 轮入/轮出信号 + LLM预测未来一周强势板块(无LLM动量延续降级) + 落盘sector_prediction 5日回填验证top3超额 + **板块领涨股挖掘(60日RS) + 个股预测板块上下文注入** | 排名/确定性预测/落盘验证/格式/领涨股/上下文注入 8项 | 东财push2接口偶发断连(实测)；板块数据需先装载(load_sector_data)；sector_daily/sector_prediction新表 |
 | 预测→仓位建议 | implemented_verified | `agent/prediction.py position_sizing()`, MCP `predict_position_size`, UI「市场预测」Tab | 借鉴ai-hedge-fund Risk Manager：预测概率 × 同方向历史命中率 × 概率桶校准 → 建议仓位（≤20% RiskGuard 硬上限），输出完整推导链 | 历史全中放大/上限约束/down零仓位 3项 | 历史样本少时校准弱；非投资建议 |
+| 游资情绪周期 | implemented_verified | `research/sentiment_cycle.py`, MCP `sentiment_cycle`, UI「市场扫描」Tab | 涨停梯队（首板/2板/3板/4板+）+ 连板高度（连续涨停判定） + 晋级率（≥2板÷昨日涨停） + 情绪分（0-100）+ 情绪四阶段（启动/发酵/高潮/退潮+冰点）+ 近5日趋势与退潮预警；落库 sentiment_daily | 发酵/退潮/冰点/高潮 4项 | 收盘涨停判定（≥9.5% 10cm 近似）；无盘中炸板数据（诚实标注）；数据范围=库内股票池 |
 
 ## 研究与实验
 
