@@ -1591,9 +1591,23 @@ def decision_tree_fig(symbol: str) -> tuple[Any, str]:
         except Exception:
             pass
 
+        # 多周期共振（best-effort）
+        resonance = None
+        try:
+            from pa_mcp.research.resonance import ResonanceAnalyzer
+            res = asyncio.run(ResonanceAnalyzer().analyze(
+                symbol, kline_df=df))
+            if "error" not in res:
+                resonance = {"signal": res["signal"],
+                             "strength": res["strength"],
+                             "resonance": res["resonance"]}
+        except Exception:
+            pass
+
         tree = build_decision_tree(
             symbol, diagnosis=diagnosis, prediction=prediction,
-            stock_name=get_stock_name(symbol), market_bias=market_bias)
+            stock_name=get_stock_name(symbol), market_bias=market_bias,
+            resonance=resonance)
         summary = tree_summary(tree)
 
         # 布局 + 画图

@@ -56,6 +56,7 @@ def build_decision_tree(
     prediction: Optional[dict] = None,
     stock_name: str = "",
     market_bias: Optional[str] = None,
+    resonance: Optional[dict] = None,
 ) -> dict:
     """构建决策树：根 → 市场闸门 → 策略路由 → 方向闸门 → 仓位闸门 → 叶结论。
 
@@ -69,6 +70,8 @@ def build_decision_tree(
         stock_name: 股票名称
         market_bias: 指数结构方向（"偏多"/"偏空"/"中性"，
             来自 market_structure 联合分析）——市场闸门增强维度
+        resonance: 多周期共振 dict（signal/strength，来自 resonance）——
+            强共振（strength ≥0.7）覆盖单周期预测方向
     """
     # ---- 层 1：市场状态（闸门） ----
     market_state = "unknown"
@@ -147,6 +150,15 @@ def build_decision_tree(
         cycle_pos = str(prediction.get("cycle_position", "unknown"))
         cycle_forecast = str(prediction.get("cycle_forecast", "unknown"))
 
+    # 多周期共振覆盖：强共振（≥70%）以共振方向为准（趋势确认更稳）
+    resonance_note = ""
+    if resonance and resonance.get("strength", 0) >= 0.7:
+        res_sig = str(resonance.get("signal", ""))
+        if res_sig in ("up", "down", "sideways") and res_sig != direction:
+            direction = res_sig
+            resonance_note = f"（多周期共振 {resonance.get('resonance', '')} 覆盖）"
+            prob = max(prob, float(resonance.get("strength", 0.7)))
+
     # 指数结构修正预测方向（偏空环境看涨降级为中性提醒）
     if market_bias == "偏空" and direction == "up":
         direction = "sideways"
@@ -159,13 +171,13 @@ def build_decision_tree(
         dir_reason = (f"预测看跌 {prob:.0%}，但指数多头结构——"
                       f"顺势环境降级为中性（期望 {exp_ret:+.1f}%）")
     elif direction == "up":
-        dir_zh = f"📈 看涨（{prob:.0%}）"
+        dir_zh = f"📈 看涨（{prob:.0%}）{resonance_note}"
         dir_reason = f"预测期望收益 {exp_ret:+.1f}%，多头信号占优"
     elif direction == "down":
-        dir_zh = f"📉 看跌（{prob:.0%}）"
+        dir_zh = f"📉 看跌（{prob:.0%}）{resonance_note}"
         dir_reason = f"预测期望收益 {exp_ret:+.1f}%，空头信号占优"
     else:
-        dir_zh = f"➡️ 震荡（{prob:.0%}）"
+        dir_zh = f"➡️ 震荡（{prob:.0%}）{resonance_note}"
         dir_reason = f"期望收益 {exp_ret:+.1f}%，多空平衡"
 
     dir_node = _node(

@@ -126,6 +126,28 @@ def test_tree_with_market_bias():
     assert tree2["position_cap_pct"] >= 40
 
 
+def test_tree_with_resonance_override():
+    """强共振覆盖单周期方向（趋势确认更稳）。"""
+    pred = {
+        "direction": "down", "probability": 0.6, "horizon": "5d",
+        "expected_return_pct": -2.0, "expected_range_pct": [-5, 1],
+        "cycle_position": "trading_range", "cycle_forecast": "trading_range",
+        "key_levels": {}, "scenarios": [], "key_risks": [],
+    }
+    resonance = {"signal": "up", "strength": 0.9,
+                 "resonance": "强共振看涨"}
+    tree = build_decision_tree("000001", prediction=pred,
+                               resonance=resonance)
+    dir_node = tree["tree"]["children"][0]["children"][0]["children"][0]
+    assert "强共振看涨" in dir_node["label"]
+    assert "看涨" in dir_node["label"]
+    # 弱共振（40%）不覆盖
+    res2 = {"signal": "down", "strength": 0.4, "resonance": "轻度分歧"}
+    tree2 = build_decision_tree("000001", prediction=pred, resonance=res2)
+    dir2 = tree2["tree"]["children"][0]["children"][0]["children"][0]
+    assert "看跌" in dir2["label"]
+
+
 def test_tree_summary_text():
     """文本摘要含各层标签。"""
     pred = {"direction": "sideways", "probability": 0.5, "horizon": "5d",
