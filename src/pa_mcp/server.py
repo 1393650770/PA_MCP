@@ -2016,6 +2016,31 @@ async def evaluate_factor(factor_name: str, symbol: str,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def ai_market_report(symbols: str) -> dict[str, Any]:
+    """AI 市场研究报告：确定性研究结果 → LLM 综述。
+
+    聚合市场状态/情绪×轮动矩阵/板块轮动/因子选股（含 AI 预测融合）/
+    价值×动量/预测验证成绩单 → LLM 生成自然语言报告（总结/关注/风险/
+    研究思路）；无 LLM 时确定性模板降级。LLM 只解释数据，不编造。
+
+    Args:
+        symbols: 研究股票池（逗号分隔，≥5 只效果最佳）
+    """
+    try:
+        from pa_mcp.research.ai_report import get_ai_report_generator
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if not pool:
+            return _response(success=False, error="请输入股票代码",
+                             error_type="INVALID_ARGUMENT")
+        result = await get_ai_report_generator().generate(pool)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("ai_market_report failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def value_momentum_backtest(symbols: str, top_n: int = 3,
                                   horizon: int = 5) -> dict[str, Any]:
     """价值×动量组合回测验证（复合选股 → 滚动调仓组合）。

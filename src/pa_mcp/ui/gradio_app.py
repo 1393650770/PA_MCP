@@ -1701,6 +1701,21 @@ def position_sizing_ui(symbol: str) -> str:
         return f"仓位建议失败：{str(e)[:200]}"
 
 
+def ai_report_ui(symbols: str) -> str:
+    """AI 市场研究报告（确定性研究 → LLM 综述）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.ai_report import get_ai_report_generator
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if not pool:
+            return "请输入股票代码"
+        result = _asyncio.run(get_ai_report_generator().generate(pool))
+        return result["report"]
+    except Exception as e:
+        return f"研究报告失败：{str(e)[:200]}"
+
+
 def value_momentum_backtest_ui(symbols: str) -> str:
     """价值×动量滚动调仓组合回测。"""
     try:
@@ -2678,6 +2693,12 @@ def build_app():
             vmb_out = gr.Markdown()
             vmb_btn.click(value_momentum_backtest_ui, inputs=[fs_pool],
                           outputs=[vmb_out])
+
+            report_btn = gr.Button("📋 AI 市场研究报告（LLM 综述）",
+                                   variant="primary")
+            report_out = gr.Markdown()
+            report_btn.click(ai_report_ui, inputs=[fs_pool],
+                             outputs=[report_out])
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
