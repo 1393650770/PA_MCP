@@ -2287,7 +2287,8 @@ async def chan_beichi_backtest(symbols: str) -> dict[str, Any]:
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def export_research_data(what: Literal["selection", "prediction",
-                                             "portfolio", "graham"] = "selection",
+                                             "portfolio", "graham",
+                                             "nav"] = "selection",
                                symbols: str = "") -> dict[str, Any]:
     """研究结果导出为 CSV（可复制/Excel 导入）。
 
@@ -2297,8 +2298,9 @@ async def export_research_data(what: Literal["selection", "prediction",
           prediction: 多股票预测对比（方向/概率/期望/区间）
           portfolio: 持仓明细（成本/现价/盈亏/占比/预测）
           graham: 格雷厄姆筛选（7 条评分/内在价值/安全边际）
-        symbols: 股票池（逗号分隔；selection/prediction/graham 需要，
-            portfolio 忽略）
+          nav: 因子选股组合回测净值序列（date/nav）
+        symbols: 股票池（逗号分隔；selection/prediction/graham/nav
+            需要，portfolio 忽略）
     """
     try:
         import io
@@ -2425,6 +2427,38 @@ async def export_research_data(what: Literal["selection", "prediction",
             buf = io.StringIO()
             pd.DataFrame(rows).to_csv(buf, index=False)
             csv_text = buf.getvalue()
+
+        elif what == "nav":
+            # 因子选股组合回测净值序列
+            from pa_mcp.research.factors import backtest_factor_selection
+            klines = {}
+            for sym in pool:
+                try:
+                    df = _store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 400", [sym]) if _store else None
+                    if df is None or df.empty:
+                        kdf, _ = await _get_kline_fallback(sym, days=400)
+                        df = kdf
+                    if df is not None and not df.empty:
+                        klines[sym] = df
+                except Exception:
+                    continue
+            if len(klines) < 3:
+                return _response(success=False,
+                                 error=f"仅 {len(klines)} 只股票有数据（需 ≥3）",
+                                 error_type="DATA_UNAVAILABLE")
+            r = backtest_factor_selection(klines, top_n=5, horizon=5)
+            if "error" in r:
+                return _response(success=False, error=r["error"],
+                                 error_type="DATA_UNAVAILABLE")
+            nav_rows = r["portfolio"].get("nav_series") or []
+            buf = io.StringIO()
+            pd.DataFrame(nav_rows).to_csv(buf, index=False)
+            csv_text = buf.getvalue()
+            if not csv_text.strip():
+                return _response(success=False, error="净值序列为空",
+                                 error_type="DATA_UNAVAILABLE")
 
         if not csv_text:
             return _response(success=False, error="导出失败",

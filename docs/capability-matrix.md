@@ -130,6 +130,13 @@
 | 风格基准(benchmark) | planned | — | — | — | 阶段D |
 | 成本/容量敏感性 | planned | — | — | — | 阶段D |
 
+| AI 市场研究报告 | implemented_verified | `research/ai_report.py`, MCP `ai_market_report`, UI「研究总览」Tab | 聚合市场状态/市场结构/情绪矩阵/板块轮动/因子选股/价值动量/持仓风险/预测成绩单 → LLM 综述（总结/关注/风险/思路），无 LLM 模板降级 | 模板降级/mock LLM/LLM 失败/持仓段 4项 | LLM 只解释数据不编造 |
+| 市场结构联合分析 | implemented_verified | `research/market_structure.py`, MCP `market_structure`, UI 🏛️ | 上证指数缠论结构（分型/笔/中枢/背驰）× 情绪矩阵 → 联合判断（偏多/偏空/中性）；联动决策树/持仓风险/AI 研报 | 联合判定/完整分析/无数据降级 3项 | 指数需库内数据或网络 |
+| 持仓风险面板 | implemented_verified | `research/portfolio_risk.py`, MCP `portfolio_risk_dashboard`, UI 🛡️ | 持仓盈亏 × 批量预测 × 集中度（HHI/行业） × 风险评分（0-100）+ 指数结构方向调整（偏空+10/偏多-5） | 盈亏/集中度/评分/偏空调整 3项 | 预测默认确定性模式控成本 |
+| 研究结果导出 | implemented_verified | MCP `export_research_data`, UI 📤 | 四种+导出：选股/预测/持仓/格雷厄姆/组合净值 → CSV 文本（可复制/Excel） | CSV 可解析 2项 | 无 |
+| 决策树市场偏向 | implemented_verified | `build_decision_tree(market_bias=)`, MCP `get_decision_tree`, UI 🌳 | 指数偏空 → 看涨预测降级中性+仓位上限 30%；偏多 → 看跌降级+上限≥40% | 偏空/偏多修正 2项 | 需指数数据 |
+| 预测周期分组验证 | implemented_verified | `prediction._summary by_horizon`, UI 成绩单 | 1d/5d/20d 命中率/Brier 独立统计（短周期是否更准） | 分组结构/1d 判定 1项 | 需各周期样本 |
+
 ## 工程基础
 
 | 能力 | 状态 | 入口 | 测试 | 限制 |

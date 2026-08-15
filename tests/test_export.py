@@ -84,6 +84,33 @@ def test_export_selection_csv(tmp_path):
     assert "prediction" in parsed.columns or True  # 无预测融合时无此列
 
 
+def test_export_nav_csv():
+    """组合回测净值序列 → CSV 可解析。"""
+    from pa_mcp.research.factors import backtest_factor_selection
+    import numpy as np
+    rng = np.random.default_rng(5)
+    klines = {}
+    for i in range(1, 7):
+        close = 10.0
+        rows = []
+        for j in range(250):
+            close *= 1 + 0.001 + rng.normal(0, 0.008)
+            rows.append({"date": pd.Timestamp("2025-01-01")
+                         + pd.Timedelta(days=j),
+                         "open": close * 0.995, "high": close * 1.01,
+                         "low": close * 0.99, "close": close,
+                         "volume": 1e6, "symbol": f"6000{i:02d}"})
+        klines[f"6000{i:02d}"] = pd.DataFrame(rows)
+    r = backtest_factor_selection(klines, top_n=3, horizon=5,
+                                  train_window=80)
+    assert "error" not in r
+    nav_rows = r["portfolio"].get("nav_series") or []
+    assert len(nav_rows) >= 10
+    csv_text = pd.DataFrame(nav_rows).to_csv(index=False)
+    parsed = pd.read_csv(io.StringIO(csv_text))
+    assert {"date", "nav"} <= set(parsed.columns)
+
+
 def test_export_graham_csv(tmp_path):
     """格雷厄姆结果 → CSV 可解析。"""
     db = _seed(tmp_path)
