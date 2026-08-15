@@ -522,8 +522,20 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     from pa_mcp.engine.strategies.tips import get_strategy_tip
     from pa_mcp.research.event_study import signal_forward_returns
 
-    # 股票池：内置常用股（跳过已拉取缓存）
+    # 股票池：内置常用股 ∪ 用户持仓股（持仓优先扫描）
     symbols = list(COMMON_NAMES.keys())[:universe_size]
+    holdings = []
+    try:
+        store = _get_store()
+        if store.table_exists("portfolio"):
+            hdf = store.query_df("SELECT symbol FROM portfolio")
+            holdings = hdf["symbol"].tolist() if not hdf.empty else []
+    except Exception:
+        pass
+    if holdings:
+        # 持仓股排在最前（优先扫描），且不受 universe_size 限制
+        symbols = [s for s in holdings if s not in symbols] + symbols
+        universe_size = len(symbols)
 
     registry = StrategyRegistry()
     registry.auto_discover()
@@ -625,18 +637,21 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     rows.sort(key=lambda r: r["strength"], reverse=True)
     rows = rows[:top_n]
 
+    held_set = set(holdings) if holdings else set()
     lines = [
         f"## 📡 市场扫描：{strategy} 当前买入信号候选（TOP {len(rows)}）",
-        f"*扫描 {universe_size} 只常用股 · 信号日期 = 最近触发日（近10日）*",
+        f"*扫描 {universe_size} 只（常用股 + {'持仓' if holdings else '无持仓'}"
+        f"）· 信号日期 = 最近触发日（近10日）*",
         "",
-        "| 代码 | 名称 | 信号日期 | 强度 | 历史5日胜率 | 来源策略 |",
-        "|---|---|---|---|---|---|",
+        "| 代码 | 名称 | 信号日期 | 强度 | 历史5日胜率 | 来源策略 | 持仓 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         wr = f"{r['win_rate']:.0f}%" if r["win_rate"] else "样本不足"
         src = r.get("alt_strategy", strategy)
+        is_held = "📌" if r["symbol"] in held_set else ""
         lines.append(f"| {r['symbol']} | {r['name']} | {r['signal_date']} | "
-                     f"{r['strength']:.0f} | {wr} | {src} |")
+                     f"{r['strength']:.0f} | {wr} | {src} | {is_held} |")
     tip = get_strategy_tip(strategy)
     lines.append(f"\n**策略说明**：{tip.splitlines()[0] if tip else ''}")
     lines.append("\n⚠️ **重要说明**：此清单是*当前信号候选*，非预测上涨。"
@@ -930,6 +945,10 @@ def portfolio_table() -> pd.DataFrame:
         from pa_mcp.data.symbols import get_stock_name
         if "name" not in df.columns:
             df.insert(0, "name", df["symbol"].map(get_stock_name))
+        # datetime 列转字符串（Gradio DataFrame 渲染友好）
+        for col in df.columns:
+            if str(df[col].dtype).startswith("datetime"):
+                df[col] = df[col].astype(str).str[:10]
         return df
     except Exception:
         return pd.DataFrame(columns=["symbol", "name", "cost", "shares", "added_date"])
