@@ -174,7 +174,10 @@ def analyze_stock(symbol: str, days: int = 120) -> tuple[Any, str, str, str]:
         ma20 = df["close"].rolling(20).mean().iloc[-1]
         trend = "多头" if last["close"] > ma20 else "空头"
 
+        from pa_mcp.data.symbols import get_stock_name
+        stock_name = get_stock_name(symbol)
         summary = (
+            f"**{symbol} {stock_name}**\n"
             f"最新收盘 {last['close']:.2f}（{pct:+.2f}%），MA20 {ma20:.2f} → {trend}趋势。\n"
             f"数据源：{source}，{len(df)} 根K线。"
         )
@@ -231,6 +234,11 @@ def _rule_based_reply(message: str) -> str:
     if len(codes) >= 2 and ("对比" in message or "比较" in message or "哪个" in message):
         fig, summary = compare_stocks_ui(",".join(codes))
         return summary or "对比失败"
+
+    # 工具0.5: 股票名称查询（"xxx是什么股票/代码xxx是什么"）
+    if sym and ("什么股票" in message or "是什么" in message or "叫什么" in message):
+        from pa_mcp.data.symbols import get_stock_name
+        return f"**{sym}** = {get_stock_name(sym)}"
 
     # 工具1: 持仓体检
     if "体检" in message or "持仓" in message:
@@ -364,6 +372,8 @@ def compare_stocks_ui(symbols_str: str) -> tuple[Any, str]:
     if len(syms) > 5:
         return None, "最多对比 5 只"
 
+    from pa_mcp.data.symbols import get_stock_name
+
     fig = go.Figure()
     rows = []
     for sym in syms:
@@ -376,7 +386,9 @@ def compare_stocks_ui(symbols_str: str) -> tuple[Any, str]:
             # 归一化（首日=100）
             base = df["close"].iloc[0]
             norm = df["close"] / base * 100
-            fig.add_trace(go.Scatter(x=df["date"], y=norm, name=sym,
+            name = get_stock_name(sym)
+            fig.add_trace(go.Scatter(x=df["date"], y=norm,
+                                     name=f"{sym} {name}",
                                      line=dict(width=1.8)))
 
             # 估值快照
@@ -390,7 +402,7 @@ def compare_stocks_ui(symbols_str: str) -> tuple[Any, str]:
 
             ret20 = (df["close"].iloc[-1] / df["close"].iloc[-21] - 1) * 100 if len(df) > 21 else 0
             rows.append({
-                "symbol": sym, "source": source,
+                "symbol": sym, "name": get_stock_name(sym), "source": source,
                 "close": round(float(df["close"].iloc[-1]), 2),
                 "ret20_pct": round(float(ret20), 2),
                 "pe": pe, "pb": pb, "mcap_亿": mcap,
@@ -400,12 +412,12 @@ def compare_stocks_ui(symbols_str: str) -> tuple[Any, str]:
 
     fig.update_layout(title="多股归一化对比（首日=100）", template="plotly_white",
                       height=420, legend=dict(orientation="h", y=1.02))
-    summary = "| 代码 | 现价 | 20日涨跌% | PE | PB | 市值(亿) |\n|---|---|---|---|---|---|\n"
+    summary = "| 代码 | 名称 | 现价 | 20日涨跌% | PE | PB | 市值(亿) |\n|---|---|---|---|---|---|---|\n"
     for r in rows:
         if "error" in r:
-            summary += f"| {r['symbol']} | — | — | — | — | {r['error']} |\n"
+            summary += f"| {r['symbol']} | — | — | — | — | — | {r['error']} |\n"
         else:
-            summary += (f"| {r['symbol']} | {r['close']} | {r['ret20_pct']:+.1f} | "
+            summary += (f"| {r['symbol']} | {r['name']} | {r['close']} | {r['ret20_pct']:+.1f} | "
                         f"{r['pe'] or '—'} | {r['pb'] or '—'} | {r['mcap_亿'] or '—'} |\n")
     summary += "\n*免费行情，可能有延迟。研究参考，非投资建议。*"
     return fig, summary
@@ -748,11 +760,15 @@ def portfolio_table() -> pd.DataFrame:
     store = _get_store()
     try:
         if not store.table_exists("portfolio"):
-            return pd.DataFrame(columns=["symbol", "cost", "shares", "added_date"])
+            return pd.DataFrame(columns=["symbol", "name", "cost", "shares", "added_date"])
         df = store.query_df("SELECT * FROM portfolio ORDER BY added_date DESC")
+        # 补名称列
+        from pa_mcp.data.symbols import get_stock_name
+        if "name" not in df.columns:
+            df.insert(0, "name", df["symbol"].map(get_stock_name))
         return df
     except Exception:
-        return pd.DataFrame(columns=["symbol", "cost", "shares", "added_date"])
+        return pd.DataFrame(columns=["symbol", "name", "cost", "shares", "added_date"])
 
 
 def portfolio_add_ui(symbol: str, cost: float, shares: int) -> str:
