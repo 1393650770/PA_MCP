@@ -1723,6 +1723,30 @@ def strategy_compare_ui(symbols: str) -> str:
         return f"策略对比失败：{str(e)[:200]}"
 
 
+def factor_sensitivity_ui(symbols: str) -> str:
+    """预测权重敏感性：各权重组合回测对比 → 最优权重。"""
+    try:
+        from pa_mcp.research.factors import (
+            sensitivity_analysis, format_sensitivity)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 5:
+            return "至少需要 5 只股票"
+        klines = {}
+        for sym in pool:
+            df = _load_long_history(sym)
+            if not df.empty:
+                klines[sym] = df
+        if len(klines) < 5:
+            return f"仅 {len(klines)} 只股票有行情（需 ≥5）"
+        result = sensitivity_analysis(klines)
+        if "error" in result and not result.get("results"):
+            return result["error"]
+        return format_sensitivity(result)
+    except Exception as e:
+        return f"敏感性分析失败：{str(e)[:200]}"
+
+
 def factor_portfolio_ui(symbols: str) -> str:
     """因子选股组合回测（滚动选股 → 共享账本组合）。"""
     try:
@@ -2570,6 +2594,12 @@ def build_app():
             fpb_out = gr.Markdown()
             fpb_btn.click(factor_portfolio_ui, inputs=[fs_pool],
                           outputs=[fpb_out])
+
+            sens_btn = gr.Button("⚖️ 预测权重敏感性（AI 该占多大权重）",
+                                 variant="secondary")
+            sens_out = gr.Markdown()
+            sens_btn.click(factor_sensitivity_ui, inputs=[fs_pool],
+                           outputs=[sens_out])
 
             cmp_btn = gr.Button("🏁 全策略事件研究对比（10 策略同台检验）",
                                 variant="secondary")

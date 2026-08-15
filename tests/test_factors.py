@@ -195,6 +195,34 @@ def test_backtest_factor_selection_insufficient():
     assert "error" in r  # 数据不足训练窗口
 
 
+def test_sensitivity_analysis():
+    """敏感性：返回各权重结果 + 最优权重；use_llm=False 成本可控。"""
+    from pa_mcp.research.factors import sensitivity_analysis
+    klines = {f"6000{i:02d}": _regime_df(seed=i) for i in range(1, 7)}
+    r = sensitivity_analysis(klines, top_n=3, horizon=5,
+                             train_window=100,
+                             weights=(0.0, 0.5, 1.0))
+    assert "error" not in r or r.get("results")
+    assert len(r["results"]) == 3
+    valid = [x for x in r["results"] if "error" not in x]
+    if valid:
+        assert r["best_weight"] in (0.0, 0.5, 1.0)
+        assert r["best_excess_pct"] is not None
+        text = __import__(
+            "pa_mcp.research.factors", fromlist=["format_sensitivity"]
+        ).format_sensitivity(r)
+        assert "权重" in text and "结论" in text
+
+
+def test_predict_use_llm_flag():
+    """use_llm=False 强制确定性（成本控制开关）。"""
+    import asyncio as _asyncio
+    from pa_mcp.agent.prediction import PredictionService
+    r = _asyncio.run(PredictionService().predict(
+        "600001", _regime_df(n=150, seed=3), horizon="5d", use_llm=False))
+    assert r.mode == "deterministic"
+
+
 def test_register_custom_factor():
     """自定义因子注册 + 检验。"""
     reg = get_factor_registry()

@@ -344,7 +344,8 @@ def select_stocks_by_factors(
             svc = get_prediction_service()
             for sym, df in klines.items():
                 try:
-                    r = _asyncio.run(svc.predict(sym, df, horizon="5d"))
+                    r = _asyncio.run(svc.predict(
+                        sym, df, horizon="5d", use_llm=False))
                     p = r.to_dict()
                     d = p["direction"]
                     if d == "up":
@@ -427,12 +428,14 @@ def backtest_factor_selection(
     horizon: int = 5,
     train_window: int = 120,
     initial_cash: float = 100_000.0,
+    prediction_weight: float = 0.0,
 ) -> dict[str, Any]:
     """滚动窗口因子选股组合回测。
 
     流程：
       1. 对齐日历，从 train_window 起每 horizon 天调仓一次
       2. 每个调仓日：用过去 train_window 天做 pooled 截面 IC → 选 top N
+         （prediction_weight > 0 时融合确定性 AI 预测概率，控制成本）
       3. 信号：top N 发 bullish（买入）、池内其余发 bearish（卖出/调出）
          ——等权再平衡，延迟一天执行（引擎语义）
       4. 复用 PortfolioBacktestEngine（共享账本/单票10%/T+1/费用）
@@ -445,6 +448,7 @@ def backtest_factor_selection(
         horizon: 调仓周期（交易日）
         train_window: IC 训练窗口
         initial_cash: 初始资金
+        prediction_weight: AI 预测融合权重 0-1（回测内用确定性预测）
     """
     from pa_mcp.portfolio.backtest import PortfolioBacktestEngine
 
@@ -475,7 +479,8 @@ def backtest_factor_selection(
             sub = d[d["date"].astype(str).str[:10] <= end_date]
             train_klines[sym] = sub.tail(train_window)
         sel = select_stocks_by_factors(
-            train_klines, top_n=top_n, horizon=horizon)
+            train_klines, top_n=top_n, horizon=horizon,
+            prediction_weight=prediction_weight)
         if "error" in sel:
             continue
         top = sel["top_symbols"]
@@ -531,6 +536,82 @@ def backtest_factor_selection(
             - float(getattr(bench, "total_return_pct", 0) or 0), 2),
         "note": "基准 = 全池等权（无选股）。研究参考，非投资建议。",
     }
+
+
+# ---- 预测权重敏感性分析 ----
+
+def sensitivity_analysis(
+    klines: dict[str, pd.DataFrame],
+    top_n: int = 5,
+    horizon: int = 5,
+    train_window: int = 120,
+    weights: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
+) -> dict[str, Any]:
+    """预测权重敏感性：各权重下因子选股组合回测 → 最优权重。
+
+    复用 backtest_factor_selection（预测融合用确定性模式，控制成本）——
+    数据回答「AI 预测该占多大权重」。
+
+    Returns:
+        results: 每权重 {weight, total_return, excess, max_drawdown}
+        best_weight: 超额收益最高的权重
+    """
+    rows = []
+    for w in weights:
+        try:
+            r = backtest_factor_selection(
+                klines, top_n=top_n, horizon=horizon,
+                train_window=train_window, prediction_weight=w)
+            if "error" in r:
+                rows.append({"weight": w, "error": r["error"]})
+                continue
+            rows.append({
+                "weight": w,
+                "total_return_pct": r["portfolio"]["total_return_pct"],
+                "excess_return_pct": r["excess_return_pct"],
+                "max_drawdown_pct": r["portfolio"]["max_drawdown_pct"],
+                "sharpe_ratio": r["portfolio"]["sharpe_ratio"],
+            })
+        except Exception as e:  # noqa: BLE001
+            rows.append({"weight": w, "error": str(e)[:60]})
+
+    valid = [r for r in rows if "error" not in r]
+    if not valid:
+        return {"error": "全部权重回测失败", "results": rows}
+    best = max(valid, key=lambda r: r["excess_return_pct"])
+    return {
+        "method": ("预测权重敏感性：各权重下因子选股组合回测对比"
+                   "（预测用确定性模式，控制成本）"),
+        "results": rows,
+        "best_weight": best["weight"],
+        "best_excess_pct": best["excess_return_pct"],
+        "recommendation": (
+            f"最优权重 {best['weight']:.0%}（超额 {best['excess_return_pct']:+.2f}%）"
+            if best["excess_return_pct"] is not None else "数据不足"),
+    }
+
+
+def format_sensitivity(result: dict[str, Any]) -> str:
+    """敏感性结果 → markdown。"""
+    if "error" in result and not result.get("results"):
+        return f"敏感性分析不可用：{result['error']}"
+    lines = [
+        f"## ⚖️ 预测权重敏感性分析",
+        f"**方法**：{result.get('method', '')}",
+        "",
+        "| 权重 | 总收益% | 超额% | 回撤% | Sharpe |",
+        "|---|---|---|---|---|",
+    ]
+    for r in result["results"]:
+        if "error" in r:
+            lines.append(f"| {r['weight']:.0%} | ❌ {r['error']} |")
+            continue
+        lines.append(f"| {r['weight']:.0%} | {r['total_return_pct']} | "
+                     f"{r['excess_return_pct']:+.2f} | "
+                     f"{r['max_drawdown_pct']} | {r['sharpe_ratio']} |")
+    lines.append(f"\n**结论**：{result.get('recommendation', '—')}")
+    lines.append("\n*权重 0 = 纯因子，1 = 纯预测。研究参考，非投资建议。*")
+    return "\n".join(lines)
 
 
 def format_portfolio_backtest(result: dict[str, Any]) -> str:

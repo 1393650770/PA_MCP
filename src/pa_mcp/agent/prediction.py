@@ -376,10 +376,15 @@ class PredictionService:
 
     # ---- 核心预测 ----
     async def predict(self, symbol: str, kline_df: pd.DataFrame,
-                      horizon: str = "5d") -> PredictionResult:
+                      horizon: str = "5d", use_llm: bool = True) -> PredictionResult:
         """对 symbol 做未来 horizon 个交易日预测。
 
-        horizon: "5d"（短线）或 "20d"（中线）。
+        Args:
+            symbol: 股票代码
+            kline_df: 日 K 线
+            horizon: "5d"（短线）或 "20d"（中线）
+            use_llm: True = LLM 优先（无配置自动降级）；False = 强制
+                确定性统计预测（批量/敏感性分析时控制成本）
         """
         horizon = horizon if horizon in ("5d", "20d") else "5d"
         today = date.today().isoformat()
@@ -387,10 +392,10 @@ class PredictionService:
         if "error" in features:
             raise ValueError(f"无法抽取 {symbol} 的 K 线特征：{features['error']}")
 
-        # 尝试 LLM，失败/未配置则确定性降级
+        # 尝试 LLM（use_llm=False 时跳过），失败/未配置则确定性降级
         try:
             from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter()
+            adapter = get_llm_adapter() if use_llm else None
             if adapter is not None:
                 return await self._predict_with_llm(
                     adapter, symbol, today, horizon, features, kline_df)

@@ -2073,6 +2073,54 @@ async def strategy_compare(symbols: str = "") -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def factor_prediction_sensitivity(symbols: str, top_n: int = 5) -> dict[str, Any]:
+    """预测权重敏感性分析：AI 预测在选股里该占多大权重。
+
+    对权重 0/0.25/0.5/0.75/1.0 各跑因子选股组合回测（预测融合用
+    确定性模式控制成本）→ 对比超额收益 → 推荐最优权重。
+    「数据回答权重，而非拍脑袋」。
+
+    Args:
+        symbols: 股票池（逗号分隔，≥5 只）
+        top_n: 每期持仓数量
+    """
+    try:
+        from pa_mcp.research.factors import (
+            sensitivity_analysis, format_sensitivity)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 5:
+            return _response(success=False,
+                             error="至少需要 5 只股票", error_type="INVALID_ARGUMENT")
+        klines = {}
+        for sym in pool:
+            try:
+                df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 400", [sym]) if _store else None
+                if df is None or df.empty:
+                    kdf, _ = await _get_kline_fallback(sym, days=400)
+                    df = kdf
+                if df is not None and not df.empty:
+                    klines[sym] = df
+            except Exception:
+                continue
+        if len(klines) < 5:
+            return _response(success=False,
+                             error=f"仅 {len(klines)} 只股票有数据（需 ≥5）",
+                             error_type="DATA_UNAVAILABLE")
+
+        result = sensitivity_analysis(klines, top_n=top_n)
+        if "error" in result and not result.get("results"):
+            return _response(success=False, error=result["error"],
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={**result, "report": format_sensitivity(result)})
+    except Exception as e:
+        logger.error("factor_prediction_sensitivity failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def factor_portfolio_backtest(symbols: str, top_n: int = 5,
                                     horizon: int = 5,
                                     train_window: int = 120) -> dict[str, Any]:
