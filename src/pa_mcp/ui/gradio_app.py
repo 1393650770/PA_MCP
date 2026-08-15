@@ -3060,6 +3060,38 @@ def build_app():
             tk_btn.click(turtle_position_ui, inputs=[bt_sym, bt_cash],
                          outputs=[tk_out])
 
+        with gr.Tab("📚 研究总览"):
+            gr.Markdown("**研究工具聚合页**——共享股票池，一键访问全部研究能力。")
+            with gr.Row():
+                ov_pool = gr.Textbox(
+                    label="研究股票池（逗号分隔，≥5 只效果最佳）",
+                    value="000001,600036,300750,000858,600519,601318",
+                    scale=3)
+                ov_run = gr.Button("📋 AI 研究报告（一键全链）",
+                                   variant="primary", scale=1)
+            ov_out = gr.Markdown()
+            ov_run.click(ai_report_ui, inputs=[ov_pool], outputs=[ov_out])
+
+            with gr.Row():
+                ov_cmp = gr.Button("🏁 全策略对比")
+                ov_fs = gr.Button("🧬 因子扫描")
+                ov_sel = gr.Button("🎯 因子选股")
+                ov_vm = gr.Button("⚖️ 价值动量")
+                ov_gra = gr.Button("📗 格雷厄姆")
+                ov_ms = gr.Button("🏛️ 市场结构")
+            ov_cmp.click(strategy_compare_ui, inputs=[ov_pool],
+                         outputs=[ov_out])
+            ov_fs.click(lambda: factor_scan_ui(
+                ov_pool.value.split(",")[0].strip()),
+                outputs=[ov_out])
+            ov_sel.click(factor_selection_ui, inputs=[ov_pool],
+                         outputs=[ov_out])
+            ov_vm.click(value_momentum_ui, inputs=[ov_pool],
+                        outputs=[ov_out])
+            ov_gra.click(graham_ui, inputs=[ov_pool], outputs=[ov_out])
+            ov_ms.click(market_structure_ui, outputs=[ov_out])
+            gr.Markdown("全部输出研究参考，非投资建议。详细工具见各专用 Tab。")
+
         with gr.Tab("🔮 市场预测"):
             gr.Markdown("**AI 未来走势预测**：基于 K 线技术特征预测方向/概率/关键价位，"
                         "预测落盘可验证命中率（不做纯算命）。")
