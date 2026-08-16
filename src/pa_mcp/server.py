@@ -1580,13 +1580,15 @@ async def watchlist_overview() -> dict[str, Any]:
 # ---- MCP Tools: Agent (Full Integration) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep","debate"] = "fast") -> dict[str, Any]:
+async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep","debate"] = "deep") -> dict[str, Any]:
     """AI-powered multi-dimensional stock analysis.
+
+    默认 'deep'（5 分析师并行 + 组合经理合成 + RiskGuard 仓位上限）。
 
     Args:
         symbol: Stock code (e.g., '000001')
-        depth: 'fast' (single call, ~15s) or 'deep' (5 analysts + PM, ~60s)
-               or 'debate' (deep + Bull/Bear 辩论 + 投资大师裁定, ~90s)
+        depth: 'deep' (default, 5 analysts + PM, ~60s) or 'fast' (single call,
+               ~15s) or 'debate' (deep + Bull/Bear 辩论 + 投资大师裁定, ~90s)
     """
     try:
         from pa_mcp.agent.orchestrator import get_orchestrator
@@ -1657,6 +1659,31 @@ async def agent_analyze_stock(symbol: str, depth: Literal["fast","deep","debate"
     except Exception as e:
         logger.error("agent_analyze_stock failed", symbol=symbol, error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def agent_debate_picks(symbols: str, top_n: int = 3) -> dict[str, Any]:
+    """选股多 Agent 辩论：对候选股票逐一 Bull/Bear 辩论 + 3 位投资大师裁定。
+
+    对任意选股工具（CANSLIM/因子选股/价值动量/格雷厄姆）的候选清单，
+    逐一运行深度辩论（格雷厄姆价值/索罗斯反身性/利弗莫尔趋势并行合议），
+    输出每票裁定方向/大师团分数/建议仓位 + 置信加权排名。
+
+    Args:
+        symbols: 候选代码（逗号分隔，如 "300750,600036,000858"）
+        top_n: 最多辩论几只（默认 3，每票 ≈90s + 5 次 LLM 调用；≤5）
+
+    注意：需要 LLM 配置；未配置时降级为确定性规则分析并明确标注。
+    """
+    try:
+        from pa_mcp.research.debate_picks import debate_picks
+        syms = [s.strip() for s in symbols.split(",") if s.strip()]
+        result = await debate_picks(syms, top_n=top_n)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("agent_debate_picks failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -4499,7 +4526,7 @@ async def pa_help() -> dict[str, Any]:
                 "1. get_methodology_guide() — newbie decision map: environment → method → validation → LLM",
                 "2. agent_market_diagnosis() — market regime diagnosis + strategy routing",
                 "3. one_click_analysis() — full research pipeline from market to holdings",
-                "4. agent_analyze_stock(symbol, depth='fast') — multi-dim AI analysis",
+                "4. agent_analyze_stock(symbol) — multi-dim AI analysis (默认 5 分析师 deep)",
             ],
             "daily_analysis": [
                 "1. agent_morning_brief() — pre-market briefing + today's watchlist",
@@ -4512,7 +4539,7 @@ async def pa_help() -> dict[str, Any]:
                 "1. get_stock_info(symbol) — basic info",
                 "2. get_kline(symbol) — price history",
                 "3. get_major_events(symbol) — block trades, lockup, insider, pledge",
-                "4. agent_analyze_stock(symbol, depth='fast') — multi-dim analysis",
+                "4. agent_analyze_stock(symbol) — multi-dim deep analysis (默认 5 分析师)",
                 "5. agent_compare_stocks('000001,000002') — side-by-side comparison",
             ],
             "portfolio_management": [

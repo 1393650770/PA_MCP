@@ -3127,6 +3127,28 @@ def portfolio_remove_ui(symbol: str) -> tuple[str, pd.DataFrame]:
         return f"❌ 删除失败：{str(e)[:150]}", portfolio_table()
 
 
+def method_evaluation_ui() -> str:
+    """开源方法评价：量化方法可信度 + 理财方法评估状态 + 持仓×方法。"""
+    try:
+        import asyncio
+        from pa_mcp.research.method_evaluation import evaluate_methods_report
+        return asyncio.run(evaluate_methods_report())["report"]
+    except Exception as e:
+        return f"方法评价生成失败：{str(e)[:200]}"
+
+
+def debate_picks_ui(symbols: str) -> str:
+    """选股多 Agent 辩论：候选逐一 Bull/Bear 辩论 + 3 大师裁定。"""
+    try:
+        import asyncio
+        from pa_mcp.research.debate_picks import debate_picks
+        syms = [s.strip() for s in symbols.split(",") if s.strip()]
+        result = asyncio.run(debate_picks(syms, top_n=3))
+        return result.get("report", result.get("error", "无结果"))
+    except Exception as e:
+        return f"选股辩论失败：{str(e)[:200]}"
+
+
 def portfolio_review_ui() -> str:
     """持仓体检（独立实现，不依赖 MCP server 全局状态）。"""
     try:
@@ -3716,11 +3738,15 @@ def build_app():
             ov_ms.click(market_structure_ui, outputs=[ov_out])
 
             with gr.Row():
+                ov_deb = gr.Button("⚔️ 选股多 Agent 辩论（Bull/Bear+3 大师）",
+                                   variant="secondary")
                 ov_risk = gr.Button("🛡️ 持仓风险面板")
                 ov_mp = gr.Button("🔮 多股预测对比")
                 ov_sent = gr.Button("🌡️ 游资情绪周期")
                 ov_res = gr.Button("🎯 预测共振")
             ov_risk.click(portfolio_risk_ui, outputs=[ov_out])
+            ov_deb.click(debate_picks_ui, inputs=[ov_pool],
+                         outputs=[ov_out])
             ov_mp.click(predict_multi_ui, inputs=[ov_pool],
                         outputs=[ov_out])
             ov_sent.click(sentiment_cycle_ui, outputs=[ov_out])
@@ -3884,6 +3910,9 @@ def build_app():
                     p_review = gr.Markdown()
                     p_sig_btn = gr.Button("📡 持仓策略信号", variant="secondary")
                     p_sig = gr.Markdown()
+                    p_meth_btn = gr.Button("🔍 开源方法评价（理财+量化）",
+                                           variant="secondary")
+                    p_meth = gr.Markdown()
                     ai_out = gr.Markdown()
 
             p_add.click(portfolio_add_ui, inputs=[p_sym, p_cost, p_shares],
@@ -3892,6 +3921,7 @@ def build_app():
                         outputs=[p_status, p_table])
             p_review_btn.click(portfolio_review_ui, outputs=[p_review])
             p_sig_btn.click(portfolio_strategy_signals, outputs=[p_sig])
+            p_meth_btn.click(method_evaluation_ui, outputs=[p_meth])
             ai_btn.click(portfolio_ai_analysis, inputs=[ai_sym],
                          outputs=[ai_out])
             app.load(portfolio_table, outputs=[p_table])

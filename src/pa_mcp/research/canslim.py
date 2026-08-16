@@ -112,7 +112,13 @@ class CanslimScanner:
                 fdf = fin.get(sym)
                 if df is None or df.empty:
                     continue
-                factors = self._evaluate(sym, df, fdf, market_state, rs_ranks)
+                try:
+                    factors = self._evaluate(sym, df, fdf, market_state,
+                                             rs_ranks)
+                except Exception as e:  # noqa: BLE001 单票失败跳过，不拖垮全池
+                    logger.debug("canslim evaluate failed", symbol=sym,
+                                 error=str(e))
+                    continue
                 score = sum(1 for f in factors if f.passed)
                 overall = self._overall(score, market_state, factors)
                 results.append(CanslimResult(
@@ -213,8 +219,13 @@ class CanslimScanner:
 
             results = []
             for sym in klines:
-                factors = self._evaluate(sym, klines[sym], fin.get(sym),
-                                         market_state, rs_ranks)
+                try:
+                    factors = self._evaluate(sym, klines[sym], fin.get(sym),
+                                             market_state, rs_ranks)
+                except Exception as e:  # noqa: BLE001 单票失败跳过
+                    logger.debug("canslim async evaluate failed", symbol=sym,
+                                 error=str(e))
+                    continue
                 score = sum(1 for f in factors if f.passed)
                 results.append(CanslimResult(
                     symbol=sym, name=self._stock_name(sym, store),
@@ -280,12 +291,22 @@ class CanslimScanner:
             return None
 
     def _relative_strength(self, klines: dict[str, pd.DataFrame]) -> dict[str, float]:
-        """池内 60 日收益率 → 分位（0-1，1=最强）。"""
+        """池内 60 日收益率 → 分位（0-1，1=最强）。
+
+        脏数据防护：价格非正/NaN/除零的股票跳过（不拖垮全池）。
+        """
         rets: dict[str, float] = {}
         for sym, df in klines.items():
             if len(df) < L_WINDOW + 1:
                 continue
-            rets[sym] = float(df["close"].iloc[-1] / df["close"].iloc[-L_WINDOW - 1] - 1)
+            try:
+                base = float(df["close"].iloc[-L_WINDOW - 1])
+                last = float(df["close"].iloc[-1])
+                if base <= 0 or last <= 0 or pd.isna(base) or pd.isna(last):
+                    continue
+                rets[sym] = last / base - 1
+            except Exception:  # noqa: BLE001 单票脏数据跳过
+                continue
         if not rets:
             return {}
         ranks = pd.Series(rets).rank(pct=True)

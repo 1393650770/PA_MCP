@@ -155,7 +155,7 @@ PA_MCP 有 10 个 UI Tab、92 个 MCP 工具。新手最容易迷失的三个问
 }
 ```
 
-**推荐调用序列**（新手场景）：`pa_help`（看全貌）→ `get_methodology_guide`（读地图）→ `agent_market_diagnosis`（环境）→ `one_click_analysis`（全流水线）→ 按地图推荐用 `scan_market`/`scan_canslim` 等 → `research_event_study`（验证）→ `agent_analyze_stock(depth='fast')`（AI 解读）。
+**推荐调用序列**（新手场景）：`pa_help`（看全貌）→ `get_methodology_guide`（读地图）→ `agent_market_diagnosis`（环境）→ `one_click_analysis`（全流水线）→ 按地图推荐用 `scan_market`/`scan_canslim` 等 → `research_event_study`（验证）→ `agent_analyze_stock`（AI 解读，默认 5 分析师 deep）。
 
 **Prompt 示例**：
 
@@ -170,8 +170,8 @@ PA_MCP 有 10 个 UI Tab、92 个 MCP 工具。新手最容易迷失的三个问
 
 | 档位 | 调用量 | 典型场景 | 建议频率 |
 |---|---|---|---|
-| fast（`depth='fast'`） | ≈8K tokens/次 | 日常看个股 | 每票每天 1 次 |
-| deep（`depth='deep'`） | ≈50K tokens/次 | 决策前深度研究 | 决策点/周 ≤3 票 |
+| fast（`depth='fast'`） | ≈8K tokens/次 | 快速盘面（需显式指定） | 日常快速查看 |
+| deep（`depth='deep'`，**默认**） | ≈50K tokens/次 | 5 分析师并行+PM 合成+仓位上限 | 每票每次分析 |
 | debate（`depth='debate'`） | 50K+5 次额外调用 | 重大分歧标的 | 罕见（默认关闭） |
 | `ai_market_report` | ≈2-4K tokens/次 | 周度综述 | 每周 1 次 |
 | `predict_market` | 1 次/票/周期 | 预测 1d/5d/20d | 关注标的 ≤5 只 |
