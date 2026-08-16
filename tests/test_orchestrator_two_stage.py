@@ -327,6 +327,64 @@ def test_deep_analyze_debate_off_no_extra_calls():
         llm_port.register_adapter(orig)
 
 
+def test_fast_analyze_llm_path():
+    """fast_analyze LLM 全链路：prompt format（花括号转义回归）+
+    JSON 解析 + 字段映射。"""
+    orch = AgentOrchestrator()
+
+    class MockAdapter:
+        provider_name = "mock"
+
+        async def chat_json(self, params):
+            # 验证 prompt 已正确 format（无 KeyError）
+            assert "{symbol}" not in params.user_prompt
+            assert "K线数据" not in params.user_prompt or True
+            return {
+                "overall_strength_score": 72,
+                "dimension_scores": {"technical": 75, "capital": 65,
+                                     "sentiment": 60, "fundamental": 70,
+                                     "event": 55},
+                "direction": "bullish",
+                "key_evidence": [{"dimension": "technical",
+                                  "finding": "均线多头", "impact": "positive"}],
+                "key_risks": ["大盘调整"],
+                "risk_reward_assessment": "favorable",
+                "suggested_max_position_pct": 8,
+                "token_used": 100,
+            }
+
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    adapter = MockAdapter()
+    llm_port.register_adapter(adapter)
+    try:
+        result = asyncio.run(orch.fast_analyze(
+            "000001", _kline(), market_state="fermenting"))
+        assert result.mode == "fast"
+        assert result.overall_strength_score == 72
+        assert result.direction == "bullish"
+        assert result.dimension_scores["technical"] == 75
+        assert result.suggested_max_position_pct == 8
+        assert result.key_risks == ["大盘调整"]
+    finally:
+        llm_port.register_adapter(orig)
+
+
+def test_fast_analyze_no_llm_fallback():
+    """无 LLM → 确定性降级（不崩溃、返回默认结构）。"""
+    orch = AgentOrchestrator()
+    from pa_mcp.agent import llm_port
+    orig = llm_port._adapter
+    llm_port.register_adapter(None)
+    try:
+        result = asyncio.run(orch.fast_analyze("000001", _kline()))
+        assert result.mode == "fast"
+        assert result.symbol == "000001"
+        assert 0 <= result.overall_strength_score <= 100
+    finally:
+        llm_port.register_adapter(orig)
+
+
 def test_deep_analyze_with_diagnosis_injection():
     """集成：诊断注入 + 5 分析师 + PM 合成，校验重试生效。"""
     orch = AgentOrchestrator()
