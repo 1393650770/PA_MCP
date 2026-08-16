@@ -35,25 +35,35 @@ async def one_click_report(symbols: Optional[list[str]] = None,
     pool = [s.strip() for s in (symbols or DEFAULT_POOL) if s.strip()][:6]
     sections: list[tuple[str, str]] = []
 
+    # 前置：行情/板块/指数/情绪 缺失自动补（网络可用时拉真实，失败降级）
+    try:
+        from pa_mcp.data.readiness import ensure_readiness
+        from pa_mcp.data.readiness import (
+            NEED_SECTOR, NEED_INDEX, NEED_SENTIMENT)
+        await ensure_readiness({**NEED_SENTIMENT, **NEED_SECTOR,
+                                **NEED_INDEX})
+    except Exception:
+        pass
+
     # 阶段1：市场体检
     try:
         from pa_mcp.data.quality_report import get_quality_report
         q = get_quality_report().generate()
-        sections.append(("🩺 数据体检", f"健康评分 {q['score']}/100（{q['summary'][:40]}…）"))
+        sections.append(("🩺 数据体检", q["summary"]))
     except Exception as e:  # noqa: BLE001
         sections.append(("🩺 数据体检", f"不可用：{e}"))
 
-    # 阶段2：市场结构
+    # 阶段2：市场结构（允许网络拉指数）
     try:
         from pa_mcp.research.market_structure import MarketStructureAnalyzer
-        ms = await MarketStructureAnalyzer().analyze(use_network=False)
+        ms = await MarketStructureAnalyzer().analyze(use_network=True)
         if ms["index"]["rows"] > 0:
             j = ms["joint"]
             sections.append(("🏛️ 市场结构",
                              f"指数 {ms['index']['last_close']}（{ms['index']['last_date']}）"
                              f"：{j['bias']}——{j['structure']}；{j['environment']}"))
         else:
-            sections.append(("🏛️ 市场结构", "指数数据不可用"))
+            sections.append(("🏛️ 市场结构", "指数数据不可用（网络拉取也失败）"))
     except Exception as e:  # noqa: BLE001
         sections.append(("🏛️ 市场结构", f"不可用：{e}"))
 
@@ -66,7 +76,7 @@ async def one_click_report(symbols: Optional[list[str]] = None,
     except Exception as e:  # noqa: BLE001
         sections.append(("🧭 情绪矩阵", f"不可用：{e}"))
 
-    # 阶段4：板块轮动
+    # 阶段4：板块轮动（自动合成降级）
     try:
         from pa_mcp.research.sector_rotation import SectorRotationAnalyzer
         a = SectorRotationAnalyzer().analyze()
