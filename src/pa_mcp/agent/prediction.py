@@ -400,7 +400,7 @@ class PredictionService:
                 return await self._predict_with_llm(
                     adapter, symbol, today, horizon, features, kline_df)
         except Exception as e:  # noqa: BLE001
-            logger.warning("LLM 预测失败，降级为确定性预测", symbol=symbol, error=str(e))
+            logger.warning("LLM 预测失败，降级为确定性预测: %s / %s", symbol, e)
 
         return self._predict_deterministic(symbol, today, horizon, features)
 
@@ -433,7 +433,7 @@ class PredictionService:
         errors = self._validate_llm_json(raw)
         if errors:
             # 校验失败 → 反馈错误重试一次（借鉴 PA_Agent validation_retry 机制）
-            logger.info("预测 JSON 校验失败，重试一次", errors=errors)
+            logger.info("预测 JSON 校验失败，重试一次: %s", errors)
             retry_prompt = (
                 f"{user_prompt}\n\n【校验错误，请修正后重新输出完整 JSON】\n"
                 + "\n".join(f"- {e}" for e in errors)
@@ -475,7 +475,7 @@ class PredictionService:
                     f"（{ms['index']['last_date']}）：{j['bias']}——"
                     f"{j['structure']}。大盘方向应影响个股预测的置信与方向权重。")
         except Exception as e:  # noqa: BLE001
-            logger.debug("market bias context unavailable", error=str(e))
+            logger.debug("market bias context unavailable: %s", e)
             return ""
 
     def _sector_context(self, symbol: str) -> str:
@@ -516,7 +516,7 @@ class PredictionService:
             finally:
                 store.close()
         except Exception as e:  # noqa: BLE001
-            logger.debug("sector context unavailable", symbol=symbol, error=str(e))
+            logger.debug("sector context unavailable: %s / %s", symbol, e)
             return ""
 
     @staticmethod

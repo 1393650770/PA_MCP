@@ -178,7 +178,19 @@ def _gen_kwargs(tool) -> dict[str, Any]:
 
 # ---- 主验证 ----
 
+# LLM 相关工具白名单（--llm 模式：真实 LLM 验证这些）
+LLM_TOOL_WHITELIST = {
+    "agent_analyze_stock", "agent_compare_stocks", "agent_market_diagnosis",
+    "agent_morning_brief", "agent_sector_analysis", "ai_market_report",
+    "predict_market", "predict_market_multi", "predict_position_size",
+    "predict_resonance", "signal_consensus", "watchlist_resonance",
+    "watchlist_consensus", "portfolio_ai_analysis", "get_decision_tree",
+    "scan_market",
+}
+
+
 async def main() -> None:
+    use_llm = "--llm" in sys.argv
     tmp = tempfile.mkdtemp(prefix="pa_mcp_verify_")
     db = _seed(tmp)
 
@@ -201,16 +213,23 @@ async def main() -> None:
     from pa_mcp.data.sources.sina_adapter import SinaAdapter
     server._akshare = AKShareAdapter()
     server._sina = SinaAdapter()
-    # LLM 隔离：强制走「无 LLM 降级」路径（不触发真实 doubao 调用）
+    # LLM 隔离（默认）；--llm 模式用真实 LLM（豆包等）验证 LLM 路径
     import pa_mcp.agent.llm_port as lp
-    lp._adapter = None
     import pa_mcp.agent.llm_factory as lf
-    lf.init_llm_adapter = lambda *a, **k: None  # 阻止 legacy client 重新初始化
     import pa_mcp.agent.llm_client as lc
-    lc._client = None  # 清 legacy 单例缓存（其内部可能已持有真实 adapter）
+    if use_llm:
+        adapter = lf.init_llm_adapter("config/llm_config.json")
+        print(f"LLM 模式：adapter={adapter.provider_name if adapter else None}")
+    else:
+        lp._adapter = None
+        lf.init_llm_adapter = lambda *a, **k: None  # 阻止 legacy 重新初始化
+        lc._client = None  # 清 legacy 单例缓存
 
     tools = server.mcp._tool_manager.list_tools()
-    print(f"=== MCP 工具验证（共 {len(tools)} 个） ===")
+    if use_llm:
+        tools = [t for t in tools if t.name in LLM_TOOL_WHITELIST]
+    print(f"=== MCP 工具验证（{'LLM 白名单' if use_llm else '全部'} "
+          f"共 {len(tools)} 个） ===")
     ok, warn, fail = [], [], []
     for tool in sorted(tools, key=lambda t: t.name):
         name = tool.name
