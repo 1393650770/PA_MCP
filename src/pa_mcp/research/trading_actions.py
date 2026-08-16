@@ -30,14 +30,49 @@ STOP_LOSS_2 = -8.0     # 止损：亏损≥8% + 综合看跌
 DEFAULT_POOL = ["000001", "600036", "300750", "000858", "600519", "601318"]
 
 
-async def trading_actions(symbols: Optional[list[str]] = None) -> dict[str, Any]:
-    """今日操作面板。
+async def trading_actions(symbols: Optional[list[str]] = None,
+                          include_llm: bool = True) -> dict[str, Any]:
+    """今日操作面板（整合版：全信号 + 因子 + LLM 解读）。
+
+    - 规则骨架（止盈止损纪律不可绕过）：盈亏 × 预测 × 共振 × 综合信号
+    - 因子补强：持仓/候选附加多因子合成分
+    - LLM 解读（可选）：持仓操作补充解读 + 买入优先级 + 操作计划
+      （LLM 只解读与排序，不否决规则动作）
 
     Args:
         symbols: 候选股票池（缺省内置 6 只）
+        include_llm: LLM 可用时附加解读（默认 True）
     """
     pool = [s.strip() for s in (symbols or DEFAULT_POOL) if s.strip()][:10]
     out: dict[str, Any] = {"pool": pool}
+
+    # ---- 0. 因子分（池内多因子合成分，供持仓/候选补强） ----
+    factor_scores: dict[str, float] = {}
+    try:
+        from pa_mcp.config import get_settings
+        from pa_mcp.data.store import DuckDBStore
+        from pa_mcp.research.factors import select_stocks_by_factors
+        store = DuckDBStore(get_settings().database.path)
+        store.connect()
+        try:
+            klines = {}
+            for sym in pool:
+                df = store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 150", [sym])
+                if not df.empty:
+                    klines[sym] = df
+        finally:
+            store.close()
+        if len(klines) >= 5:
+            sel = select_stocks_by_factors(klines, top_n=len(klines),
+                                           prediction_weight=0.5)
+            if "error" not in sel:
+                factor_scores = {r["symbol"]: r["score"]
+                                 for r in sel["selection"]}
+    except Exception:
+        pass
+    out["factor_scores"] = {s: round(v, 3) for s, v in factor_scores.items()}
 
     # ---- 1. 操作基调（市场结构 + 情绪矩阵） ----
     tone = {"bias": "未知", "market": "—", "position_advice": "—",
@@ -70,7 +105,7 @@ async def trading_actions(symbols: Optional[list[str]] = None) -> dict[str, Any]
         tone["total_position"] = "中性（≤50%），等待方向明确"
     out["tone"] = tone
 
-    # ---- 2. 持仓操作（止盈止损） ----
+    # ---- 2. 持仓操作（止盈止损 + 因子补强） ----
     holdings_actions: list[dict] = []
     try:
         from pa_mcp.research.portfolio_risk import PortfolioRiskDashboard
@@ -78,14 +113,26 @@ async def trading_actions(symbols: Optional[list[str]] = None) -> dict[str, Any]
         if "error" not in pr:
             for h in pr["holdings"]:
                 action = _holding_action(h)
+                action["factor_score"] = factor_scores.get(
+                    h["symbol"]) if h["symbol"] in factor_scores else None
                 holdings_actions.append(action)
     except Exception as e:  # noqa: BLE001
         logger.warning("持仓分析失败: %s", e)
     out["holdings"] = holdings_actions
 
-    # ---- 3. 买入候选 ----
+    # ---- 3. 买入候选（综合信号 + 因子 + 策略信号） ----
     buys = await _buy_candidates(pool)
+    for b in buys:
+        b["factor_score"] = factor_scores.get(b["symbol"]) \
+            if b["symbol"] in factor_scores else None
     out["buy_candidates"] = buys
+
+    # ---- 4. LLM 深度解读（只解读，不否决规则） ----
+    llm_advice = None
+    if include_llm:
+        llm_advice = await _llm_advice(tone, holdings_actions, buys,
+                                       factor_scores)
+    out["llm_advice"] = llm_advice
 
     # ---- 整合文本 ----
     out["report"] = _render(out)
@@ -168,6 +215,57 @@ async def _buy_candidates(pool: list[str]) -> list[dict]:
     return candidates[:5]
 
 
+async def _llm_advice(tone: dict, holdings: list[dict], buys: list[dict],
+                      factor_scores: dict) -> Optional[dict]:
+    """LLM 深度解读（结构化 JSON）。
+
+    安全边界：LLM 只解读规则动作与排序优先级，不否决止盈止损纪律。
+    """
+    try:
+        from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
+        adapter = get_llm_adapter()
+        if adapter is None:
+            return None
+        holdings_text = "\n".join(
+            f"- {h['symbol']} 盈亏{h['pnl_pct']:+.1f}% 规则动作[{h['action']}]"
+            f"{h['reason'][:40]}"
+            + (f" 因子分{h['factor_score']:+.2f}" if h.get("factor_score")
+               is not None else "")
+            for h in holdings) or "无持仓"
+        buys_text = "\n".join(
+            f"- {b['symbol']} 综合信号强度{b['consensus_strength']:.0%} "
+            f"一致度{b['agreement']:.0%}"
+            + (f" 因子分{b['factor_score']:+.2f}" if b.get("factor_score")
+               is not None else "")
+            for b in buys) or "无候选"
+        params = LLMCallParams(
+            system_prompt=(
+                "你是有经验的 A 股交易辅助助手。只输出合法 JSON，只解读给定数据，"
+                "不编造。止盈止损规则动作不可否决，你只补充解读与优先级。"
+                "输出是研究参考，非投资建议。"),
+            user_prompt=(
+                f"市场基调：{tone['market'][:80]}；总仓位建议："
+                f"{tone['total_position']}。\n"
+                f"持仓规则动作：\n{holdings_text}\n"
+                f"买入候选：\n{buys_text}\n"
+                "输出 JSON："
+                "{'holdings_advice': [{'symbol':..., 'comment': 一句话解读}], "
+                "'buy_priority': [候选代码按优先级排序], "
+                "'operation_plan': 2-3 句今日操作计划（中文）}"),
+            mode="fast", max_tokens=800,
+        )
+        raw = await adapter.chat_json(params)
+        if isinstance(raw, dict) and "error" not in raw:
+            return {
+                "holdings_advice": raw.get("holdings_advice", []),
+                "buy_priority": raw.get("buy_priority", []),
+                "operation_plan": raw.get("operation_plan", ""),
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LLM 解读失败: %s", e)
+    return None
+
+
 def _render(out: dict) -> str:
     lines = [
         "## 💰 今日操作面板",
@@ -193,16 +291,32 @@ def _render(out: dict) -> str:
             lines.append(f"| {h['symbol']} | {h['pnl_pct']:+.1f}% | "
                          f"**{h['action']}** | {lv} | {h['reason'][:50]} |")
 
-    lines.append("\n### 🎯 买入候选（综合信号看涨）")
+    lines.append("\n### 🎯 买入候选（综合信号看涨 + 因子分）")
     if not out["buy_candidates"]:
         lines.append("当前池内无综合信号看涨的标的——市场没有明确买入机会，观望为主")
     else:
-        lines.append("| 代码 | 强度 | 一致度 | 信号源数 |")
-        lines.append("|---|---|---|---|")
+        lines.append("| 代码 | 信号强度 | 一致度 | 源数 | 因子分 |")
+        lines.append("|---|---|---|---|---|")
         for c in out["buy_candidates"]:
+            fs = f"{c['factor_score']:+.2f}" if c.get("factor_score") \
+                is not None else "—"
             lines.append(f"| {c['symbol']} | {c['consensus_strength']:.0%} | "
-                         f"{c['agreement']:.0%} | {c['n_sources']} |")
+                         f"{c['agreement']:.0%} | {c['n_sources']} | {fs} |")
         lines.append("\n*买入候选仅代表信号状态，需结合大盘基调（偏空时谨慎）。*")
+
+    # LLM 深度解读
+    la = out.get("llm_advice")
+    if la:
+        lines.append("\n### 🤖 AI 解读")
+        if la.get("holdings_advice"):
+            lines.append("**持仓补充解读**：")
+            for a in la["holdings_advice"]:
+                lines.append(f"- {a.get('symbol', '')}：{a.get('comment', '')}")
+        if la.get("buy_priority"):
+            lines.append("\n**买入优先级**：" + " → ".join(la["buy_priority"]))
+        if la.get("operation_plan"):
+            lines.append(f"\n**今日操作计划**：{la['operation_plan']}")
+        lines.append("\n*AI 解读基于规则结果，不否决止盈止损纪律。*")
 
     lines.append("\n---\n*规则可追溯（止盈：盈利≥15%+综合看跌 / 止损：亏损≥10%）。"
                  "研究参考，非投资建议。*")

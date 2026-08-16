@@ -70,14 +70,17 @@ def test_trading_actions_panel(tmp_path, monkeypatch):
     lc._client = None
 
     r = asyncio.run(trading_actions(
-        ["000001", "000002", "000003", "000004", "000005", "000006"]))
+        ["000001", "000002", "000003", "000004", "000005", "000006"],
+        include_llm=False))
     assert "tone" in r
     assert "total_position" in r["tone"]
     assert "holdings" in r
     assert isinstance(r["buy_candidates"], list)
-    # 持仓（种子库 000001/000002）→ 有操作
+    assert "factor_scores" in r  # 因子分整合
+    # 持仓（种子库 000001/000002）→ 有操作 + 因子分字段
     assert r["holdings"], "应有持仓操作"
     assert all(h["action"] for h in r["holdings"])
+    assert all("factor_score" in h for h in r["holdings"])
     assert "今日操作面板" in r["report"]
     assert "操作基调" in r["report"]
 

@@ -2791,8 +2791,12 @@ async def data_quality_report() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def trading_actions(symbols: str = "") -> dict[str, Any]:
-    """💰 今日操作面板：持仓止盈止损 / 买入候选 / 操作建议。
+async def trading_actions(symbols: str = "",
+                           include_llm: bool = True) -> dict[str, Any]:
+    """💰 今日操作面板：持仓止盈止损 / 买入候选 / 操作建议（含 LLM 解读）。
+
+    - 规则骨架不可绕过（止盈/止损纪律）+ 因子分补强 + AI 深度解读
+      （持仓补充解读/买入优先级/今日操作计划——只解读不否决规则）
 
     - 持仓：每只给出动作（分批止盈/纪律止损/减仓/持有观察）+
       触发价与依据（规则：盈利≥15%+综合看跌→止盈；亏损≥10%→止损）
@@ -2806,7 +2810,7 @@ async def trading_actions(symbols: str = "") -> dict[str, Any]:
         from pa_mcp.research.trading_actions import trading_actions as run_ta
         pool = [s.strip() for s in symbols.replace("，", ",").split(",")
                 if s.strip()] or None
-        result = await run_ta(pool)
+        result = await run_ta(pool, include_llm=include_llm)
         return _response(data=result)
     except Exception as e:
         logger.error("trading_actions failed", error=str(e))
