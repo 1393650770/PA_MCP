@@ -882,9 +882,17 @@ def scan_market_ui(strategy: str, top_n: int = 10,
             pass
 
         if not rows:
+            holding_note = ""
+            if holdings:
+                held_names = "、".join(
+                    f"{h}({get_stock_name(h)})" for h in holdings)
+                holding_note = (f"\n\n📌 **你的持仓（{len(holdings)} 只）**："
+                                f"{held_names}\n"
+                                f"当前该策略对持仓均无近 10 日买入信号。")
             return (f"{strategy}：当前股票池近10日无买入信号。\n\n"
                     f"⚠️ **这本身是有用信息**：当前市场状态没有该策略的机会。\n"
-                    f"可尝试：① 换其他策略扫描 ② 扩大股票池 ③ 等待信号出现后再关注。\n\n"
+                    f"可尝试：① 换其他策略扫描 ② 扩大股票池 ③ 等待信号出现后再关注。"
+                    f"{holding_note}\n\n"
                     f"*研究参考，非投资建议。*")
 
     rows.sort(key=lambda r: r["strength"], reverse=True)

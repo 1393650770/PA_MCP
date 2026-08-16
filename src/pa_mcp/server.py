@@ -3798,13 +3798,26 @@ async def agent_scan_market(
                     "message": f"No strategies found. Registered: {len(available)}",
                 })
 
-            # Get stock list
+            # Get stock list（强制纳入持仓股——持仓必须在扫描结果中）
+            holding_symbols: set[str] = set()
+            if _store and _store.table_exists("portfolio"):
+                try:
+                    hold_df = _store.query_df("SELECT symbol FROM portfolio", [])
+                    holding_symbols = {str(s) for s in hold_df["symbol"]
+                                       if str(s) != "None"}
+                except Exception:
+                    pass
             stock_list = []
             if _store and _store.table_exists("stock_basic"):
                 basic_df = _store.query_df("SELECT symbol, name FROM stock_basic LIMIT 200")
                 stock_list = basic_df.to_dict(orient="records") if not basic_df.empty else []
             else:
                 stock_list = [{"symbol": f"{i:06d}", "name": f"Stock{i}"} for i in range(1, 51)]
+            # 持仓股加入扫描池（不在 stock_basic 也补上）
+            known = {s["symbol"] for s in stock_list}
+            for h in sorted(holding_symbols):
+                if h not in known:
+                    stock_list.append({"symbol": h, "name": f"持仓{h}"})
 
             # Run each strategy on each stock (use DuckDB kline for caching)
             for stock in stock_list[:100]:  # Cap at 100 stocks for live mode
@@ -3856,18 +3869,33 @@ async def agent_scan_market(
                 reverse=True,
             )
 
-        # Build result
+        # Build result（持仓标注）
         result_candidates = []
         for sym, sigs in ranked[:top_n]:
             avg_strength = sum(s["strength"] for s in sigs) / max(len(sigs), 1)
             buy_sigs = [s for s in sigs if s["direction"] == "bullish"]
             result_candidates.append({
                 "symbol": sym,
+                "is_holding": sym in holding_symbols,
                 "avg_strength": round(avg_strength, 1),
                 "total_signals": len(sigs),
                 "bullish_count": len(buy_sigs),
                 "consensus_pct": round(len(buy_sigs) / max(len(sigs), 1) * 100, 1),
                 "top_strategies": sorted(sigs, key=lambda x: x["strength"], reverse=True)[:5],
+            })
+
+        # 持仓状态摘要（含无信号持仓——扫描必须覆盖持仓）
+        holding_status = []
+        for h in sorted(holding_symbols):
+            sigs = candidates.get(h, [])
+            buy = sum(1 for s in sigs if s["direction"] == "bullish")
+            holding_status.append({
+                "symbol": h,
+                "has_signal": bool(sigs),
+                "bullish_count": buy,
+                "total_signals": len(sigs),
+                "avg_strength": round(sum(s["strength"] for s in sigs)
+                                      / max(len(sigs), 1), 1) if sigs else None,
             })
 
         return _response(data={
@@ -3876,6 +3904,9 @@ async def agent_scan_market(
             "scanned_stocks": len(candidates),
             "candidates": result_candidates,
             "count": len(result_candidates),
+            "holding_symbols": sorted(holding_symbols),
+            "holdings_included": bool(holding_symbols),
+            "holding_status": holding_status,
             "timestamp": datetime.now().isoformat(),
         })
 
