@@ -48,16 +48,49 @@ class SectorRotationAnalyzer:
         store.connect()
         return store
 
-    # ---- 数据装载（东财板块） ----
-    async def load_sector_data(self, top_n: int = 60, days: int = 120) -> dict:
-        """拉取板块列表 + 各自日线，写入 sector_daily 表。返回装载统计。"""
+    # ---- 数据装载（东财板块，带重试） ----
+    async def load_sector_data(self, top_n: int = 60, days: int = 120,
+                               retries: int = 2) -> dict:
+        """拉取板块列表 + 各自日线，写入 sector_daily 表。返回装载统计。
+
+        东财接口偶发断连 → 自动重试；全部失败时尝试合成板块降级。
+        """
         from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
 
+        last_err = ""
+        for attempt in range(retries + 1):
+            try:
+                adapter = EastMoneyAdapter()
+                boards = await adapter.get_sector_boards(
+                    board_type=self.board_type, top_n=top_n)
+                if not boards.empty:
+                    return await self._load_boards(boards, days=days)
+                last_err = "板块列表为空"
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)[:80]
+                logger.warning("东财板块装载失败（第 %s 次）: %s",
+                               attempt + 1, last_err)
+                if attempt < retries:
+                    import asyncio
+                    await asyncio.sleep(1.5 * (attempt + 1))
+
+        # 全部失败 → 合成板块降级（stock_basic.sector + kline_daily 聚合）
+        store = self._store()
+        try:
+            n = self._synthetic_sectors(store)
+            if n > 0:
+                return {"loaded": n, "boards_total": 0, "board_type": "synthetic",
+                        "message": f"东财不可用（{last_err}）→ 已用合成板块降级（{n} 个）"}
+        finally:
+            store.close()
+        return {"loaded": 0, "boards_total": 0,
+                "message": f"{self.board_type} 板块装载失败：{last_err}；"
+                           "合成板块也失败（需 stock_basic.sector + kline_daily）"}
+
+    async def _load_boards(self, boards: pd.DataFrame, days: int = 120) -> dict:
+        """批量装载板块日线（东财）。"""
+        from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
         adapter = EastMoneyAdapter()
-        boards = await adapter.get_sector_boards(
-            board_type=self.board_type, top_n=top_n)
-        if boards.empty:
-            return {"loaded": 0, "message": f"{self.board_type} 板块列表获取失败"}
 
         store = self._store()
         try:
@@ -87,16 +120,90 @@ class SectorRotationAnalyzer:
         finally:
             store.close()
 
+    # ---- 合成板块降级（东财不可用时的后备数据源） ----
+    def _synthetic_sectors(self, store) -> int:
+        """用 stock_basic.sector + kline_daily 聚合生成合成板块日线。
+
+        每板块按日：成分股等权平均收盘 → 板块指数（无前视：当日收盘）。
+        板块代码用 'SYN_<板块名>'；来源为合成（预测验证回填跳过非 BK 代码）。
+        返回写入板块数；0 = 数据不足。
+        """
+        try:
+            sb = store.query_df(
+                "SELECT symbol, sector FROM stock_basic "
+                "WHERE sector IS NOT NULL AND sector != ''", [])
+            if sb.empty:
+                return 0
+            # 每板块股票列表
+            sector_stocks: dict[str, list[str]] = {}
+            for _, r in sb.iterrows():
+                sector_stocks.setdefault(str(r["sector"]), []).append(
+                    str(r["symbol"]))
+            if not sector_stocks:
+                return 0
+
+            # 拉全部行情（一次查询）
+            kl = store.query_df(
+                "SELECT symbol, date, close FROM kline_daily "
+                "ORDER BY symbol, date", [])
+            if kl.empty:
+                return 0
+            kl["close"] = pd.to_numeric(kl["close"], errors="coerce")
+
+            rows = []
+            for sector, syms in sector_stocks.items():
+                sub = kl[kl["symbol"].isin(syms)].copy()
+                if sub.empty:
+                    continue
+                # 等权平均收盘（按日期）
+                daily = sub.groupby("date")["close"].mean().reset_index()
+                daily = daily.dropna()
+                if len(daily) < RS_WINDOW + 2:
+                    continue
+                daily = daily.sort_values("date")
+                prev = daily["close"].shift(1)
+                daily["pct_change"] = (daily["close"] / prev - 1) * 100
+                daily["sector_code"] = f"SYN_{sector}"
+                daily["name"] = sector
+                daily["open"] = daily["close"] * 0.99
+                daily["high"] = daily["close"] * 1.01
+                daily["low"] = daily["close"] * 0.99
+                daily["volume"] = 1e7
+                daily["amount"] = 1e9
+                daily["turnover"] = 1.0
+                rows.append(daily[["sector_code", "name", "date", "open",
+                                   "close", "high", "low", "volume",
+                                   "amount", "pct_change", "turnover"]])
+            if not rows:
+                return 0
+            store.insert_df("sector_daily", pd.concat(rows, ignore_index=True))
+            return len(rows)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("合成板块失败: %s", e)
+            return 0
+
     # ---- 分析（RS 动量 + 资金流 + 轮动信号） ----
     def analyze(self, rs_window: int = RS_WINDOW,
                 accel_window: int = ACCEL_WINDOW,
-                top_n: int = TOP_N) -> dict[str, Any]:
-        """板块相对强度排名 + 轮动信号。数据来自 sector_daily 表。"""
+                top_n: int = TOP_N,
+                auto_synthetic: bool = True) -> dict[str, Any]:
+        """板块相对强度排名 + 轮动信号。数据来自 sector_daily 表。
+
+        auto_synthetic=True 且表为空时，自动用合成板块降级
+        （stock_basic.sector + kline_daily 聚合）。
+        """
         store = self._store()
         try:
             latest = store.get_latest_date("sector_daily", "date")
+            if not latest and auto_synthetic:
+                n = self._synthetic_sectors(store)
+                if n > 0:
+                    latest = store.get_latest_date("sector_daily", "date")
             if not latest:
                 return {"error": "板块数据为空，请先运行 load_sector_data()"}
+            synthetic = str(store.query_df(
+                "SELECT DISTINCT sector_code FROM sector_daily LIMIT 1", [])
+                .iloc[0]["sector_code"]).startswith("SYN_") if latest else False
 
             # 每板块最近 rs_window+1 根
             df = store.query_df(
@@ -160,6 +267,9 @@ class SectorRotationAnalyzer:
                 "rotated_out": rotated_out[:5],
                 "rotation_speed": rotation_speed,
                 "top_n": top_n,
+                "synthetic": synthetic,
+                "data_source": "合成板块（东财不可用，stock_basic 聚合）"
+                if synthetic else "东财板块指数",
             }
         finally:
             store.close()

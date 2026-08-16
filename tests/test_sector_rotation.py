@@ -185,6 +185,44 @@ def test_sector_context_injection(tmp_path):
     assert svc._sector_context("999999") == ""
 
 
+def test_synthetic_sector_fallback(tmp_path):
+    """东财不可用 → 合成板块降级（stock_basic.sector + kline 聚合）。"""
+    from pa_mcp.data.store import DuckDBStore
+    db = str(tmp_path / "syn_test.duckdb")
+    store = DuckDBStore(db)
+    store.connect()
+    # 2 板块 × 2 股票（kline 100 根 + sector 映射）
+    store.insert_df("stock_basic", pd.DataFrame([
+        {"symbol": "000001", "name": "银行A", "sector": "银行", "is_st": False},
+        {"symbol": "000002", "name": "银行B", "sector": "银行", "is_st": False},
+        {"symbol": "000003", "name": "白酒A", "sector": "白酒", "is_st": False},
+        {"symbol": "000004", "name": "白酒B", "sector": "白酒", "is_st": False},
+    ]))
+    dates = pd.date_range("2026-05-01", periods=100, freq="B")
+    krows = []
+    for sym, base in (("000001", 0.004), ("000002", 0.003),
+                      ("000003", 0.002), ("000004", -0.001)):
+        close = 10.0
+        for i in range(100):
+            close *= 1 + base
+            krows.append({"symbol": sym, "date": dates[i],
+                          "open": close * 0.995, "high": close * 1.01,
+                          "low": close * 0.99, "close": close,
+                          "volume": 1e6, "amount": 1e7,
+                          "pct_change": base * 100, "turnover": 1.0,
+                          "change": base * 100, "amplitude": 2.0,
+                          "adjust_factor": 1.0})
+    store.insert_df("kline_daily", pd.DataFrame(krows))
+    store.close()
+
+    a = SectorRotationAnalyzer(store_path=db).analyze()
+    assert "error" not in a
+    assert a["synthetic"] is True
+    assert "合成板块" in a["data_source"]
+    assert a["board_count"] == 2
+    assert a["ranked_sectors"][0]["sector_code"] == "SYN_银行"
+
+
 def test_format_rotation():
     pred = {
         "mode": "deterministic", "predict_date": "2026-08-15",

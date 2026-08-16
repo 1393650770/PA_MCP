@@ -2016,7 +2016,9 @@ def sector_rotation_ui(load_data: bool = False) -> str:
                 info = await analyzer.load_sector_data(top_n=60, days=120)
                 if info.get("loaded", 0) == 0:
                     return (f"板块数据装载失败：{info.get('message', '')}\n"
-                            "请检查网络或稍后重试（东财板块接口）")
+                            "东财接口不可达时已自动尝试合成板块降级"
+                            "（stock_basic.sector + kline_daily 聚合）。"
+                            "若合成也失败，请先运行调度装载行情与基本信息。")
             analysis = analyzer.analyze()
             if "error" in analysis:
                 return analysis["error"]
