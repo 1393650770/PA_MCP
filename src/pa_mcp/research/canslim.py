@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -134,6 +135,98 @@ class CanslimScanner:
             "SELECT DISTINCT symbol FROM kline_daily ORDER BY symbol", [])
         return [str(s) for s in df["symbol"]] if not df.empty else []
 
+    # 内置常用股池（库内无数据时兜底，与技术型降级配合）
+    BUILTIN_POOL = [
+        "000001", "600036", "601398", "601288", "600519", "000858",
+        "000568", "300750", "002594", "601012", "600438", "000333",
+        "000651", "600030", "601318", "600276", "300760", "002415",
+        "300059", "688981", "002475", "601138", "000725", "002230",
+        "300308", "603986", "600900", "601857", "600028", "601088",
+    ]
+
+    async def scan_async(self, pool: Optional[list[str]] = None,
+                         market_state: Optional[str] = None,
+                         top_n: int = 20,
+                         kline_provider=None,
+                         fin_provider=None) -> list[CanslimResult]:
+        """异步 CANSLIM 扫描（库内无数据时网络兜底 + 财务缺失降级）。
+
+        - 池：pool 参数 → 库内股票 → 内置常用池（30 只）
+        - 行情：库内 → kline_provider(symbol)（多源 router）
+        - 财务：库内 → fin_provider；均无 → C/A 标 unavailable（技术型降级）
+        """
+        store = self._store()
+        try:
+            if pool is None:
+                pool = self._auto_pool(store)
+            if not pool:
+                pool = list(self.BUILTIN_POOL)
+
+            klines: dict[str, pd.DataFrame] = {}
+            fin: dict[str, pd.DataFrame] = {}
+            for sym in pool:
+                df = None
+                try:
+                    df = store.query_df(
+                        "SELECT date, open, high, low, close, volume, "
+                        "turnover, pct_change FROM kline_daily WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 280", [sym])
+                    if not df.empty:
+                        df = df.sort_values("date").reset_index(drop=True)
+                except Exception:
+                    pass
+                if (df is None or df.empty) and kline_provider is not None:
+                    try:
+                        kdf = kline_provider(sym)
+                        if inspect.isawaitable(kdf):
+                            kdf = await kdf
+                        if kdf is not None and not kdf.empty:
+                            df = kdf.sort_values("date").reset_index(drop=True)
+                    except Exception:
+                        pass
+                if df is not None and not df.empty:
+                    klines[sym] = df
+                fdf = None
+                try:
+                    fdf = store.query_df(
+                        "SELECT report_date, profit_yoy, revenue_yoy, roe, eps "
+                        "FROM financials_income WHERE symbol = ? "
+                        "ORDER BY report_date DESC LIMIT 4", [sym])
+                    if fdf.empty:
+                        fdf = None
+                except Exception:
+                    fdf = None
+                if fdf is None and fin_provider is not None:
+                    try:
+                        fdf = await fin_provider(sym)
+                    except Exception:
+                        fdf = None
+                if fdf is not None:
+                    fin[sym] = fdf
+
+            if not klines:
+                return []
+
+            if market_state is None:
+                market_state = self._detect_market(store)
+            rs_ranks = self._relative_strength(klines)
+
+            results = []
+            for sym in klines:
+                factors = self._evaluate(sym, klines[sym], fin.get(sym),
+                                         market_state, rs_ranks)
+                score = sum(1 for f in factors if f.passed)
+                results.append(CanslimResult(
+                    symbol=sym, name=self._stock_name(sym, store),
+                    score=score, factors=factors,
+                    market_state=market_state or "unknown",
+                    overall=self._overall(score, market_state, factors),
+                ))
+            results.sort(key=lambda r: (-r.score, r.market_state == "unknown"))
+            return results[:top_n]
+        finally:
+            store.close()
+
     def _load_data(self, store, pool: list[str]):
         klines: dict[str, pd.DataFrame] = {}
         fin: dict[str, pd.DataFrame] = {}
@@ -203,10 +296,13 @@ class CanslimScanner:
                   fdf: Optional[pd.DataFrame], market_state: Optional[str],
                   rs_ranks: dict[str, float]) -> list[FactorResult]:
         factors: list[FactorResult] = []
+        has_fin = fdf is not None and not fdf.empty
 
         # C 当季盈利
-        c_detail, c_pass = "财务数据不足（无 financials）", False
-        if fdf is not None and not fdf.empty:
+        c_detail, c_pass = (
+            "财务数据不足（先运行调度器装载 financials，当前降级为技术型 CANSLIM）",
+            False)
+        if has_fin:
             row = fdf.iloc[0]
             py = row.get("profit_yoy")
             ry = row.get("revenue_yoy")
@@ -217,11 +313,12 @@ class CanslimScanner:
                             + (" ≥ 20% ✓" if c_pass else " < 20% ✗"))
             else:
                 c_detail = "财务字段 profit_yoy 缺失"
-        factors.append(FactorResult("C", "当季盈利", c_pass, c_detail))
+        factors.append(FactorResult("C", "当季盈利", c_pass, c_detail,
+                                    available=has_fin))
 
         # A 年度增长
         a_detail, a_pass = "财务数据不足", False
-        if fdf is not None and not fdf.empty:
+        if has_fin:
             py_vals = [float(r["profit_yoy"]) for _, r in fdf.iterrows()
                        if pd.notna(r.get("profit_yoy"))]
             roe_vals = [float(r["roe"]) for _, r in fdf.iterrows()
@@ -236,7 +333,8 @@ class CanslimScanner:
                 or (roe_vals and max(roe_vals) >= A_ROE_MIN)
             a_detail = "；".join(parts) + (
                 " ✓" if a_pass else " ✗（需均值≥25% 或 ROE≥17%）")
-        factors.append(FactorResult("A", "年度增长", a_pass, a_detail))
+        factors.append(FactorResult("A", "年度增长", a_pass, a_detail,
+                                    available=has_fin))
 
         # N 新高
         n_detail, n_pass = "数据不足", False
@@ -340,14 +438,17 @@ def format_scan(results: list[CanslimResult]) -> str:
     marks = {True: "✅", False: "❌"}
     for i, r in enumerate(results[:20], 1):
         fmap = {f.code: f for f in r.factors}
+
+        def _mark(code: str) -> str:
+            f = fmap.get(code)
+            if f is None:
+                return "·"
+            return "⬜" if not f.available else marks.get(f.passed, "·")
+
         lines.append(
             f"| {i} | {r.symbol} | {r.name} | **{r.score}/6** | {r.overall} | "
-            f"{marks.get(fmap['C'].passed, '·')} "
-            f"{marks.get(fmap['A'].passed, '·')} "
-            f"{marks.get(fmap['N'].passed, '·')} "
-            f"{marks.get(fmap['S'].passed, '·')} "
-            f"{marks.get(fmap['L'].passed, '·')} "
-            f"{'✅' if fmap['M'].passed else '❌'} |")
+            f"{_mark('C')} {_mark('A')} {_mark('N')} {_mark('S')} "
+            f"{_mark('L')} {_mark('M')} |")
     lines.append("\n市场状态：" + (results[0].market_state if results else "未知"))
     lines.append("\n*CANSLIM = 欧奈尔《笑傲股市》成长股选股法则（C当季盈利/A年度增长/"
                  "N新高/S放量/L领军/M市场方向；I机构数据暂缺）。研究参考，非投资建议。*")

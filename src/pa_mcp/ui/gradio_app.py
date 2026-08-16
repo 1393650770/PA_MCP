@@ -2230,10 +2230,12 @@ def value_momentum_backtest_ui(symbols: str) -> str:
 
 
 def value_momentum_ui(symbols: str) -> str:
-    """价值×动量复合选股（格雷厄姆 × 60 日动量）。"""
+    """价值×动量复合选股（格雷厄姆 × 60 日动量，自动前置）。"""
     try:
         from pa_mcp.research.value_momentum import (
             get_value_momentum_screen, format_value_momentum)
+        from pa_mcp.data.readiness import NEED_KLINE_FIN
+        prefix = _ensure_data(NEED_KLINE_FIN, symbols)
         pool = [s.strip() for s in symbols.replace("，", ",").split(",")
                 if s.strip()]
         if not pool:
@@ -2241,31 +2243,35 @@ def value_momentum_ui(symbols: str) -> str:
         result = get_value_momentum_screen().screen(pool)
         if "error" in result:
             return result["error"]
-        return format_value_momentum(result)
+        return prefix + format_value_momentum(result)
     except Exception as e:
         return f"价值×动量复合失败：{str(e)[:200]}"
 
 
 def graham_ui(symbols: str) -> str:
-    """格雷厄姆价值筛选（防御性 7 条 + 安全边际）。"""
+    """格雷厄姆价值筛选（防御性 7 条 + 安全边际，自动前置）。"""
     try:
         from pa_mcp.research.graham import (
             get_graham_screener, format_graham)
+        from pa_mcp.data.readiness import NEED_KLINE_FIN
+        prefix = _ensure_data(NEED_KLINE_FIN, symbols)
         pool = [s.strip() for s in symbols.replace("，", ",").split(",")
                 if s.strip()]
         if not pool:
             return "请输入股票代码"
         results = get_graham_screener().screen(pool)
-        return format_graham(results)
+        return prefix + format_graham(results)
     except Exception as e:
         return f"格雷厄姆筛选失败：{str(e)[:200]}"
 
 
 def strategy_compare_ui(symbols: str) -> str:
-    """全策略事件研究对比（10 策略同台检验预测力）。"""
+    """全策略事件研究对比（自动前置行情）。"""
     try:
         from pa_mcp.research.strategy_compare import (
             compare_all_strategies, format_compare)
+        from pa_mcp.data.readiness import NEED_KLINE
+        prefix = _ensure_data(NEED_KLINE, symbols)
         pool = [s.strip() for s in symbols.replace("，", ",").split(",")
                 if s.strip()]
         klines = {}
@@ -2278,7 +2284,7 @@ def strategy_compare_ui(symbols: str) -> str:
         result = compare_all_strategies(klines)
         if "error" in result:
             return result["error"]
-        return format_compare(result)
+        return prefix + format_compare(result)
     except Exception as e:
         return f"策略对比失败：{str(e)[:200]}"
 
@@ -2333,10 +2339,12 @@ def factor_portfolio_ui(symbols: str) -> str:
 
 
 def factor_selection_ui(symbols: str, prediction_weight: float = 0.0) -> str:
-    """多因子截面选股（可选 AI 预测融合）。"""
+    """多因子截面选股（可选 AI 预测融合，自动前置行情）。"""
     try:
         from pa_mcp.research.factors import (
             select_stocks_by_factors, format_selection)
+        from pa_mcp.data.readiness import NEED_KLINE
+        prefix = _ensure_data(NEED_KLINE, symbols)
         pool = [s.strip() for s in symbols.replace("，", ",").split(",")
                 if s.strip()]
         if len(pool) < 5:
@@ -2352,23 +2360,25 @@ def factor_selection_ui(symbols: str, prediction_weight: float = 0.0) -> str:
             klines, top_n=10, prediction_weight=prediction_weight)
         if "error" in result:
             return result["error"]
-        return format_selection(result)
+        return prefix + format_selection(result)
     except Exception as e:
         return f"因子选股失败：{str(e)[:200]}"
 
 
 def factor_scan_ui(symbol: str) -> str:
-    """因子批量扫描：全部注册因子的 IC/分层检验排行。"""
+    """因子批量扫描：全部注册因子的 IC/分层检验排行（自动前置行情）。"""
     symbol = symbol.strip()
     if not symbol:
         return "请输入股票代码"
     try:
         from pa_mcp.research.factors import scan_factors, format_scan
+        from pa_mcp.data.readiness import NEED_KLINE
+        prefix = _ensure_data(NEED_KLINE, symbol)
         df = _load_long_history(symbol)
         if df.empty:
             return f"{symbol} 无行情数据"
         results = scan_factors(df, horizon=5)
-        return format_scan(results) + f"\n\n*扫描标的：{symbol}*"
+        return prefix + format_scan(results) + f"\n\n*扫描标的：{symbol}*"
     except Exception as e:
         return f"因子扫描失败：{str(e)[:200]}"
 
@@ -2442,15 +2452,38 @@ def chan_event_study_ui(symbol: str) -> str:
 
 
 def canslim_ui(top_n: int = 20, pool: str = "") -> str:
-    """CANSLIM 成长股扫描（欧奈尔七要素）。"""
+    """CANSLIM 成长股扫描（欧奈尔七要素，自动前置行情/财务）。"""
     try:
         from pa_mcp.research.canslim import get_canslim_scanner, format_scan
+        from pa_mcp.data.readiness import NEED_KLINE_FIN
+        prefix = _ensure_data(NEED_KLINE_FIN, pool)
         pool_list = [s.strip() for s in pool.replace("，", ",").split(",")
                      if s.strip()] or None
         results = get_canslim_scanner().scan(pool=pool_list, top_n=top_n)
-        return format_scan(results)
+        return prefix + format_scan(results)
     except Exception as e:
         return f"CANSLIM 扫描失败：{str(e)[:200]}"
+
+
+def _ensure_data(need: dict, symbols: Optional[str] = None) -> str:
+    """数据前置检查与自动装载（按钮点击时自动补数据）。
+
+    返回提示文本；无缺失返回空串（零开销）。
+    """
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.data.readiness import ensure_readiness
+        pool = None
+        if symbols:
+            pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                    if s.strip()]
+        result = _asyncio.run(ensure_readiness(need, symbols=pool))
+        if not result.get("loaded"):
+            return ""
+        actions = "；".join(result["actions"])
+        return f"⏳ 已自动装载缺失数据：{actions}\n\n"
+    except Exception:
+        return ""
 
 
 def export_csv_ui(symbols: str, what: str) -> str:
@@ -2543,12 +2576,14 @@ def export_csv_ui(symbols: str, what: str) -> str:
 
 
 def market_structure_ui() -> str:
-    """市场结构联合分析（指数缠论 × 情绪矩阵）。"""
+    """市场结构联合分析（指数缠论 × 情绪矩阵，自动前置指数）。"""
     try:
         import asyncio as _asyncio
         from pa_mcp.research.market_structure import get_market_structure
+        from pa_mcp.data.readiness import NEED_INDEX
+        prefix = _ensure_data(NEED_INDEX)
         result = _asyncio.run(get_market_structure().analyze())
-        return result["report"]
+        return prefix + result["report"]
     except Exception as e:
         return f"市场结构分析失败：{str(e)[:200]}"
 
@@ -2605,15 +2640,17 @@ def portfolio_risk_fig() -> tuple[Any, str]:
 
 
 def portfolio_risk_ui() -> str:
-    """持仓风险面板（盈亏×预测×集中度×评分）。"""
+    """持仓风险面板（盈亏×预测×集中度×评分，自动前置行情）。"""
     try:
         import asyncio as _asyncio
         from pa_mcp.research.portfolio_risk import (
             get_risk_dashboard, format_risk_dashboard)
+        from pa_mcp.data.readiness import NEED_PORTFOLIO
+        prefix = _ensure_data(NEED_PORTFOLIO)
         result = _asyncio.run(get_risk_dashboard().analyze(use_llm=False))
         if "error" in result:
             return result["error"]
-        return format_risk_dashboard(result)
+        return prefix + format_risk_dashboard(result)
     except Exception as e:
         return f"持仓风险面板失败：{str(e)[:200]}"
 

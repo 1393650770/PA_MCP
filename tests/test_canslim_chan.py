@@ -273,3 +273,68 @@ def test_canslim_scan_pool(tmp_path):
 def test_canslim_no_data(tmp_path):
     scanner = CanslimScanner(store_path=str(tmp_path / "empty.duckdb"))
     assert scanner.scan() == []
+
+
+def test_canslim_technical_fallback(tmp_path):
+    """无财务 → 技术型降级：C/A ⬜ 不评分，N/S/L/M 照常。"""
+    import asyncio
+    from pa_mcp.data.store import DuckDBStore
+    db = str(tmp_path / "tech_test.duckdb")
+    store = DuckDBStore(db)
+    store.connect()
+    # 只灌行情（无财务）
+    for sym in ("000001", "000002", "000003", "000004", "000005"):
+        closes = [10 + i * 0.05 for i in range(120)]
+        df = pd.DataFrame({
+            "date": pd.date_range("2025-06-01", periods=120, freq="B"),
+            "open": closes, "high": [c * 1.02 for c in closes],
+            "low": [c * 0.98 for c in closes], "close": closes,
+            "volume": [1e6] * 120, "amount": [1e7] * 120,
+            "pct_change": [0.5] * 120, "turnover": [1.0] * 120,
+            "change": [0.5] * 120, "amplitude": [1.0] * 120,
+            "adjust_factor": [1.0] * 120, "symbol": sym,
+        })
+        store.insert_df("kline_daily", df)
+    store.close()
+
+    scanner = CanslimScanner(store_path=db)
+    results = asyncio.run(scanner.scan_async(
+        pool=["000001", "000002", "000003", "000004", "000005"]))
+    assert len(results) == 5
+    r = results[0]
+    fmap = {f.code: f for f in r.factors}
+    # C/A 不可用（⬜）不评分
+    assert fmap["C"].available is False
+    assert fmap["A"].available is False
+    assert not fmap["C"].passed and not fmap["A"].passed
+    # N/S/L 正常判定
+    assert fmap["N"].available is True
+    assert fmap["L"].available is True
+    text = format_scan(results)
+    assert "⬜" in text
+
+
+def test_canslim_builtin_pool_fallback():
+    """库完全空 → 内置常用池兜底（kline_provider 提供行情）。"""
+    import asyncio
+    from pa_mcp.data.store import DuckDBStore
+    db = str(tmp_path := __import__("tempfile").mkdtemp()) + "/bp.duckdb"
+    store = DuckDBStore(db)
+    store.connect()
+    store.insert_df("stock_basic", pd.DataFrame([
+        {"symbol": "000001", "name": "平安银行", "sector": "银行", "is_st": False}]))
+    store.close()
+
+    def provider(sym):
+        closes = [10 + i * 0.05 for i in range(120)]
+        return pd.DataFrame({
+            "date": pd.date_range("2025-06-01", periods=120, freq="B"),
+            "open": closes, "high": [c * 1.02 for c in closes],
+            "low": [c * 0.98 for c in closes], "close": closes,
+            "volume": [1e6] * 120, "symbol": sym})
+
+    scanner = CanslimScanner(store_path=db)
+    results = asyncio.run(scanner.scan_async(
+        kline_provider=provider, top_n=5))
+    # 内置池 30 只中 provider 只提供 000001 → 至少 1 只出结果
+    assert results, "内置池 + 网络兜底应出结果"

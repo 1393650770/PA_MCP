@@ -3551,12 +3551,26 @@ async def scan_canslim(top_n: int = 20, pool: str = "") -> dict[str, Any]:
         pool_list = [s.strip() for s in pool.replace("，", ",").split(",")
                      if s.strip()] or None
         scanner = get_canslim_scanner()
-        results = scanner.scan(pool=pool_list, top_n=top_n)
+
+        # 网络兜底：库内无行情时用多源 router 拉取
+        async def _kline_provider(sym: str):
+            try:
+                df, _ = await _get_kline_fallback(sym, days=280)
+                return df
+            except Exception:
+                return None
+
+        results = await scanner.scan_async(
+            pool=pool_list, top_n=top_n, kline_provider=_kline_provider)
         return _response(data={
             "results": [r.to_dict() for r in results],
             "count": len(results),
             "market_state": results[0].market_state if results else None,
             "report": format_scan(results),
+            "note": ("财务数据缺失时 C/A 要素不参与评分（技术型 CANSLIM 降级），"
+                     "先运行调度器装载 financials 获得完整七要素") if results and not any(
+                         f.available for f in results[0].factors
+                         if f.code in ("C", "A")) else None,
         })
     except Exception as e:
         logger.error("scan_canslim failed", error=str(e))
