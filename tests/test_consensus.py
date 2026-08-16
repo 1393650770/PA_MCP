@@ -80,6 +80,22 @@ def test_watchlist_consensus_scan():
     assert "综合信号扫描" in text
 
 
+def test_consensus_figure_build():
+    """投票分布图构建：柱状 + 源标注 + 三方向。"""
+    from pa_mcp.ui.gradio_app import _build_consensus_figure
+    votes = {"up": 5.4, "down": 2.1, "sideways": 0.5}
+    sources = {
+        "resonance": {"signal": "up", "strength": 1.0},
+        "prediction": {"signal": "up", "strength": 0.62},
+        "strategy": {"signal": "down", "strength": 0.67},
+        "market": {"signal": "up", "strength": 0.7},
+    }
+    fig = _build_consensus_figure(votes, sources)
+    assert len(fig.data) == 2  # 柱状 + 源散点
+    assert len(fig.data[0].x) == 3  # 三方向
+    assert len(fig.data[1].x) == 4  # 四源
+
+
 def test_consensus_event_study():
     """强趋势 → 综合信号 → 事件研究可跑（可检验性）。"""
     from pa_mcp.research.consensus import (

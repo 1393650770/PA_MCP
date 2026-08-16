@@ -1372,6 +1372,60 @@ def watchlist_consensus_ui(symbols: str) -> str:
         return f"综合信号扫描失败：{str(e)[:200]}"
 
 
+def _build_consensus_figure(votes: dict, sources: dict) -> Any:
+    """综合信号投票分布图（纯构建，供测试）。"""
+    fig = go.Figure()
+    labels = ["📈 看涨", "📉 看跌", "➡️ 震荡"]
+    keys = ["up", "down", "sideways"]
+    vals = [votes.get(k, 0) for k in keys]
+    colors = ["#e03131", "#2f9e44", "#868e96"]
+    fig.add_trace(go.Bar(
+        x=labels, y=vals, marker=dict(color=colors),
+        text=[f"{v:.2f}" for v in vals], textposition="outside",
+        name="加权票"))
+    # 每源标注
+    src_labels = {"resonance": "共振×3", "prediction": "预测×2",
+                  "strategy": "策略×2", "chan": "背驰×1",
+                  "market": "大盘×2"}
+    src_names = [src_labels.get(k, k) for k in sources]
+    src_sigs = [sources[k]["signal"] for k in sources]
+    fig.add_trace(go.Scatter(
+        x=src_names, y=[float(sources[k]["strength"]) for k in sources],
+        mode="markers+text", text=src_sigs, textposition="top center",
+        name="信号源强度", marker=dict(size=10, color="#1c7ed6")))
+    fig.update_layout(
+        title="🧮 综合信号投票分布",
+        yaxis_title="加权票数 / 源强度",
+        height=400, template="plotly_white",
+        legend=dict(orientation="h", y=1.12),
+        margin=dict(l=10, r=10, t=60, b=10))
+    return fig
+
+
+def consensus_fig_ui(symbol: str) -> tuple[Any, str]:
+    """综合信号投票分布图。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return None, "请输入股票代码"
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.consensus import ConsensusAnalyzer
+        r = _asyncio.run(ConsensusAnalyzer().analyze(symbol))
+        if "error" in r:
+            return None, r["error"]
+        fig = _build_consensus_figure(r["votes"], r["sources"])
+        dir_zh = {"up": "📈 看涨", "down": "📉 看跌", "sideways": "➡️ 震荡"}
+        note = (f"**{dir_zh.get(r['signal'], r['signal'])}"
+                f"（{r['level']}强度 {r['strength']:.0%}，"
+                f"一致度 {r['agreement']:.0%}）**\n"
+                f"投票：涨 {r['votes']['up']:.2f} / 跌 {r['votes']['down']:.2f} / "
+                f"震荡 {r['votes']['sideways']:.2f}（{len(r['sources'])} 个信号源）。"
+                "研究参考，非投资建议。")
+        return fig, note
+    except Exception as e:
+        return None, f"综合信号图失败：{str(e)[:200]}"
+
+
 def consensus_event_study_ui(symbol: str) -> str:
     """综合信号事件研究（融合投票预测力）。"""
     symbol = symbol.strip()
@@ -3520,6 +3574,12 @@ def build_app():
                                  variant="secondary")
             cons_btn.click(signal_consensus_ui, inputs=[pred_sym],
                            outputs=[res_out])
+
+            cons_fig_btn = gr.Button("📊 综合信号投票分布图", variant="secondary")
+            cons_fig = gr.Plot()
+            cons_fig_note = gr.Markdown()
+            cons_fig_btn.click(consensus_fig_ui, inputs=[pred_sym],
+                               outputs=[cons_fig, cons_fig_note])
 
             cons_es_btn = gr.Button("🧮 综合信号事件研究（预测力检验）",
                                     variant="secondary")
