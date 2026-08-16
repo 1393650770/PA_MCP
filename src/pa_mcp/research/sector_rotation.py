@@ -114,12 +114,97 @@ class SectorRotationAnalyzer:
         report = format_hot_cold(hot, cold)
         return {"hot": hot, "cold": cold, "report": report}
 
+    # ---- 10jqka 行业板块（东财断连时的备用真实数据源） ----
+
+    @staticmethod
+    async def fetch_ths_boards() -> list[dict]:
+        """10jqka 行业板块列表（GBK HTML 解析，140 个真实行业分类）。
+
+        Returns:
+            [{code: 881xxx, name}] 通达信行业代码；网络失败返回 []。
+        """
+        import re
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                "http://q.10jqka.com.cn/thshy/",
+                headers={"Referer": "http://q.10jqka.com.cn/",
+                         "User-Agent": "Mozilla/5.0"})
+            raw = urllib.request.urlopen(req, timeout=12).read().decode(
+                "gbk", errors="ignore")
+            links = re.findall(
+                r"/thshy/detail/code/(\d+)[^>]*>([^<]{2,10})<", raw)
+            return [{"code": c, "name": n} for c, n in links]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("10jqka 板块列表获取失败", error=str(e)[:80])
+            return []
+
+    async def load_sector_data_ths(self, top_n: int = 60,
+                                   days: int = 120) -> dict:
+        """10jqka 板块指数日线装载（真实行业分类，写入 sector_daily）。
+
+        板块指数（bk_881xxx）日线格式与个股一致（date,OHLC,volume,amount），
+        最近 140 根足够 RS 20 日窗口。sector_code 记 THS881xxx（预测验证
+        回填目前只认 BK 代码，THS 代码不参与超额验证——诚实标注）。
+        """
+        import asyncio
+        import urllib.request
+
+        from pa_mcp.data.sources.ths_adapter import ThsAdapter
+
+        boards = await self.fetch_ths_boards()
+        if not boards:
+            return {"loaded": 0, "boards_total": 0,
+                    "message": "10jqka 板块列表不可用"}
+
+        store = self._store()
+        loaded = 0
+        try:
+            for b in boards[:top_n]:
+                code, name = str(b["code"]), str(b["name"])
+                try:
+                    req = urllib.request.Request(
+                        f"http://d.10jqka.com.cn/v6/line/bk_{code}/01/last.js",
+                        headers={"Referer": "http://stockpage.10jqka.com.cn/",
+                                 "User-Agent": "Mozilla/5.0"})
+                    raw = urllib.request.urlopen(req, timeout=12).read().decode(
+                        "utf-8", errors="ignore")
+                    payload = ThsAdapter._strip_jsonp(raw)
+                    rows = ThsAdapter._parse_year_data(payload.get("data") or "")
+                    if not rows:
+                        continue
+                    df = pd.DataFrame(rows, columns=[
+                        "date", "open", "high", "low", "close",
+                        "volume", "amount"])
+                    df = df.tail(days)
+                    df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+                    df["pct_change"] = df["close"].pct_change() * 100
+                    df["turnover"] = None
+                    df["sector_code"] = f"THS{code}"
+                    df["name"] = name
+                    df = df[["sector_code", "name", "date", "open", "close",
+                             "high", "low", "volume", "amount",
+                             "pct_change", "turnover"]]
+                    store.insert_df("sector_daily", df)
+                    loaded += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("ths sector kline failed", code=code,
+                                 error=str(e)[:60])
+                await asyncio.sleep(0.3)  # 免费接口限流
+        finally:
+            store.close()
+        return {"loaded": loaded, "boards_total": len(boards[:top_n]),
+                "board_type": self.board_type, "source": "ths",
+                "message": f"10jqka 板块装载完成（{loaded} 个，真实行业分类）"
+                           if loaded else "10jqka 板块日线全部失败"}
+
     # ---- 数据装载（东财板块，带重试） ----
     async def load_sector_data(self, top_n: int = 60, days: int = 120,
                                retries: int = 2) -> dict:
         """拉取板块列表 + 各自日线，写入 sector_daily 表。返回装载统计。
 
-        东财接口偶发断连 → 自动重试；全部失败时尝试合成板块降级。
+        降级链：东财板块 → 10jqka 行业板块（真实分类）→ 合成板块（兜底）。
         """
         from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
 
@@ -140,13 +225,24 @@ class SectorRotationAnalyzer:
                     import asyncio
                     await asyncio.sleep(1.5 * (attempt + 1))
 
+        # 东财失败 → 10jqka 行业板块（真实行业分类，非合成）
+        try:
+            ths = await self.load_sector_data_ths(top_n=top_n, days=days)
+            if ths.get("loaded", 0) > 0:
+                ths["message"] = f"东财不可用（{last_err}）→ {ths['message']}"
+                return ths
+            last_err += f"；10jqka 也失败"
+        except Exception as e:  # noqa: BLE001
+            last_err += f"；10jqka 异常：{str(e)[:60]}"
+
         # 全部失败 → 合成板块降级（stock_basic.sector + kline_daily 聚合）
         store = self._store()
         try:
             n = self._synthetic_sectors(store)
             if n > 0:
                 return {"loaded": n, "boards_total": 0, "board_type": "synthetic",
-                        "message": f"东财不可用（{last_err}）→ 已用合成板块降级（{n} 个）"}
+                        "message": f"东财/10jqka 均不可用（{last_err}）→ "
+                                   f"已用合成板块兜底（{n} 个，口径受限）"}
         finally:
             store.close()
         return {"loaded": 0, "boards_total": 0,
