@@ -92,6 +92,44 @@ def test_risk_dashboard(tmp_path):
     assert "持仓风险面板" in text and "风险评分" in text
 
 
+def test_portfolio_plan_fields(tmp_path):
+    """持仓计划字段：止损/止盈登记 → 面板显示计划状态。"""
+    db = _seed(tmp_path)
+    from pa_mcp.data.store import DuckDBStore
+    store = DuckDBStore(db)
+    store.connect()
+    # 给 000001 登记计划（现价 11，成本 10 → 止盈 12/止损 9）
+    store.execute(
+        "ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS stop_loss DOUBLE")
+    store.execute(
+        "ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS take_profit DOUBLE")
+    store.execute(
+        "ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS plan_reason VARCHAR(200)")
+    store.execute(
+        "UPDATE portfolio SET stop_loss = 9, take_profit = 12, "
+        "plan_reason = '银行低估' WHERE symbol = '000001'")
+    store.close()
+
+    r = asyncio.run(PortfolioRiskDashboard(store_path=db).analyze())
+    assert "error" not in r
+    h = next(x for x in r["holdings"] if x["symbol"] == "000001")
+    assert h["plan"]["stop_loss"] == 9.0
+    assert h["plan"]["take_profit"] == 12.0
+    assert h["plan"]["plan_reason"] == "银行低估"
+    text = format_risk_dashboard(r)
+    assert "计划(止损/止盈)" in text
+    assert "登记理由" in text
+
+
+def test_beginner_guide_md():
+    """新手引导横幅：三步走 + 数据状态。"""
+    from pa_mcp.ui.gradio_app import beginner_guide_md
+    text = beginner_guide_md()
+    assert "新手三步走" in text
+    assert "今日操作" in text
+    assert "数据状态" in text
+
+
 def test_market_bias_adjustment(tmp_path):
     """市场结构偏空 → 风险上调；偏多 → 下调；无指数 → 不变。"""
     db = _seed(tmp_path)

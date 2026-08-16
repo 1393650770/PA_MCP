@@ -149,10 +149,30 @@ class PortfolioRiskDashboard:
                 except Exception:
                     pass
 
+                # 计划字段（新手止盈止损登记）
+                plan = {
+                    "stop_loss": None, "take_profit": None,
+                    "plan_reason": "",
+                }
+                try:
+                    if "stop_loss" in r.index:
+                        v = r.get("stop_loss")
+                        if pd.notna(v) and float(v) > 0:
+                            plan["stop_loss"] = round(float(v), 2)
+                    if "take_profit" in r.index:
+                        v = r.get("take_profit")
+                        if pd.notna(v) and float(v) > 0:
+                            plan["take_profit"] = round(float(v), 2)
+                    if "plan_reason" in r.index and r.get("plan_reason"):
+                        plan["plan_reason"] = str(r["plan_reason"])[:100]
+                except Exception:
+                    pass
+
                 holdings.append({
                     "symbol": sym,
                     "cost": cost, "shares": shares,
                     "price": price,
+                    "plan": plan,
                     "value": round(value, 2),
                     "pnl_pct": round((price / cost - 1) * 100, 2)
                     if cost > 0 else 0.0,
@@ -308,9 +328,37 @@ def format_risk_dashboard(result: dict[str, Any]) -> str:
            if result.get("market_bias") else ""),
         "",
         "### 持仓明细",
-        "| 代码 | 成本 | 现价 | 盈亏% | 占比% | 板块 | 预测(5d) | 共振 | 综合信号 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| 代码 | 现价 | 盈亏% | 占比% | 板块 | 计划(止损/止盈) | 计划状态 |",
+        "|---|---|---|---|---|---|---|",
     ]
+    for h in result["holdings"]:
+        plan = h.get("plan") or {}
+        sl, tp = plan.get("stop_loss"), plan.get("take_profit")
+        plan_txt = (f"{sl} / {tp}" if sl and tp
+                    else f"{sl or '—'} / {tp or '—'}")
+        pstat = "—"
+        if sl and h["price"] <= sl * 1.03:
+            pstat = "🔴 触及/接近止损"
+        elif tp and h["price"] >= tp * 0.97:
+            pstat = "🟡 接近止盈"
+        elif sl and h["price"] <= sl * 1.10:
+            pstat = "⚠️ 临近止损（10% 内）"
+        elif plan.get("plan_reason"):
+            pstat = "📋 有计划"
+        lines.append(
+            f"| {h['symbol']} | {h['price']:.2f} | {h['pnl_pct']:+.1f}% | "
+            f"{h['weight_pct']:.1f}% | {h['sector'] or '—'} | "
+            f"{plan_txt} | {pstat} |")
+    if any((h.get("plan") or {}).get("plan_reason") for h in result["holdings"]):
+        lines.append("\n**登记理由**：")
+        for h in result["holdings"]:
+            pr = (h.get("plan") or {}).get("plan_reason")
+            if pr:
+                lines.append(f"- {h['symbol']}：{pr}")
+    lines.append("\n---\n### 全维度信号（预测/共振/综合）")
+    lines.append("| 代码 | 成本 | 现价 | 盈亏% | 板块 | 预测(5d) | 共振 | 综合信号 |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+
     dir_zh = {"up": "📈", "down": "📉", "sideways": "➡️"}
     for h in result["holdings"]:
         p = h["prediction"]

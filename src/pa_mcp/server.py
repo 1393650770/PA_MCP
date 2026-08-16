@@ -1307,18 +1307,38 @@ async def portfolio_summary() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": False})
-async def portfolio_add(symbol: str, cost: float, shares: int, added_date: str = "") -> dict[str, Any]:
-    """Add a holding to portfolio.
+async def portfolio_add(symbol: str, cost: float, shares: int,
+                        added_date: str = "",
+                        stop_loss: float = 0.0,
+                        take_profit: float = 0.0,
+                        plan_reason: str = "") -> dict[str, Any]:
+    """Add a holding to portfolio（可登记止盈止损计划，新手友好）.
 
     Args:
         symbol: Stock code
         cost: Purchase cost per share
         shares: Number of shares (must be multiple of 100)
         added_date: Purchase date (YYYY-MM-DD), empty for today
+        stop_loss: 计划止损价（可选，跌破自动在面板标红提醒）
+        take_profit: 计划止盈价（可选，涨破自动在面板标黄提醒）
+        plan_reason: 买入理由（可选，复盘用）
     """
     try:
         if shares < 100 or shares % 100 != 0:
             return _response(success=False, error="Shares must be at least 100 and multiples of 100", error_type="INVALID_PARAM")
+        # 计划字段兼容旧表
+        try:
+            _store.execute("""
+                ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS stop_loss DOUBLE
+            """)
+            _store.execute("""
+                ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS take_profit DOUBLE
+            """)
+            _store.execute("""
+                ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS plan_reason VARCHAR(200)
+            """)
+        except Exception:
+            pass
 
         # id 为 NOT NULL 主键且 insert_df 会用 None 填充缺失列 →
         # 显式生成 id（COALESCE(MAX)+1），避免插入 NULL 主键崩溃
@@ -1338,6 +1358,9 @@ async def portfolio_add(symbol: str, cost: float, shares: int, added_date: str =
             "shares": shares,
             "added_date": added_date or datetime.now().strftime("%Y-%m-%d"),
             "created_at": datetime.now().isoformat(),
+            "stop_loss": stop_loss if stop_loss > 0 else None,
+            "take_profit": take_profit if take_profit > 0 else None,
+            "plan_reason": plan_reason or None,
         }])
 
         if _store and _store.table_exists("portfolio"):

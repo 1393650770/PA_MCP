@@ -2524,6 +2524,58 @@ def _ensure_data(need: dict, symbols: Optional[str] = None) -> str:
         return ""
 
 
+def beginner_guide_md() -> str:
+    """新手三步走引导 + 数据状态横幅（首页顶部）。"""
+    banner = ""
+    try:
+        from pa_mcp.config import get_settings
+        from pa_mcp.data.store import DuckDBStore
+        store = DuckDBStore(get_settings().database.path)
+        store.connect()
+        try:
+            latest = store.get_latest_date("kline_daily")
+            n_hold = 0
+            if store.table_exists("portfolio"):
+                h = store.query_df("SELECT COUNT(*) AS c FROM portfolio", [])
+                n_hold = int(h.iloc[0]["c"]) if not h.empty else 0
+            score = None
+            try:
+                from pa_mcp.data.quality_report import get_quality_report
+                score = get_quality_report().generate()["score"]
+            except Exception:
+                pass
+            parts = []
+            if latest:
+                parts.append(f"行情更新至 {str(latest)[:10]}")
+            if score is not None:
+                parts.append(f"数据质量 {score}/100")
+            parts.append(f"持仓 {n_hold} 只")
+            stale = ""
+            if latest and str(latest)[:10] < "2026-08-14":
+                stale = "⚠️ 数据较旧，建议刷新"
+            banner = (f"\n**📊 数据状态**：{' · '.join(parts)}"
+                      f"　（{stale}）")
+        finally:
+            store.close()
+    except Exception:
+        pass
+
+    return (
+        "# 🧭 新手三步走（理财操作）\n"
+        "1. **💼 组合管理 → 添加持仓**：填代码/成本/股数，"
+        "可登记止盈止损价与买入理由\n"
+        "2. **📚 研究总览 → 💰 今日操作**：看持仓止盈止损时机 + 买入候选 + 仓位建议\n"
+        "3. **每周**：研究总览 → 📋 AI 研报，看策略表现与市场展望\n\n"
+        "> ⚠️ 本系统为研究工具非投资建议；止损纪律优先于一切信号。"
+        f"{banner}"
+    )
+
+
+def data_status_banner() -> str:
+    """数据状态横幅（配合引导刷新）。"""
+    return ""
+
+
 def export_csv_ui(symbols: str, what: str) -> str:
     """研究结果导出 CSV（选股/预测/持仓/格雷厄姆）。"""
     try:
@@ -3249,6 +3301,11 @@ def build_app():
         gr.Markdown("# 📈 PA_MCP 理财助手\n"
                     "多源行情 · 专业分析 · 事件驱动回测 · 组合风控")
 
+        # 新手引导 + 数据状态横幅（每次加载自动更新）
+        guide_md = gr.Markdown(beginner_guide_md())
+        app.load(lambda: beginner_guide_md() + data_status_banner(),
+                 outputs=[guide_md])
+
         with gr.Accordion("🔌 数据源健康", open=False):
             health_md = gr.Markdown()
             health_btn = gr.Button("刷新健康状态", size="sm")
@@ -3523,7 +3580,10 @@ def build_app():
                          outputs=[tk_out])
 
         with gr.Tab("📚 研究总览"):
-            gr.Markdown("**研究工具聚合页**——共享股票池，一键访问全部研究能力。")
+            gr.Markdown(
+                "**新手路线**：💰 今日操作（止损止盈/买入/建议）→ "
+                "🚀 一站式分析（全市场体检）→ 📋 AI 研报（每周）\n"
+                "**高级工具**见下方按钮——共享股票池，结果互相衔接。")
             with gr.Row():
                 ov_pool = gr.Textbox(
                     label="研究股票池（逗号分隔，≥5 只效果最佳）",
