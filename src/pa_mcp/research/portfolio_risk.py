@@ -129,6 +129,26 @@ class PortfolioRiskDashboard:
                 except Exception:
                     pass
 
+                # 综合信号（best-effort，独立拉行情）
+                consensus = None
+                try:
+                    from pa_mcp.research.consensus import ConsensusAnalyzer
+                    cdf = store.query_df(
+                        "SELECT * FROM kline_daily WHERE symbol = ? "
+                        "ORDER BY date DESC LIMIT 200", [sym])
+                    if not cdf.empty:
+                        con = await ConsensusAnalyzer(
+                            self._store_path).analyze(sym, kline_df=cdf)
+                        if "error" not in con:
+                            consensus = {
+                                "signal": con["signal"],
+                                "strength": con["strength"],
+                                "level": con["level"],
+                                "agreement": con["agreement"],
+                            }
+                except Exception:
+                    pass
+
                 holdings.append({
                     "symbol": sym,
                     "cost": cost, "shares": shares,
@@ -140,6 +160,7 @@ class PortfolioRiskDashboard:
                     "sector": sector,
                     "prediction": pred,
                     "resonance": resonance,
+                    "consensus": consensus,
                 })
 
             if not holdings or total_value <= 0:
@@ -248,6 +269,13 @@ class PortfolioRiskDashboard:
         if res_down:
             notes.append("**强共振看跌持仓**（三周期一致，优先减仓）："
                          + "、".join(h["symbol"] for h in res_down))
+        con_down = [h for h in holdings
+                    if h.get("consensus")
+                    and h["consensus"]["signal"] == "down"
+                    and h["consensus"]["strength"] >= 0.6]
+        if con_down:
+            notes.append("**⚠️ 综合信号看跌持仓**（5 源投票一致，最优先减仓）："
+                         + "、".join(h["symbol"] for h in con_down))
         if len(holdings) < 3:
             notes.append("持仓数量过少（<3 只），非系统性风险高")
         if score >= 60:
@@ -280,8 +308,8 @@ def format_risk_dashboard(result: dict[str, Any]) -> str:
            if result.get("market_bias") else ""),
         "",
         "### 持仓明细",
-        "| 代码 | 成本 | 现价 | 盈亏% | 占比% | 板块 | 预测(5d) | 共振 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 代码 | 成本 | 现价 | 盈亏% | 占比% | 板块 | 预测(5d) | 共振 | 综合信号 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     dir_zh = {"up": "📈", "down": "📉", "sideways": "➡️"}
     for h in result["holdings"]:
@@ -294,10 +322,16 @@ def format_risk_dashboard(result: dict[str, Any]) -> str:
         if res:
             res_txt = (f"{dir_zh.get(res['signal'], '')} {res['strength']:.0%}"
                        if res["strength"] >= 0.7 else f"分歧 {res['strength']:.0%}")
+        con = h.get("consensus")
+        con_txt = ""
+        if con:
+            con_txt = (f"{dir_zh.get(con['signal'], '')} {con['strength']:.0%}"
+                       if con["strength"] >= 0.6 else f"分歧 {con['strength']:.0%}")
         lines.append(
             f"| {h['symbol']} | {h['cost']:.2f} | {h['price']:.2f} | "
             f"{h['pnl_pct']:+.1f}% | {h['weight_pct']:.1f}% | "
-            f"{h['sector'] or '—'} | {pred_txt} | {res_txt or '—'} |")
+            f"{h['sector'] or '—'} | {pred_txt} | {res_txt or '—'} | "
+            f"{con_txt or '—'} |")
     c = result["concentration"]
     lines.extend([
         "",

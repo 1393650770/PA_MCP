@@ -83,6 +83,7 @@ def test_risk_dashboard(tmp_path):
     assert all(h["prediction"] for h in r["holdings"])
     # 共振字段存在（best-effort，可为 None 但键存在）
     assert all("resonance" in h for h in r["holdings"])
+    assert all("consensus" in h for h in r["holdings"])
     # 风险评分：集中度高 → 中/高风险
     assert r["risk_score"] >= 40
     assert r["risk_level"] in ("中", "高")
