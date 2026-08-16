@@ -1730,7 +1730,7 @@ def decision_tree_fig(symbol: str) -> tuple[Any, str]:
             from pa_mcp.research.market_structure import (
                 MarketStructureAnalyzer)
             ms = asyncio.run(MarketStructureAnalyzer().analyze(
-                use_network=False))
+                use_network=True))
             if ms["index"]["rows"] > 0:
                 market_bias = ms["joint"]["bias"]
         except Exception:

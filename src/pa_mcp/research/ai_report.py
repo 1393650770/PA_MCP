@@ -197,7 +197,7 @@ class AiMarketReport:
             from pa_mcp.research.market_structure import MarketStructureAnalyzer
             import asyncio
             ms = asyncio.run(MarketStructureAnalyzer(
-                self._store_path).analyze(use_network=False))
+                self._store_path).analyze(use_network=True))
             if ms["index"]["rows"] > 0:
                 out["market_structure"] = (
                     f"指数 {ms['index']['last_close']}（{ms['index']['last_date']}），"

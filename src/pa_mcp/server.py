@@ -2189,7 +2189,7 @@ async def get_decision_tree(symbol: str) -> dict[str, Any]:
         try:
             from pa_mcp.research.market_structure import (
                 MarketStructureAnalyzer)
-            ms = await MarketStructureAnalyzer().analyze(use_network=False)
+            ms = await MarketStructureAnalyzer().analyze(use_network=True)
             if ms["index"]["rows"] > 0:
                 market_bias = ms["joint"]["bias"]
         except Exception:
