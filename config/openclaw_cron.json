@@ -41,6 +41,15 @@
         "delivery": { "mode": "none" }
       },
       {
+        "name": "pamcp-trading-actions",
+        "_description": "每交易小时：今日操作面板（持仓止盈止损/买入候选/操作建议）",
+        "cron": "0 10,11,13,14 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 工具生成今日操作简报：\n1. 调 trading_actions() 获取今日操作面板（持仓止盈止损/买入候选/操作基调）\n2. 持仓有止盈止损动作时，调 predict_market(symbol, horizon='5d') 复核方向\n3. 调 regime_matrix() 确认市场操作建议\n输出：持仓操作清单（止盈/止损/持有+触发价）/买入候选/总仓位建议/风险提示。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
+      },
+      {
         "name": "pamcp-data-load",
         "_description": "每日收盘后：数据自动更新（8-phase 调度 + 数据体检）",
         "cron": "5 15 * * 1-5",

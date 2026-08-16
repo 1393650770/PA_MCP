@@ -2791,6 +2791,29 @@ async def data_quality_report() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def trading_actions(symbols: str = "") -> dict[str, Any]:
+    """💰 今日操作面板：持仓止盈止损 / 买入候选 / 操作建议。
+
+    - 持仓：每只给出动作（分批止盈/纪律止损/减仓/持有观察）+
+      触发价与依据（规则：盈利≥15%+综合看跌→止盈；亏损≥10%→止损）
+    - 买入候选：池内综合信号看涨（强度排序）
+    - 操作基调：市场结构 bias + 情绪矩阵 → 总仓位建议
+
+    Args:
+        symbols: 候选池（逗号分隔；缺省内置 6 只）
+    """
+    try:
+        from pa_mcp.research.trading_actions import trading_actions as run_ta
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()] or None
+        result = await run_ta(pool)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("trading_actions failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def one_click_analysis(symbols: str = "",
                              include_llm: bool = False) -> dict[str, Any]:
     """🚀 一站式分析：流水线整合报告（市场→选股→个股→持仓）。
