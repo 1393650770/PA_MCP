@@ -2405,20 +2405,24 @@ def factor_scan_ui(symbol: str) -> str:
 
 
 def regime_matrix_ui() -> str:
-    """情绪×轮动联合矩阵：市场状态标签 + 操作建议。"""
+    """情绪×轮动联合矩阵：市场状态标签 + 操作建议（自动前置）。"""
     try:
         from pa_mcp.research.regime_matrix import (
             get_regime_analyzer, format_matrix)
-        return format_matrix(get_regime_analyzer().analyze())
+        from pa_mcp.data.readiness import NEED_SENTIMENT
+        prefix = _ensure_data(NEED_SENTIMENT)
+        return prefix + format_matrix(get_regime_analyzer().analyze())
     except Exception as e:
         return f"矩阵分析失败：{str(e)[:200]}"
 
 
 def sentiment_cycle_ui() -> str:
-    """游资情绪周期：涨停梯队/连板高度/晋级率/阶段。"""
+    """游资情绪周期：涨停梯队/连板高度/晋级率/阶段（自动前置行情）。"""
     try:
         from pa_mcp.research.sentiment_cycle import (
             get_sentiment_analyzer, format_sentiment)
+        from pa_mcp.data.readiness import NEED_SENTIMENT
+        prefix = _ensure_data(NEED_SENTIMENT)
         result = get_sentiment_analyzer().analyze()
         if "error" in result:
             return result["error"]
