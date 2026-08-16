@@ -2488,7 +2488,7 @@ async def chan_beichi_backtest(symbols: str) -> dict[str, Any]:
 @mcp.tool(annotations={"readOnlyHint": True})
 async def export_research_data(what: Literal["selection", "prediction",
                                              "portfolio", "graham",
-                                             "nav"] = "selection",
+                                             "nav", "consensus"] = "selection",
                                symbols: str = "") -> dict[str, Any]:
     """研究结果导出为 CSV（可复制/Excel 导入）。
 
@@ -2624,6 +2624,25 @@ async def export_research_data(what: Literal["selection", "prediction",
                     "margin_of_safety_pct": r.margin_of_safety_pct,
                     "rating": r.rating,
                 })
+            buf = io.StringIO()
+            pd.DataFrame(rows).to_csv(buf, index=False)
+            csv_text = buf.getvalue()
+
+        elif what == "consensus":
+            # 自选股综合信号
+            from pa_mcp.research.consensus import scan_watchlist_consensus
+            result = await scan_watchlist_consensus(pool)
+            if not result.get("details"):
+                return _response(success=False, error="无综合信号结果",
+                                 error_type="DATA_UNAVAILABLE")
+            rows = [{
+                "symbol": r["symbol"],
+                "signal": r.get("signal", ""),
+                "strength": r.get("strength", ""),
+                "level": r.get("level", ""),
+                "agreement": r.get("agreement", ""),
+                "n_sources": r.get("n_sources", ""),
+            } for r in result["details"] if "error" not in r]
             buf = io.StringIO()
             pd.DataFrame(rows).to_csv(buf, index=False)
             csv_text = buf.getvalue()
