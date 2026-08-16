@@ -3516,11 +3516,11 @@ def build_app():
                                    variant="primary", scale=1)
             ov_out = gr.Markdown()
             ov_all.click(one_click_ui, inputs=[ov_pool], outputs=[ov_out])
-            ov_run.click(ai_report_ui, inputs=[ov_pool], outputs=[ov_out])
 
             with gr.Row():
                 ov_run = gr.Button("📋 AI 研究报告（LLM 综述）",
                                    variant="secondary")
+            ov_run.click(ai_report_ui, inputs=[ov_pool], outputs=[ov_out])
 
             with gr.Row():
                 ov_cmp = gr.Button("🏁 全策略对比")
