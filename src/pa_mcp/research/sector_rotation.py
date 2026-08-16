@@ -48,6 +48,72 @@ class SectorRotationAnalyzer:
         store.connect()
         return store
 
+    # ---- 新浪行业板块实时榜（今日热门/冷门，东财断连时的保底源） ----
+
+    @staticmethod
+    async def fetch_sina_boards() -> list[dict]:
+        """新浪行业板块实时快照（49 个行业，GBK JSONP）。
+
+        Returns:
+            [{code, name, change_pct, amount, leader_code, leader_name}]
+            按涨跌幅降序；网络失败返回 []。
+        """
+        import json
+        import re
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php",
+                headers={"User-Agent": "Mozilla/5.0"})
+            raw = urllib.request.urlopen(req, timeout=12).read().decode(
+                "gbk", errors="ignore")
+            m = re.search(r"\{.*\}", raw, re.S)
+            if not m:
+                return []
+            data = json.loads(m.group(0))
+            boards = []
+            for _, v in data.items():
+                f = v.split(",")
+                if len(f) < 13:
+                    continue
+                try:
+                    boards.append({
+                        "code": f[0], "name": f[1],
+                        "change_pct": float(f[4]),
+                        "amount": float(f[7]),
+                        "leader_code": f[8],
+                        "leader_name": f[12],
+                    })
+                except (ValueError, IndexError):
+                    continue
+            boards.sort(key=lambda b: b["change_pct"], reverse=True)
+            return boards
+        except Exception as e:  # noqa: BLE001
+            logger.warning("新浪板块列表获取失败", error=str(e)[:80])
+            return []
+
+    async def hot_cold_sectors(self, top_n: int = 10) -> dict:
+        """今日热门/冷门板块（新浪实时榜，永远可用不依赖东财历史）。
+
+        Returns:
+            hot: 涨幅榜 top_n [{name, change_pct, leader_name}]
+            cold: 跌幅榜 top_n
+            report: markdown
+        """
+        boards = await self.fetch_sina_boards()
+        if not boards:
+            return {"error": "新浪板块接口不可用，热门/冷门暂不可用"}
+
+        def _fmt(b: dict) -> dict:
+            return {"name": b["name"], "change_pct": b["change_pct"],
+                    "leader": f"{b['leader_name']}({b['leader_code']})"}
+
+        hot = [_fmt(b) for b in boards[:top_n]]
+        cold = [_fmt(b) for b in boards[-top_n:]][::-1]
+        report = format_hot_cold(hot, cold)
+        return {"hot": hot, "cold": cold, "report": report}
+
     # ---- 数据装载（东财板块，带重试） ----
     async def load_sector_data(self, top_n: int = 60, days: int = 120,
                                retries: int = 2) -> dict:
@@ -617,4 +683,27 @@ def format_rotation(pred: dict[str, Any]) -> str:
                      f"退出 {len(analysis.get('rotated_out', []))} 个）")
     lines.append("\n*预测落盘可验证：5 交易日后回填板块收益，"
                  "计算 top3 超额。研究参考，非投资建议。*")
+    return "\n".join(lines)
+
+
+def format_hot_cold(hot: list[dict], cold: list[dict]) -> str:
+    """热门/冷门板块 → markdown。"""
+    lines = ["## 🔥 今日热门 / 🧊 冷门板块（新浪行业实时）", ""]
+    if hot:
+        lines.append("### 热门板块（涨幅榜）")
+        lines.append("| 板块 | 涨跌幅 | 领涨股 |")
+        lines.append("|---|---|---|")
+        for b in hot:
+            lines.append(f"| {b['name']} | {b['change_pct']:+.2f}% | "
+                         f"{b['leader']} |")
+    if cold:
+        lines.append("")
+        lines.append("### 冷门板块（跌幅榜）")
+        lines.append("| 板块 | 涨跌幅 | 领涨股 |")
+        lines.append("|---|---|---|")
+        for b in cold:
+            lines.append(f"| {b['name']} | {b['change_pct']:+.2f}% | "
+                         f"{b['leader']} |")
+    lines.append("\n*新浪行业板块实时快照（免费源，延迟 3-15s）。"
+                 "研究参考，非投资建议。*")
     return "\n".join(lines)

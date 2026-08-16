@@ -2313,6 +2313,28 @@ async def predict_sector_rotation(load_data: bool = False,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def sector_hot_cold(top_n: int = 10) -> dict[str, Any]:
+    """今日热门/冷门板块（新浪行业板块实时榜，不依赖东财历史数据）。
+
+    新浪 49 个行业板块实时快照按当日涨跌幅排序：热门 top_n + 冷门 top_n，
+    附领涨股。东财板块断连时此工具仍可用——热门/冷门永远有真实数据。
+
+    Args:
+        top_n: 各取前 N（默认 10）
+    """
+    try:
+        from pa_mcp.research.sector_rotation import (
+            get_sector_rotation_analyzer)
+        result = await get_sector_rotation_analyzer().hot_cold_sectors(
+            top_n=top_n)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("sector_hot_cold failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def sector_rotation_status() -> dict[str, Any]:
     """板块轮动当前状态：RS 排名 / 轮入轮出 / 轮动速度（只读分析，不预测）。"""
     try:

@@ -3312,6 +3312,7 @@ _BUTTON_TIPS_CSS = """
 #vmb_btn:hover::after { content: "价值×动量选出的组合 vs 全池等权的历史回测"; }
 #cbb_btn:hover::after { content: "缠论背驰信号的组合回测（需长历史日线，ths同花顺源可补）"; }
 #report_btn:hover::after { content: "聚合全部确定性研究→LLM综述（总结/关注/风险/思路）；需LLM配置，无则模板降级"; }
+#hc_btn:hover::after { content: "新浪49个行业板块实时涨跌幅榜：热门top10+冷门top10（附领涨股），不依赖东财历史数据"; }
 """
 
 
@@ -3338,6 +3339,17 @@ def scan_button_guide_md() -> str:
         "- AI 市场研究报告：全部研究结果 LLM 综述（需 LLM 配置，无则模板降级）"
     )
     return (dynamic + "\n\n" + static) if dynamic else static
+
+
+def sector_hot_cold_ui() -> str:
+    """今日热门/冷门板块（新浪实时榜，不依赖东财历史数据）。"""
+    try:
+        import asyncio
+        from pa_mcp.research.sector_rotation import SectorRotationAnalyzer
+        result = asyncio.run(SectorRotationAnalyzer().hot_cold_sectors())
+        return result.get("report", result.get("error", "无结果"))
+    except Exception as e:
+        return f"热门/冷门板块获取失败：{str(e)[:200]}"
 
 
 def source_health_ui() -> str:
@@ -3498,6 +3510,11 @@ def build_app():
                              outputs=[sr_out])
                 sr_load_btn.click(lambda: sector_rotation_ui(True),
                                   outputs=[sr_out])
+
+                hc_btn = gr.Button("🔥 今日热门/冷门板块（新浪实时榜）",
+                                   variant="secondary", elem_id="hc_btn")
+                hc_out = gr.Markdown()
+                hc_btn.click(sector_hot_cold_ui, outputs=[hc_out])
 
             # ── ② 选股核心：成长/因子/价值（高频 → 默认展开）─────
             with gr.Accordion("🧬 ② 选股核心（成长 · 因子 · 价值）",

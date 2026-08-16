@@ -236,3 +236,43 @@ def test_format_rotation():
     }
     text = format_rotation(pred)
     assert "板块轮动" in text and "银行" in text and "强者恒强" in text
+
+
+# ---- 热门/冷门板块（新浪实时榜） ----
+
+async def test_hot_cold_sectors(monkeypatch):
+    """热门/冷门排序与渲染。"""
+    from pa_mcp.research.sector_rotation import SectorRotationAnalyzer
+
+    async def _fake_boards(self):
+        return [
+            {"code": "new_a", "name": "板块A", "change_pct": 3.5,
+             "amount": 1e9, "leader_code": "sh600001", "leader_name": "龙头A"},
+            {"code": "new_b", "name": "板块B", "change_pct": 1.2,
+             "amount": 2e9, "leader_code": "sh600002", "leader_name": "龙头B"},
+            {"code": "new_c", "name": "板块C", "change_pct": -2.1,
+             "amount": 3e9, "leader_code": "sh600003", "leader_name": "龙头C"},
+        ]
+
+    monkeypatch.setattr(SectorRotationAnalyzer, "fetch_sina_boards",
+                        _fake_boards)
+    r = await SectorRotationAnalyzer().hot_cold_sectors(top_n=2)
+    assert [b["name"] for b in r["hot"]] == ["板块A", "板块B"]
+    assert [b["name"] for b in r["cold"]] == ["板块C", "板块B"]  # 涨幅最低 2 个
+    assert "热门板块" in r["report"] and "冷门板块" in r["report"]
+    assert "+3.50%" in r["report"] and "-2.10%" in r["report"]
+    assert "龙头A" in r["report"]
+
+
+async def test_hot_cold_fallback_failure(monkeypatch):
+    """新浪接口全失败 → error 降级（不抛异常）。"""
+    from pa_mcp.research.sector_rotation import SectorRotationAnalyzer
+
+    async def _no_boards(self):
+        return []
+
+    monkeypatch.setattr(SectorRotationAnalyzer, "fetch_sina_boards",
+                        _no_boards)
+    r = await SectorRotationAnalyzer().hot_cold_sectors()
+    assert "error" in r
+    assert "新浪板块接口不可用" in r["error"]
