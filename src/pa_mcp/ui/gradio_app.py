@@ -1356,6 +1356,22 @@ def calibration_fig_ui() -> tuple[Any, str]:
         return None, f"校准图生成失败：{str(e)[:200]}"
 
 
+def watchlist_consensus_ui(symbols: str) -> str:
+    """自选股综合信号扫描（批量投票清单）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.consensus import (
+            scan_watchlist_consensus, format_watchlist_consensus)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return "至少需要 2 只股票"
+        result = _asyncio.run(scan_watchlist_consensus(pool))
+        return format_watchlist_consensus(result)
+    except Exception as e:
+        return f"综合信号扫描失败：{str(e)[:200]}"
+
+
 def consensus_event_study_ui(symbol: str) -> str:
     """综合信号事件研究（融合投票预测力）。"""
     symbol = symbol.strip()
@@ -3509,6 +3525,10 @@ def build_app():
                                     variant="secondary")
             cons_es_btn.click(consensus_event_study_ui, inputs=[pred_sym],
                               outputs=[res_out])
+
+            wl_con_btn = gr.Button("🧮 自选股综合信号扫描", variant="secondary")
+            wl_con_btn.click(watchlist_consensus_ui, inputs=[wl_res_in],
+                             outputs=[res_out])
 
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")

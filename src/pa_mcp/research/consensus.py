@@ -289,6 +289,85 @@ def format_consensus_event_study(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+async def scan_watchlist_consensus(
+    symbols: list[str],
+    klines: Optional[dict[str, pd.DataFrame]] = None,
+) -> dict[str, Any]:
+    """自选股批量综合信号扫描：强看涨/看跌/分歧分类清单。
+
+    Args:
+        symbols: 股票代码列表（2-20 只）
+        klines: 可选行情覆盖（缺省每只从库拉取）
+    """
+    analyzer = ConsensusAnalyzer()
+    rows = []
+    for sym in symbols[:20]:
+        try:
+            df = klines.get(sym) if klines else None
+            if df is None:
+                df = analyzer._load_kline(sym)
+            if df is None or df.empty:
+                rows.append({"symbol": sym, "error": "无数据"})
+                continue
+            r = await analyzer.analyze(sym, kline_df=df)
+            if "error" in r:
+                rows.append({"symbol": sym, "error": r["error"]})
+                continue
+            rows.append({
+                "symbol": sym,
+                "signal": r["signal"],
+                "strength": r["strength"],
+                "level": r["level"],
+                "agreement": r["agreement"],
+                "n_sources": len(r["sources"]),
+            })
+        except Exception as e:  # noqa: BLE001
+            rows.append({"symbol": sym, "error": str(e)[:60]})
+
+    strong_up = [r for r in rows if r.get("signal") == "up"
+                 and r.get("strength", 0) >= 0.6]
+    strong_down = [r for r in rows if r.get("signal") == "down"
+                   and r.get("strength", 0) >= 0.6]
+    mixed = [r for r in rows if "error" not in r
+             and r.get("strength", 1) < 0.6]
+    return {
+        "n_scanned": len(rows),
+        "strong_up": [r["symbol"] for r in strong_up],
+        "strong_down": [r["symbol"] for r in strong_down],
+        "mixed": [r["symbol"] for r in mixed],
+        "details": rows,
+        "note": ("强信号 = 5 源加权投票强度 ≥60%（多数一致）；"
+                 "mixed = 分歧/未确认。研究参考，非投资建议。"),
+    }
+
+
+def format_watchlist_consensus(result: dict[str, Any]) -> str:
+    """批量综合信号 → markdown。"""
+    lines = [
+        f"## 🧮 自选股综合信号扫描（{result['n_scanned']} 只）",
+        f"- **📈 强看涨**（{len(result['strong_up'])}）："
+        + ("、".join(result["strong_up"]) or "无"),
+        f"- **📉 强看跌**（{len(result['strong_down'])}）："
+        + ("、".join(result["strong_down"]) or "无"),
+        f"- **➡️ 分歧**（{len(result['mixed'])}）："
+        + ("、".join(result["mixed"]) or "无"),
+        "",
+        "| 代码 | 信号 | 强度 | 等级 | 一致度 | 信号源数 |",
+        "|---|---|---|---|---|---|",
+    ]
+    dir_zh = {"up": "📈", "down": "📉", "sideways": "➡️"}
+    for r in result["details"]:
+        if "error" in r:
+            lines.append(f"| {r['symbol']} | ❌ {r['error']} |")
+            continue
+        lines.append(
+            f"| {r['symbol']} | {dir_zh.get(r['signal'], r['signal'])} | "
+            f"{r['strength']:.0%} | {r['level']} | "
+            f"{r['agreement']:.0%} | {r['n_sources']} |")
+    lines.append(f"\n*{result['note']}*")
+    return "\n".join(lines)
+
+
 _analyzer: Optional[ConsensusAnalyzer] = None
 
 

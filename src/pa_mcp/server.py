@@ -1672,6 +1672,31 @@ async def agent_market_state() -> dict[str, Any]:
 # ---- MCP Tools: Market Prediction & LLM Diagnosis (NEW) ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def watchlist_consensus(symbols: str) -> dict[str, Any]:
+    """自选股综合信号扫描：批量 5 源加权投票 → 强看涨/看跌/分歧清单。
+
+    快速识别「多源一致」标的（共振/预测/策略/背驰/大盘 ≥60% 强度）。
+
+    Args:
+        symbols: 股票代码（逗号分隔，2-20 只）
+    """
+    try:
+        from pa_mcp.research.consensus import (
+            scan_watchlist_consensus, format_watchlist_consensus)
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()]
+        if len(pool) < 2:
+            return _response(success=False, error="至少需要 2 只股票",
+                             error_type="INVALID_ARGUMENT")
+        result = await scan_watchlist_consensus(pool)
+        return _response(data={**result,
+                               "report": format_watchlist_consensus(result)})
+    except Exception as e:
+        logger.error("watchlist_consensus failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def consensus_event_study(symbol: str) -> dict[str, Any]:
     """综合信号事件研究：融合投票是否有额外预测力。
 

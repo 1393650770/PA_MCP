@@ -60,6 +60,26 @@ def test_consensus_no_data():
     assert "error" in r
 
 
+def test_watchlist_consensus_scan():
+    """批量综合信号：分类清单 + 明细（信号/强度/源数）。"""
+    from pa_mcp.research.consensus import (
+        scan_watchlist_consensus, format_watchlist_consensus)
+    klines = {}
+    for i, trend in enumerate((0.005, 0.004, -0.003, 0.001, 0.003)):
+        klines[f"6000{i:02d}"] = _df(n=220, seed=i + 20, trend=trend)
+    r = asyncio.run(scan_watchlist_consensus(list(klines.keys()),
+                                             klines=klines))
+    assert r["n_scanned"] == 5
+    assert len(r["strong_up"]) + len(r["strong_down"]) + len(r["mixed"]) == 5
+    for x in r["details"]:
+        if "error" not in x:
+            assert x["signal"] in ("up", "down", "sideways")
+            assert 0 <= x["strength"] <= 1
+            assert x["n_sources"] >= 1
+    text = format_watchlist_consensus(r)
+    assert "综合信号扫描" in text
+
+
 def test_consensus_event_study():
     """强趋势 → 综合信号 → 事件研究可跑（可检验性）。"""
     from pa_mcp.research.consensus import (
