@@ -41,6 +41,9 @@ REPORT_PROMPT = """你是 A 股市场研究综述编辑。基于以下确定性�
 【核心标的多周期共振】
 {resonance}
 
+【核心标的多信号综合投票】
+{consensus}
+
 【预测验证成绩单】
 {prediction_eval}
 
@@ -170,6 +173,25 @@ class AiMarketReport:
         except Exception:
             out["resonance"] = "无共振数据"
 
+        # 核心标的综合信号（best-effort，前 3 只加权投票）
+        try:
+            from pa_mcp.research.consensus import ConsensusAnalyzer
+            import asyncio
+            con_parts = []
+            for sym in symbols[:3]:
+                df = self._load_klines([sym]).get(sym)
+                if df is None:
+                    continue
+                c = asyncio.run(ConsensusAnalyzer(
+                    self._store_path).analyze(sym, kline_df=df))
+                if "error" not in c:
+                    con_parts.append(
+                        f"{sym}: {c['signal']}（{c['level']}强度 "
+                        f"{c['strength']:.0%}，一致度 {c['agreement']:.0%}）")
+            out["consensus"] = "；".join(con_parts) if con_parts else "无综合信号"
+        except Exception:
+            out["consensus"] = "无综合信号"
+
         # 市场结构（指数缠论 × 情绪，best-effort）
         try:
             from pa_mcp.research.market_structure import MarketStructureAnalyzer
@@ -249,6 +271,7 @@ class AiMarketReport:
                     value_momentum=sections.get("value_momentum", "无"),
                     portfolio_risk=sections.get("portfolio_risk", "无"),
                     resonance=sections.get("resonance", "无"),
+                    consensus=sections.get("consensus", "无"),
                     prediction_eval=sections.get("prediction_eval", "无"),
                 )
                 params = LLMCallParams(
@@ -291,6 +314,7 @@ class AiMarketReport:
             f"- **价值×动量**：{sections.get('value_momentum', '—')}",
             f"- **持仓风险**：{sections.get('portfolio_risk', '—')}",
             f"- **核心共振**：{sections.get('resonance', '—')}",
+            f"- **综合信号**：{sections.get('consensus', '—')}",
             f"- **预测验证**：{sections.get('prediction_eval', '—')}",
         ]
         if llm:
