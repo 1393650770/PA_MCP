@@ -142,6 +142,7 @@
 | 持仓风险可视化 | implemented_verified | `ui.portfolio_risk_fig`, UI 📊 | 持仓权重饼图（预测方向标注）+ 盈亏条形图 + 风险评分标题 | 空持仓降级冒烟 | 复用风险面板数据 |
 | 每日数据自动更新 | implemented_verified | MCP `run_daily_update`, cron `pamcp-data-load` | 调度器 8-phase 全链路 + 数据体检联动（评分<70 告警） | 调度器既有测试覆盖 | 耗时 2 分钟+ |
 | 市场结构×预测联动 | implemented_verified | `prediction._market_bias_context`, 预测 prompt | 指数缠论方向注入个股预测 prompt（个股/板块/大盘三层环境） | 注入文本/无数据空串 1项 | 库内指数数据优先 |
+| 综合决策信号 | implemented_verified | `research/consensus.py`, MCP `signal_consensus`/`watchlist_consensus`/`consensus_event_study`, UI 🧮 | 5 源加权投票（共振×3/预测×2/策略×2/背驰×1/大盘×2）→ 综合方向/强度/一致度；**覆盖决策树方向 + 仓位校准(×1.4/×0.6) + 持仓综合信号列/最优先减仓告警 + 批量扫描 + 事件研究验证 + AI 研报/盘前 cron** | 聚合/偏涨/无数据/批量/事件研究/覆盖 6项 | 全部复用已有模块，零重复计算 |
 | 多周期预测共振 | implemented_verified | `research/resonance.py`, MCP `predict_resonance`, UI 🎯 | 1d/5d/20d 三周期方向一致性：全同向=强共振(100%)/两周期=共振(70%)/分歧=观望；**强共振覆盖决策树单周期方向 + 仓位校准(×1.3/×0.7) + 持仓共振列/减仓告警 + 事件研究验证** | 结构/强趋势/无数据/共振覆盖/仓位校准/持仓字段/事件研究 7项 | 确定性模式控成本 |
 
 ## 工程基础
