@@ -3255,26 +3255,80 @@ def dragon_tiger_summary_ui(date: str = "") -> str:
 
 # ---- 数据源健康面板 ----
 
+# 市场扫描 Tab 按钮悬停提示（Gradio Button 无 tooltip 参数，
+# 用 elem_id + CSS :hover::after 实现）
+_BUTTON_TIPS_CSS = """
+#sm_btn,#sc_btn,#rm_btn,#sr_btn,#sr_load_btn,#cs_btn,#fs_btn,#fsp_btn,
+#fs0_btn,#gra_btn,#vm_btn,#cmp_btn,#fc_btn,#fpb_btn,#sens_btn,#vmb_btn,
+#cbb_btn,#report_btn { position: relative; }
+#sm_btn:hover::after,#sc_btn:hover::after,#rm_btn:hover::after,
+#sr_btn:hover::after,#sr_load_btn:hover::after,#cs_btn:hover::after,
+#fs_btn:hover::after,#fsp_btn:hover::after,#fs0_btn:hover::after,
+#gra_btn:hover::after,#vm_btn:hover::after,#cmp_btn:hover::after,
+#fc_btn:hover::after,#fpb_btn:hover::after,#sens_btn:hover::after,
+#vmb_btn:hover::after,#cbb_btn:hover::after,#report_btn:hover::after {
+  position: absolute; left: 0; top: 110%; z-index: 100;
+  background: #2b2b2b; color: #fff; padding: 6px 10px; border-radius: 6px;
+  font-size: 12px; line-height: 1.5; white-space: normal; max-width: 340px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.3); pointer-events: none;
+}
+#sm_btn:hover::after { content: "按所选策略扫描内置股池，输出当前买入信号股票及历史5日胜率（基于统计而非预测）"; }
+#sc_btn:hover::after { content: "涨停梯队+连板高度+晋级率→情绪分+四阶段判定（启动/发酵/高潮/退潮+冰点）"; }
+#rm_btn:hover::after { content: "情绪阶段×板块轮动速度联合矩阵，给出市场建议与风险"; }
+#sr_btn:hover::after { content: "东财板块RS动量排名+加速检测+轮入/轮出信号；有LLM时预测未来一周强势板块"; }
+#sr_load_btn:hover::after { content: "首次使用先装载东财行业板块行情（约30-60s），之后可直接预测"; }
+#cs_btn:hover::after { content: "欧奈尔七要素筛选成长股；股票池为空时扫全库；需财务数据（自动装载）"; }
+#fs_btn:hover::after { content: "10因子IC加权合成评分选股"; }
+#fsp_btn:hover::after { content: "因子评分×50% + AI预测×50% 融合选股（需LLM配置，无则降级纯因子）"; }
+#fs0_btn:hover::after { content: "无AI纯因子评分，与融合选股对照用"; }
+#gra_btn:hover::after { content: "防御性7条标准+成长公式内在价值/安全边际；需财务数据"; }
+#vm_btn:hover::after { content: "格雷厄姆评分×60日动量→四象限，「便宜且走强」象限最佳"; }
+#cmp_btn:hover::after { content: "全部注册策略同台事件研究，输出胜率/超额/有效判定"; }
+#fc_btn:hover::after { content: "单只股票10因子逐一检验IC/分层收益/单调性"; }
+#fpb_btn:hover::after { content: "因子选出的组合 vs 全池等权的历史回测"; }
+#sens_btn:hover::after { content: "扫描AI预测权重0-100%对选股结果的影响"; }
+#vmb_btn:hover::after { content: "价值×动量选出的组合 vs 全池等权的历史回测"; }
+#cbb_btn:hover::after { content: "缠论背驰信号的组合回测（需长历史日线，ths同花顺源可补）"; }
+#report_btn:hover::after { content: "聚合全部确定性研究→LLM综述（总结/关注/风险/思路）；需LLM配置，无则模板降级"; }
+"""
+
+
+def market_scan_guide_md() -> str:
+    """市场扫描 Tab 顶部引导（静态文案）。"""
+    return (
+        "**用法**：本页按「① 看环境 → ② 选方法 → ③ 做验证 → ④ 出报告」"
+        "四步组织。顶部「扫描股票池」是最快入口；"
+        "每个按钮悬停可见一句提示，页尾「📖 按钮用法速查」含全部说明。\n"
+        "数据会自动补齐：缺行情/财务时点按钮会先自动装载（需网络）。"
+    )
+
+
+def scan_button_guide_md() -> str:
+    """市场扫描 Tab 按钮速查 = METHOD_CATALOG 动态生成 + 未收录按钮静态补充。"""
+    from pa_mcp.research.methodology_guide import render_tab_button_guide
+    dynamic = render_tab_button_guide("📡 市场扫描")
+    static = (
+        "**未收录编目的内部工具**：\n"
+        "- 扫描股票池：按所选策略扫描内置股池，输出当前买入信号股票及历史 5 日胜率\n"
+        "- 因子+AI 预测融合 / 纯因子对照：同一选股的两套对照（AI 权重 50% vs 0%）\n"
+        "- 因子选股组合回测 / 预测权重敏感性 / 价值×动量组合回测 / 缠论背驰组合回测："
+        "选股与信号的历史回测验证（vs 全池等权）\n"
+        "- AI 市场研究报告：全部研究结果 LLM 综述（需 LLM 配置，无则模板降级）"
+    )
+    return (dynamic + "\n\n" + static) if dynamic else static
+
+
 def source_health_ui() -> str:
-    """展示多源路由健康状态。"""
+    """展示多源路由健康状态（配置驱动：源链与 default.yaml 一致）。"""
     try:
-        from pa_mcp.data.router import DataSourceRouter, CircuitBreakerConfig
-        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
-        from pa_mcp.data.sources.sina_adapter import SinaAdapter
-        from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
         from pa_mcp.config import get_settings
+        from pa_mcp.data.source_factory import build_router
 
         settings = get_settings()
-        chain = [
-            ("tencent", TencentAdapter()), ("sina", SinaAdapter()),
-            ("eastmoney", EastMoneyAdapter()),
-        ]
-        cfg = CircuitBreakerConfig(
-            failure_threshold=settings.router.circuit.failure_threshold,
-            cooldown_seconds=settings.router.circuit.cooldown_seconds,
-        )
-        router = DataSourceRouter(chain, {n: cfg for n, _ in chain},
-                                  min_source_interval={"eastmoney": 1.2})
+        router = build_router(settings, min_source_interval={
+            "eastmoney": 1.2, "ths": 0.4})
+        if router is None:
+            return "数据源链为空（检查 config/default.yaml data_sources.sources）"
 
         lines = ["| 数据源 | 状态 | 成功 | 失败 | 熔断次数 | 最近错误 |",
                  "|---|---|---|---|---|---|"]
@@ -3286,7 +3340,8 @@ def source_health_ui() -> str:
                 f"{h['failure_count']} | {h['trip_count']} | "
                 f"{(h['last_error'] or '—')[:40]} |"
             )
-        lines.append("\n*源链：tencent → sina → eastmoney（熔断+限流+缓存）*")
+        chain = " → ".join(router.source_names)
+        lines.append(f"\n*源链：{chain}（熔断+限流+缓存）*")
         return "\n".join(lines)
     except Exception as e:
         return f"健康面板不可用：{str(e)[:100]}"
@@ -3380,120 +3435,158 @@ def build_app():
                           outputs=[cmp_fig, cmp_table])
 
         with gr.Tab("📡 市场扫描"):
-            sm_strategy = gr.Dropdown(STRATEGY_OPTIONS,
-                                      value=detect_best_strategy(),
-                                      label="策略（找当前买入信号）")
-            sm_btn = gr.Button("扫描股票池", variant="primary")
+            gr.Markdown(market_scan_guide_md())
+
+            # ── 高频入口：扫描股票池（始终可见）──────────────────
+            with gr.Row():
+                sm_strategy = gr.Dropdown(STRATEGY_OPTIONS,
+                                          value=detect_best_strategy(),
+                                          label="策略（找当前买入信号）",
+                                          scale=2)
+                sm_btn = gr.Button("扫描股票池", variant="primary", scale=1,
+                                   elem_id="sm_btn")
             sm_out = gr.Markdown()
             sm_btn.click(scan_market_ui, inputs=[sm_strategy],
                          outputs=[sm_out])
-            gr.Markdown("扫描内置常用股池，输出**当前处于买入信号状态**的股票"
-                        "（含该信号历史5日胜率）。基于统计而非预测。")
-            with gr.Row():
-                cs_pool = gr.Textbox(label="CANSLIM 股票池（逗号分隔，空=全库）",
-                                     placeholder="000001,600036,300750", scale=2)
-                cs_btn = gr.Button("🧬 CANSLIM 成长股扫描（欧奈尔）",
-                                   variant="secondary", scale=1)
-            cs_out = gr.Markdown()
-            cs_btn.click(canslim_ui, inputs=[cs_pool], outputs=[cs_out])
 
-            with gr.Row():
-                sr_btn = gr.Button("🔄 板块轮动预测（东财板块+LLM）",
-                                   variant="secondary", scale=1)
-                sr_load_btn = gr.Button("⏬ 先装载板块数据（首次必点，约30-60s）",
-                                        variant="secondary", scale=1)
-            sr_out = gr.Markdown()
-            sr_btn.click(lambda: sector_rotation_ui(False), outputs=[sr_out])
-            sr_load_btn.click(lambda: sector_rotation_ui(True),
-                              outputs=[sr_out])
+            # ── ① 市场环境：情绪/矩阵/板块轮动（高频 → 默认展开）──
+            with gr.Accordion("🌡️ ① 市场环境（情绪 · 矩阵 · 板块轮动）",
+                              open=True):
+                gr.Markdown("先判断市场状态：情绪周期定退潮/启动，"
+                            "矩阵联看情绪×轮动，板块轮动找主线。")
+                sc_btn = gr.Button("🌡️ 游资情绪周期（涨停梯队/连板/晋级率）",
+                                   variant="secondary", elem_id="sc_btn")
+                sc_out = gr.Markdown()
+                sc_btn.click(sentiment_cycle_ui, outputs=[sc_out])
 
-            sc_btn = gr.Button("🌡️ 游资情绪周期（涨停梯队/连板/晋级率）",
-                               variant="secondary")
-            sc_out = gr.Markdown()
-            sc_btn.click(sentiment_cycle_ui, outputs=[sc_out])
+                rm_btn = gr.Button("🧭 情绪×轮动联合矩阵（Regime Matrix）",
+                                   variant="secondary", elem_id="rm_btn")
+                rm_out = gr.Markdown()
+                rm_btn.click(regime_matrix_ui, outputs=[rm_out])
 
-            rm_btn = gr.Button("🧭 情绪×轮动联合矩阵（Regime Matrix）",
-                               variant="secondary")
-            rm_out = gr.Markdown()
-            rm_btn.click(regime_matrix_ui, outputs=[rm_out])
+                with gr.Row():
+                    sr_btn = gr.Button("🔄 板块轮动预测（东财板块+LLM）",
+                                       variant="secondary", scale=1,
+                                       elem_id="sr_btn")
+                    sr_load_btn = gr.Button(
+                        "⏬ 先装载板块数据（首次必点，约30-60s）",
+                        variant="secondary", scale=1, elem_id="sr_load_btn")
+                sr_out = gr.Markdown()
+                sr_btn.click(lambda: sector_rotation_ui(False),
+                             outputs=[sr_out])
+                sr_load_btn.click(lambda: sector_rotation_ui(True),
+                                  outputs=[sr_out])
 
-            with gr.Row():
-                fc_sym = gr.Textbox(label="因子扫描股票代码",
-                                    value="000001", scale=2)
-                fc_btn = gr.Button("🧬 因子批量扫描（IC/分层检验）",
-                                   variant="secondary", scale=1)
-            fc_out = gr.Markdown()
-            fc_btn.click(factor_scan_ui, inputs=[fc_sym], outputs=[fc_out])
+            # ── ② 选股核心：成长/因子/价值（高频 → 默认展开）─────
+            with gr.Accordion("🧬 ② 选股核心（成长 · 因子 · 价值）",
+                              open=True):
+                gr.Markdown("选定方向后点按钮选股；「因子选股池」为共享输入，"
+                            "本组多数按钮共用。")
+                with gr.Row():
+                    cs_pool = gr.Textbox(
+                        label="CANSLIM 股票池（逗号分隔，空=全库）",
+                        placeholder="000001,600036,300750", scale=2)
+                    cs_btn = gr.Button("🧬 CANSLIM 成长股扫描（欧奈尔）",
+                                       variant="secondary", scale=1,
+                                       elem_id="cs_btn")
+                cs_out = gr.Markdown()
+                cs_btn.click(lambda pool: canslim_ui(pool=pool),
+                             inputs=[cs_pool], outputs=[cs_out])
 
-            with gr.Row():
-                fs_pool = gr.Textbox(
-                    label="因子选股池（逗号分隔，≥5 只）",
-                    value="000001,600036,300750,000858,600519,601318",
-                    scale=2)
-                fs_btn = gr.Button("🎯 多因子选股（IC 加权合成）",
-                                   variant="secondary", scale=1)
-            fs_out = gr.Markdown()
-            fs_btn.click(factor_selection_ui, inputs=[fs_pool],
-                         outputs=[fs_out])
+                with gr.Row():
+                    fs_pool = gr.Textbox(
+                        label="因子选股池（逗号分隔，≥5 只）",
+                        value="000001,600036,300750,000858,600519,601318",
+                        scale=2)
+                    fs_btn = gr.Button("🎯 多因子选股（IC 加权合成）",
+                                       variant="secondary", scale=1,
+                                       elem_id="fs_btn")
+                fs_out = gr.Markdown()
+                fs_btn.click(factor_selection_ui, inputs=[fs_pool],
+                             outputs=[fs_out])
 
-            with gr.Row():
-                fsp_btn = gr.Button("🤖 因子+AI 预测融合选股（权重 50%）",
-                                    variant="secondary")
-                fs0_btn = gr.Button("🧮 纯因子选股（对照）",
-                                    variant="secondary")
-            fs0_out = gr.Markdown()
-            fsp_btn.click(lambda: factor_selection_ui(fs_pool.value,
-                                                      prediction_weight=0.5),
-                          outputs=[fs0_out])
-            fs0_btn.click(lambda: factor_selection_ui(fs_pool.value,
-                                                      prediction_weight=0.0),
-                          outputs=[fs0_out])
+                with gr.Row():
+                    fsp_btn = gr.Button("🤖 因子+AI 预测融合选股（权重 50%）",
+                                        variant="secondary",
+                                        elem_id="fsp_btn")
+                    fs0_btn = gr.Button("🧮 纯因子选股（对照）",
+                                        variant="secondary",
+                                        elem_id="fs0_btn")
+                fs0_out = gr.Markdown()
+                fsp_btn.click(lambda: factor_selection_ui(
+                    fs_pool.value, prediction_weight=0.5),
+                    outputs=[fs0_out])
+                fs0_btn.click(lambda: factor_selection_ui(
+                    fs_pool.value, prediction_weight=0.0),
+                    outputs=[fs0_out])
 
-            fpb_btn = gr.Button("🏆 因子选股组合回测（vs 全池等权）",
-                                variant="secondary")
-            fpb_out = gr.Markdown()
-            fpb_btn.click(factor_portfolio_ui, inputs=[fs_pool],
-                          outputs=[fpb_out])
+                gra_btn = gr.Button("📗 格雷厄姆价值筛选（防御性 7 条）",
+                                    variant="secondary", elem_id="gra_btn")
+                gra_out = gr.Markdown()
+                gra_btn.click(graham_ui, inputs=[fs_pool], outputs=[gra_out])
 
-            sens_btn = gr.Button("⚖️ 预测权重敏感性（AI 该占多大权重）",
-                                 variant="secondary")
-            sens_out = gr.Markdown()
-            sens_btn.click(factor_sensitivity_ui, inputs=[fs_pool],
-                           outputs=[sens_out])
+                vm_btn = gr.Button("⚖️ 价值×动量复合选股（便宜且走强）",
+                                   variant="secondary", elem_id="vm_btn")
+                vm_out = gr.Markdown()
+                vm_btn.click(value_momentum_ui, inputs=[fs_pool],
+                             outputs=[vm_out])
 
-            cmp_btn = gr.Button("🏁 全策略事件研究对比（10 策略同台检验）",
-                                variant="secondary")
-            cmp_out = gr.Markdown()
-            cmp_btn.click(strategy_compare_ui, inputs=[fs_pool],
-                          outputs=[cmp_out])
+            # ── ③ 验证与回测（低频重活 → 默认折叠）──────────────
+            with gr.Accordion("🏁 ③ 验证与回测（先验证再信）", open=False):
+                gr.Markdown("事件研究/回测是确定性检验——先验证再信，"
+                            "别被单次回测图骗了。")
+                cmp_btn = gr.Button("🏁 全策略事件研究对比（10 策略同台检验）",
+                                    variant="secondary", elem_id="cmp_btn")
+                cmp_out = gr.Markdown()
+                cmp_btn.click(strategy_compare_ui, inputs=[fs_pool],
+                              outputs=[cmp_out])
 
-            gra_btn = gr.Button("📗 格雷厄姆价值筛选（防御性 7 条）",
-                                variant="secondary")
-            gra_out = gr.Markdown()
-            gra_btn.click(graham_ui, inputs=[fs_pool], outputs=[gra_out])
+                with gr.Row():
+                    fc_sym = gr.Textbox(label="因子扫描股票代码",
+                                        value="000001", scale=2)
+                    fc_btn = gr.Button("🧬 因子批量扫描（IC/分层检验）",
+                                       variant="secondary", scale=1,
+                                       elem_id="fc_btn")
+                fc_out = gr.Markdown()
+                fc_btn.click(factor_scan_ui, inputs=[fc_sym],
+                             outputs=[fc_out])
 
-            vm_btn = gr.Button("⚖️ 价值×动量复合选股（便宜且走强）",
-                               variant="secondary")
-            vm_out = gr.Markdown()
-            vm_btn.click(value_momentum_ui, inputs=[fs_pool], outputs=[vm_out])
+                fpb_btn = gr.Button("🏆 因子选股组合回测（vs 全池等权）",
+                                    variant="secondary", elem_id="fpb_btn")
+                fpb_out = gr.Markdown()
+                fpb_btn.click(factor_portfolio_ui, inputs=[fs_pool],
+                              outputs=[fpb_out])
 
-            vmb_btn = gr.Button("🏆 价值×动量组合回测（vs 全池等权）",
-                                variant="secondary")
-            vmb_out = gr.Markdown()
-            vmb_btn.click(value_momentum_backtest_ui, inputs=[fs_pool],
-                          outputs=[vmb_out])
+                sens_btn = gr.Button("⚖️ 预测权重敏感性（AI 该占多大权重）",
+                                     variant="secondary", elem_id="sens_btn")
+                sens_out = gr.Markdown()
+                sens_btn.click(factor_sensitivity_ui, inputs=[fs_pool],
+                               outputs=[sens_out])
 
-            report_btn = gr.Button("📋 AI 市场研究报告（LLM 综述）",
-                                   variant="primary")
-            report_out = gr.Markdown()
-            report_btn.click(ai_report_ui, inputs=[fs_pool],
-                             outputs=[report_out])
+                vmb_btn = gr.Button("🏆 价值×动量组合回测（vs 全池等权）",
+                                    variant="secondary", elem_id="vmb_btn")
+                vmb_out = gr.Markdown()
+                vmb_btn.click(value_momentum_backtest_ui, inputs=[fs_pool],
+                              outputs=[vmb_out])
 
-            cbb_btn = gr.Button("🌀 缠论背驰信号组合回测（vs 等权）",
-                                variant="secondary")
-            cbb_out = gr.Markdown()
-            cbb_btn.click(chan_beichi_backtest_ui, inputs=[fs_pool],
-                          outputs=[cbb_out])
+                cbb_btn = gr.Button("🌀 缠论背驰信号组合回测（vs 等权）",
+                                    variant="secondary", elem_id="cbb_btn")
+                cbb_out = gr.Markdown()
+                cbb_btn.click(chan_beichi_backtest_ui, inputs=[fs_pool],
+                              outputs=[cbb_out])
+
+            # ── ④ AI 报告（LLM）─────────────────────────────────
+            with gr.Accordion("📋 ④ AI 报告（LLM 综述）", open=False):
+                report_btn = gr.Button("📋 AI 市场研究报告（LLM 综述）",
+                                       variant="primary",
+                                       elem_id="report_btn")
+                report_out = gr.Markdown()
+                report_btn.click(ai_report_ui, inputs=[fs_pool],
+                                 outputs=[report_out])
+
+            # ── 按钮用法速查（METHOD_CATALOG 动态生成）──────────
+            with gr.Accordion("📖 按钮用法速查", open=False):
+                gr.Markdown(scan_button_guide_md())
             gr.Markdown("板块轮动：首次使用先点装载（东财行业板块行情），"
                         "之后可直接预测。预测落盘 5 交易日后自动验证超额收益。")
 
@@ -3826,6 +3919,7 @@ def main() -> None:
 
     app = build_app()
     app.launch(server_name="127.0.0.1", server_port=port, inbrowser=True,
+               css=_BUTTON_TIPS_CSS,
                show_error=True, theme=gr.themes.Soft())
 
 

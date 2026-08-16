@@ -199,6 +199,8 @@ src/pa_mcp/
   ui/                 # Web 界面（gradio_app）
   server.py           # MCP Server（49 工具）
 docs/capability-matrix.md   # 能力矩阵（真实状态）
+docs/methodology-guide.md   # 新手方法论地图（四步走 + 四类资产编目）
+docs/openclaw-guide.md      # OpenClaw 新手使用指南（MCP 配置 + 对话模板 + 定时任务）
 scripts/              # 工具脚本（bootstrap_universe 等）
 tests/                # 146 项测试
 ```

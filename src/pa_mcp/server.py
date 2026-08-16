@@ -52,36 +52,15 @@ async def server_lifespan(server: FastMCP):
     _sina = SinaAdapter()
 
     # Multi-source router: ordered failover chain from config
+    # （统一走 source_factory.build_router：配置驱动，含 akshare/sina 单例
+    #   与 tencent/eastmoney/ths；eastmoney 1.2s、ths 0.4s 限流防封）
     try:
-        from pa_mcp.data.router import DataSourceRouter, CircuitBreakerConfig
-        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
-        from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
-
-        source_factory = {
-            "akshare": lambda: _akshare,
-            "sina": lambda: _sina,
-            "tencent": TencentAdapter,
-            "eastmoney": EastMoneyAdapter,
-        }
-
-        chain: list[tuple[str, Any]] = []
-        for name in _settings.router.sources:
-            factory = source_factory.get(name)
-            if factory is None:
-                logger.warning("Unknown data source in config", source=name)
-                continue
-            try:
-                chain.append((name, factory() if callable(factory) and name not in ("akshare", "sina") else factory()))
-            except Exception as e:
-                logger.warning("Failed to init data source", source=name, error=str(e))
-
-        if chain:
-            breaker_cfg = CircuitBreakerConfig(
-                failure_threshold=_settings.router.circuit.failure_threshold,
-                cooldown_seconds=_settings.router.circuit.cooldown_seconds,
-            )
-            _router = DataSourceRouter(chain, {name: breaker_cfg for name, _ in chain})
-            logger.info("Data source router ready", chain=[n for n, _ in chain])
+        from pa_mcp.data.source_factory import build_router
+        _router = build_router(
+            _settings,
+            min_source_interval={"eastmoney": 1.2, "ths": 0.4},
+            existing={"akshare": _akshare, "sina": _sina},
+        )
     except Exception as e:
         logger.warning("Data source router init failed, using single-source path", error=str(e))
         _router = None
@@ -2772,8 +2751,9 @@ async def run_daily_update(force_full: bool = False) -> dict[str, Any]:
     """
     try:
         from pa_mcp.data.scheduler import DataUpdateScheduler
+        # 双保险：router 未构建成功（如初始化异常）时回退到 AKShare 直连
         scheduler = DataUpdateScheduler(
-            store=_store, data_router=_router)
+            store=_store, data_router=_router, akshare_adapter=_akshare)
         report = await scheduler.run(force_full=force_full)
         phases = {}
         for p in report.phases:
@@ -4437,6 +4417,50 @@ async def calc_vwap(symbol: str, date: str = "") -> dict[str, Any]:
 # ---- MCP Tool: Help / Introspection ----
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def get_methodology_guide(market_state: str = "") -> dict[str, Any]:
+    """新手决策地图：四步研究路径（看环境→选方法→做验证→增强解读）+ 四类资产编目。
+
+    整合 11 策略 / 8 大牛方法 / 6 分析方法 / 6 LLM 能力，按当前市场状态
+    （climax/fermenting/starting/dull/frozen）推荐适配资产，标注 UI 入口
+    与 MCP 工具、LLM 依赖与成本，并对齐两套策略路由表（策略速查 vs 市场诊断路由）。
+
+    新用户先调此工具再深入。UI 端对应「📚 研究总览」Tab 的 🗺️ 新手决策地图按钮。
+
+    Args:
+        market_state: 市场状态（climax/fermenting/starting/dull/frozen），
+            缺省自动检测（DuckDB 涨停/成交额指标，失败返回 unknown）
+    """
+    try:
+        from pa_mcp.research.methodology_guide import get_methodology_guide as _guide
+        result = _guide(market_state or None)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("get_methodology_guide failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def evaluate_methods() -> dict[str, Any]:
+    """开源方法评价：量化方法可信度 + 理财方法评估状态 + 持仓×方法评价。
+
+    三块内容：
+    ① 量化方法可信度——全策略事件研究对比（胜率/5日超额/有效判定）；
+    ② 理财方法评估状态——格雷厄姆/价值动量/CANSLIM 在当前池的样本与结论；
+    ③ 持仓×方法评价——每只持仓逐一跑格雷厄姆/价值动量/CANSLIM/缠论/综合信号。
+
+    组合管理场景使用；无持仓时 ③ 降级提示。UI 端对应「💼 组合管理」Tab 的
+    🔍 开源方法评价按钮。
+    """
+    try:
+        from pa_mcp.research.method_evaluation import evaluate_methods_report
+        result = await evaluate_methods_report()
+        return _response(data=result)
+    except Exception as e:
+        logger.error("evaluate_methods failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def pa_help() -> dict[str, Any]:
     """Get a complete guide to PA_MCP — all tools, common workflows, and data freshness.
 
@@ -4471,6 +4495,12 @@ async def pa_help() -> dict[str, Any]:
         "tool_count": len(tool_list),
         "tools": tool_list,
         "workflows": {
+            "new_user": [
+                "1. get_methodology_guide() — newbie decision map: environment → method → validation → LLM",
+                "2. agent_market_diagnosis() — market regime diagnosis + strategy routing",
+                "3. one_click_analysis() — full research pipeline from market to holdings",
+                "4. agent_analyze_stock(symbol, depth='fast') — multi-dim AI analysis",
+            ],
             "daily_analysis": [
                 "1. agent_morning_brief() — pre-market briefing + today's watchlist",
                 "2. agent_scan_market(top_n=20) — run all strategies, rank by strength",
@@ -4507,11 +4537,8 @@ async def pa_help() -> dict[str, Any]:
             "Configure config/llm_config.json to enable AI analysis tools",
         ],
         "prompts_available": [
-            "daily-review: End-of-day market review with limit-up, dragon-tiger, sector rotation",
-            "stock-deep-dive: Comprehensive deep-dive on a single stock",
-            "strategy-screen: Multi-strategy market scan with top candidate comparison",
-            "morning-brief: Pre-market briefing with watchlist and risk alerts",
-            "risk-audit: Portfolio risk audit with position concentration and correlation",
+            f"{name}: {pdef['description'][:80]}"
+            for name, pdef in PROMPTS.items()
         ],
         "generated_at": datetime.now().isoformat(),
     })

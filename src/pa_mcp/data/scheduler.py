@@ -770,45 +770,20 @@ async def _main() -> None:
     args = parser.parse_args()
 
     from pa_mcp.config import get_settings
-    from pa_mcp.data.router import DataSourceRouter, CircuitBreakerConfig
+    from pa_mcp.data.source_factory import build_router
     from pa_mcp.data.sources.akshare_adapter import AKShareAdapter
     from pa_mcp.data.sources.sina_adapter import SinaAdapter
-    from pa_mcp.data.sources.tencent_adapter import TencentAdapter
-    from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
     from pa_mcp.data.store import DuckDBStore
 
     store = DuckDBStore()
     store.connect()
     settings = get_settings()
 
-    # Build multi-source router with throttling for ban-prone sources
-    akshare = AKShareAdapter()
-    sina = SinaAdapter()
-    factory = {
-        "akshare": lambda: akshare,
-        "sina": lambda: sina,
-        "tencent": TencentAdapter,
-        "eastmoney": EastMoneyAdapter,
-    }
-    chain: list[tuple[str, Any]] = []
-    for name in settings.router.sources:
-        f = factory.get(name)
-        if f is None:
-            continue
-        try:
-            chain.append((name, f() if callable(f) else f))
-        except Exception as e:
-            logger.warning("Data source init failed", source=name, error=str(e))
-
-    breaker_cfg = CircuitBreakerConfig(
-        failure_threshold=settings.router.circuit.failure_threshold,
-        cooldown_seconds=settings.router.circuit.cooldown_seconds,
-    )
-    # 东财有风控易封IP — 强制 >=1s 请求间隔
-    router = DataSourceRouter(
-        chain,
-        {name: breaker_cfg for name, _ in chain},
-        min_source_interval={"eastmoney": 1.2},
+    # 多源容灾路由（配置驱动；eastmoney 1.2s 防封、ths 0.4s 限流）
+    router = build_router(
+        settings,
+        min_source_interval={"eastmoney": 1.2, "ths": 0.4},
+        existing={"akshare": AKShareAdapter(), "sina": SinaAdapter()},
     )
 
     scheduler = DataUpdateScheduler(store, data_router=router)
