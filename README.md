@@ -54,6 +54,20 @@ python scripts/bootstrap_universe.py --limit 100
 
 ---
 
+## 🔬 接口验证
+
+所有 MCP 工具与 Agent 接口均有自动化验证脚本（`scripts/verify_interfaces.py`，双模式）：
+
+```bash
+# 隔离模式：全部 89 工具（临时种子库 + LLM/网络隔离，不碰真实数据）
+venv\Scripts\python.exe scripts/verify_interfaces.py
+# 真实 LLM 模式：16 个 LLM 相关工具（真实豆包 API，验证 LLM 全链路）
+venv\Scripts\python.exe scripts/verify_interfaces.py --llm
+```
+
+**当前状态**：隔离模式 ✅ 85 / ⚠️ 4（纯网络依赖）/ ❌ 0；真实 LLM 模式 ✅ 16/16；Agent 服务 5/5。
+验证曾发现并修复 7 个真实 bug（prompt 花括号/持仓 id/自选股约束/调度器构造/事件研究嵌套 asyncio/fallback 参数/logging 混用）。
+
 ## 🗺️ 界面总览（10 Tab）
 
 | Tab | 功能 |
