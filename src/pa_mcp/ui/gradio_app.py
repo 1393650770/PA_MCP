@@ -2190,6 +2190,19 @@ def chan_beichi_backtest_ui(symbols: str) -> str:
         return f"背驰组合回测失败：{str(e)[:200]}"
 
 
+def one_click_ui(symbols: str) -> str:
+    """🚀 一站式分析：流水线整合报告（市场→选股→个股→持仓）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.one_click import one_click_report
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()] or None
+        result = _asyncio.run(one_click_report(pool))
+        return result["report"]
+    except Exception as e:
+        return f"一站式分析失败：{str(e)[:200]}"
+
+
 def ai_report_ui(symbols: str) -> str:
     """AI 市场研究报告（确定性研究 → LLM 综述）。"""
     try:
@@ -3491,10 +3504,15 @@ def build_app():
                     label="研究股票池（逗号分隔，≥5 只效果最佳）",
                     value="000001,600036,300750,000858,600519,601318",
                     scale=3)
-                ov_run = gr.Button("📋 AI 研究报告（一键全链）",
+                ov_all = gr.Button("🚀 一站式分析（全流水线）",
                                    variant="primary", scale=1)
             ov_out = gr.Markdown()
+            ov_all.click(one_click_ui, inputs=[ov_pool], outputs=[ov_out])
             ov_run.click(ai_report_ui, inputs=[ov_pool], outputs=[ov_out])
+
+            with gr.Row():
+                ov_run = gr.Button("📋 AI 研究报告（LLM 综述）",
+                                   variant="secondary")
 
             with gr.Row():
                 ov_cmp = gr.Button("🏁 全策略对比")

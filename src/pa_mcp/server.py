@@ -2791,6 +2791,30 @@ async def data_quality_report() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def one_click_analysis(symbols: str = "",
+                             include_llm: bool = False) -> dict[str, Any]:
+    """🚀 一站式分析：流水线整合报告（市场→选股→个股→持仓）。
+
+    阶段：数据体检 → 市场结构 → 情绪矩阵 → 板块轮动 → 因子选股 →
+    价值动量 → 格雷厄姆 → 综合信号 → 持仓风险，整合为一份报告。
+    全部确定性快速执行（约 30-60 秒）。
+
+    Args:
+        symbols: 股票池（逗号分隔；缺省内置 6 只）
+        include_llm: True 时附加 AI 综述（LLM 可用时）
+    """
+    try:
+        from pa_mcp.research.one_click import one_click_report
+        pool = [s.strip() for s in symbols.replace("，", ",").split(",")
+                if s.strip()] or None
+        result = await one_click_report(pool, include_llm=include_llm)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("one_click_analysis failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def ai_market_report(symbols: str) -> dict[str, Any]:
     """AI 市场研究报告：确定性研究结果 → LLM 综述。
 
