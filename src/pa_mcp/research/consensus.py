@@ -229,6 +229,14 @@ async def scan_consensus_signals(symbol: str, kline_df: pd.DataFrame,
 
 def consensus_event_study(symbol: str, kline_df: pd.DataFrame,
                           step: int = 5) -> dict[str, Any]:
+    """综合信号事件研究（同步包装，供 UI 同步函数使用）。"""
+    import asyncio as _asyncio
+    return _asyncio.run(consensus_event_study_async(
+        symbol, kline_df, step=step))
+
+
+async def consensus_event_study_async(symbol: str, kline_df: pd.DataFrame,
+                                      step: int = 5) -> dict[str, Any]:
     """综合信号事件研究：信号后 5/10/20 日收益 vs 无条件基准。
 
     Args:
@@ -236,10 +244,9 @@ def consensus_event_study(symbol: str, kline_df: pd.DataFrame,
         kline_df: 日线（≥250 根）
         step: 扫描步长
     """
-    import asyncio as _asyncio
     from pa_mcp.research.event_study import signal_forward_returns
 
-    sig_df = _asyncio.run(scan_consensus_signals(symbol, kline_df, step=step))
+    sig_df = await scan_consensus_signals(symbol, kline_df, step=step)
     if sig_df.empty:
         return {"symbol": symbol, "n_signals": 0,
                 "message": "未检出强综合信号（strength ≥60% 需多数源一致）"}

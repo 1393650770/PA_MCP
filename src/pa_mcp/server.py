@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal, Optional
 
 import pandas as pd
@@ -155,9 +155,17 @@ def _response(
 async def _get_kline_fallback(
     symbol: str, period: str = "daily",
     start_date: str = "", end_date: str = "",
-    adjust: str = "qfq",
+    adjust: str = "qfq", days: int = 0,
 ) -> tuple[pd.DataFrame, str]:
-    """Fetch kline via the multi-source router, or legacy AKShare→Sina fallback."""
+    """Fetch kline via the multi-source router, or legacy AKShare→Sina fallback.
+
+    days > 0 时自动换算 start_date（等价于 days 个自然日前的起点），
+    与 start_date 二选一；days 优先。
+    """
+    # days 参数 → 起始日期换算
+    if days and days > 0 and not start_date:
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
     # Preferred: multi-source router (with circuit breakers)
     if _router is not None:
         try:
@@ -246,11 +254,25 @@ async def get_kline(
         adjust: 'qfq' (forward adjusted), 'hfq' (backward), 'bfq' (no adjust)
     """
     try:
-        df, source = await _get_kline_fallback(
-            symbol=symbol, period=period,
-            start_date=start_date, end_date=end_date,
-            adjust=adjust,
-        )
+        # 优先查库（日线），无数据才走网络 fallback
+        df, source = None, "database"
+        if period == "daily" and _store:
+            try:
+                q = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date ASC",
+                    [symbol],
+                )
+                if not q.empty:
+                    df = q
+            except Exception:
+                pass
+        if df is None or df.empty:
+            df, source = await _get_kline_fallback(
+                symbol=symbol, period=period,
+                start_date=start_date, end_date=end_date,
+                adjust=adjust,
+            )
         # Convert to list of dicts for JSON serialization
         records = df.to_dict(orient="records")
         # Convert Timestamps to strings
@@ -1298,7 +1320,19 @@ async def portfolio_add(symbol: str, cost: float, shares: int, added_date: str =
         if shares < 100 or shares % 100 != 0:
             return _response(success=False, error="Shares must be at least 100 and multiples of 100", error_type="INVALID_PARAM")
 
+        # id 为 NOT NULL 主键且 insert_df 会用 None 填充缺失列 →
+        # 显式生成 id（COALESCE(MAX)+1），避免插入 NULL 主键崩溃
+        _pid = 1
+        if _store and _store.table_exists("portfolio"):
+            try:
+                _mx = _store.query_df(
+                    "SELECT COALESCE(MAX(id), 0) AS m FROM portfolio", [])
+                if not _mx.empty:
+                    _pid = int(_mx.iloc[0]["m"]) + 1
+            except Exception:
+                _pid = 1
         record = pd.DataFrame([{
+            "id": _pid,
             "symbol": symbol,
             "cost": cost,
             "shares": shares,
@@ -1353,16 +1387,29 @@ async def watchlist_add(symbol: str) -> dict[str, Any]:
         if _store:
             _store.execute("""
                 CREATE TABLE IF NOT EXISTS watchlist (
-                    id INTEGER GENERATED ALWAYS AS IDENTITY,
+                    id INTEGER PRIMARY KEY,
                     symbol VARCHAR(10) NOT NULL UNIQUE,
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            _store.execute(
-                "INSERT OR IGNORE INTO watchlist (symbol) VALUES (?)",
-                [symbol],
-            )
-            return _response(data={"symbol": symbol, "status": "added", "message": f"{symbol} added to watchlist"})
+            # DuckDB 的 GENERATED ALWAYS AS IDENTITY 不支持 INSERT OR IGNORE
+            # （Constraint not implemented）→ 先查重再插入
+            exists = _store.query_df(
+                "SELECT 1 FROM watchlist WHERE symbol = ?", [symbol])
+            if exists.empty:
+                max_id = _store.query_df(
+                    "SELECT COALESCE(MAX(id), 0) AS m FROM watchlist", [])
+                new_id = int(max_id.iloc[0]["m"]) + 1 \
+                    if not max_id.empty else 1
+                _store.execute(
+                    "INSERT INTO watchlist (id, symbol) VALUES (?, ?)",
+                    [new_id, symbol],
+                )
+                status = "added"
+            else:
+                status = "already_exists"
+            return _response(data={"symbol": symbol, "status": status,
+                                   "message": f"{symbol} added to watchlist"})
         return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
     except Exception as e:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
@@ -1709,7 +1756,7 @@ async def consensus_event_study(symbol: str) -> dict[str, Any]:
     """
     try:
         from pa_mcp.research.consensus import (
-            consensus_event_study as run_es,
+            consensus_event_study_async as run_es,
             format_consensus_event_study)
         kline_df = None
         if _store:
@@ -1726,7 +1773,7 @@ async def consensus_event_study(symbol: str) -> dict[str, Any]:
         if kline_df is None or kline_df.empty:
             return _response(success=False, error=f"No data for symbol {symbol}",
                              error_type="NOT_FOUND")
-        result = run_es(symbol, kline_df)
+        result = await run_es(symbol, kline_df)
         return _response(data={**result,
                                "report": format_consensus_event_study(result)})
     except Exception as e:
@@ -1797,7 +1844,7 @@ async def resonance_event_study(symbol: str) -> dict[str, Any]:
     """
     try:
         from pa_mcp.research.resonance import (
-            resonance_event_study as run_es,
+            resonance_event_study_async as run_es,
             format_resonance_event_study)
         kline_df = None
         if _store:
@@ -1814,7 +1861,7 @@ async def resonance_event_study(symbol: str) -> dict[str, Any]:
         if kline_df is None or kline_df.empty:
             return _response(success=False, error=f"No data for symbol {symbol}",
                              error_type="NOT_FOUND")
-        result = run_es(symbol, kline_df)
+        result = await run_es(symbol, kline_df)
         return _response(data={**result,
                                "report": format_resonance_event_study(result)})
     except Exception as e:
@@ -2702,7 +2749,8 @@ async def run_daily_update(force_full: bool = False) -> dict[str, Any]:
     """
     try:
         from pa_mcp.data.scheduler import DataUpdateScheduler
-        scheduler = DataUpdateScheduler()
+        scheduler = DataUpdateScheduler(
+            store=_store, data_router=_router)
         report = await scheduler.run(force_full=force_full)
         phases = {}
         for p in report.phases:

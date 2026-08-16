@@ -208,25 +208,25 @@ Dimensions to analyze:
 5. EVENT: Lockup expiry, insider trades, block trades, pledge risk
 
 OUTPUT (JSON only, no markdown):
-{
+{{
   "symbol": "{symbol}",
   "overall_strength_score": 0-100,
-  "dimension_scores": {
+  "dimension_scores": {{
     "technical": 0-100,
     "capital": 0-100,
     "sentiment": 0-100,
     "fundamental": 0-100,
     "event": 0-100
-  },
+  }},
   "direction": "bullish|bearish|neutral",
   "key_evidence": [
-    {"dimension": "technical", "finding": "...", "impact": "positive|negative|neutral"}
+    {{"dimension": "technical", "finding": "...", "impact": "positive|negative|neutral"}}
   ],
   "key_risks": ["risk1", "risk2"],
   "risk_reward_assessment": "favorable|neutral|unfavorable",
   "suggested_max_position_pct": 0-20,
   "disclaimer": "Research output, not investment advice. Data may be delayed."
-}
+}}
 
 DO NOT output "buy" or "sell". Output scores and evidence only.
 """
