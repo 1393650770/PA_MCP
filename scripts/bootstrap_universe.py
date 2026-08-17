@@ -77,6 +77,17 @@ def main() -> None:
     store = DuckDBStore(args.db) if args.db else DuckDBStore()
     store.connect()
 
+    # 持仓自动入池：portfolio 表的股票即使不在种子池也要保证可补数
+    holdings: list[str] = []
+    try:
+        if store.table_exists("portfolio"):
+            df = store.query_df("SELECT symbol FROM portfolio", [])
+            holdings = [str(s) for s in df["symbol"].tolist()]
+    except Exception:
+        pass
+    if holdings:
+        symbols = list(symbols) + [(s, "其他") for s in holdings]
+
     # 仅补充缺失的 symbol（保留已有）
     existing = set()
     try:

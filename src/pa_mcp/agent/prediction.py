@@ -396,6 +396,13 @@ class PredictionService:
         try:
             from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
             adapter = get_llm_adapter() if use_llm else None
+            if adapter is None and use_llm:
+                # 单例未初始化时主动读配置（与 chat_reply/methodology_guide
+                # 同一兜底模式，避免新进程里配置了 LLM 却降级确定性）
+                from pa_mcp.agent.llm_factory import init_llm_adapter
+                from pa_mcp.config import PROJECT_ROOT
+                adapter = init_llm_adapter(
+                    str(PROJECT_ROOT / "config" / "llm_config.json"))
             if adapter is not None:
                 return await self._predict_with_llm(
                     adapter, symbol, today, horizon, features, kline_df)
@@ -408,6 +415,7 @@ class PredictionService:
                                 horizon: str, features: dict[str, Any],
                                 kline_df: pd.DataFrame) -> PredictionResult:
         """LLM 预测 + JSON 校验 + 一次修复重试。"""
+        from pa_mcp.agent.llm_port import LLMCallParams
         user_prompt = PREDICTION_PROMPT.format(
             symbol=symbol, horizon=horizon, features=format_features(features))
         # 板块轮动融合：注入所属板块 RS 上下文（best-effort，无数据跳过）
