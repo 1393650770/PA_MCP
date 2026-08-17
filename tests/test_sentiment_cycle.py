@@ -98,9 +98,17 @@ def test_sentiment_summary(tmp_path):
     assert s.get("date") == "2026-08-04"
     assert "stage" in s and "sentiment_score" in s
     assert "max_board_height" in s and "promotion_rate" in s
-    # 空库 → 空 dict
+    # 空库 + 实时也失败 → 空 dict（实时模式成功时返回真实情绪）
+    import pa_mcp.research.sentiment_cycle as sc
     empty = SentimentCycleAnalyzer(store_path=str(tmp_path / "none.db"))
+
+    async def _no_realtime():
+        return None
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(sc.SentimentCycleAnalyzer,
+                        "_fetch_realtime_stats", _no_realtime)
     assert empty.sentiment_summary() == {}
+    monkeypatch.undo()
 
 
 def test_diagnosis_with_sentiment_context(tmp_path):

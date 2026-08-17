@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -110,6 +110,88 @@ class SentimentCycleAnalyzer:
             "sentiment_score": score,
         }
 
+    # ---- 实时模式（新浪全市场快照，库内仅 86 只时涨停统计严重失真） ----
+
+    @staticmethod
+    async def _fetch_realtime_stats() -> Optional[dict[str, Any]]:
+        """新浪全市场今日涨跌统计（分页遍历，~9s）。
+
+        库内 kline_daily 若只覆盖种子池，涨停/跌停统计严重失真（曾出现
+        真实 162+ 涨停 vs 库内 0 家）。实时快照按涨跌幅排序全量遍历，
+        统计今日涨停/跌停/涨跌家数/成交额。
+
+        Returns:
+            {limit_up_count, limit_down_count, up_count, down_count,
+             turnover_billion, data_date}；失败返回 None。
+        """
+        import asyncio
+        import urllib.request
+
+        limit_up = limit_down = up = down = 0
+        turnover = 0.0
+        try:
+            for page in range(1, 61):  # 全市场 ~5500 只 / 100 每页
+                url = (
+                    "https://vip.stock.finance.sina.com.cn/quotes_service/"
+                    "api/json_v2.php/Market_Center.getHQNodeData"
+                    f"?page={page}&num=100&sort=changepercent&asc=0&node=hs_a")
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "Mozilla/5.0"})
+                raw = urllib.request.urlopen(req, timeout=12).read().decode(
+                    "gbk", errors="ignore")
+                import json
+                data = json.loads(raw)
+                if not data:
+                    break
+                for t in data:
+                    try:
+                        chg = float(t.get("changepercent", 0))
+                        amt = float(t.get("amount", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    turnover += amt
+                    if chg >= 9.5:
+                        limit_up += 1
+                    elif chg <= -9.5:
+                        limit_down += 1
+                    if chg > 0:
+                        up += 1
+                    elif chg < 0:
+                        down += 1
+                await asyncio.sleep(0.12)  # 免费接口限流
+        except Exception as e:  # noqa: BLE001
+            logger.warning("实时情绪统计失败", error=str(e)[:80])
+            return None
+        if limit_up == 0 and limit_down == 0 and up == 0:
+            return None
+        return {"limit_up_count": limit_up, "limit_down_count": limit_down,
+                "up_count": up, "down_count": down,
+                "turnover_billion": round(turnover / 1e8, 1),
+                "data_date": datetime.now().strftime("%Y-%m-%d")}
+
+    def _realtime_stats_to_day(self, rt: dict[str, Any]) -> dict[str, Any]:
+        """实时统计 → 单日情绪结构（连板/晋级实时不可得，诚实标注）。"""
+        total = rt["limit_up_count"]
+        up_ratio = (rt["up_count"] / (rt["up_count"] + rt["down_count"])
+                    if (rt["up_count"] + rt["down_count"]) > 0 else 0.5)
+        # 情绪评分（实时口径）：涨停数 40 + 涨跌比 30 + 成交额 30
+        score = min(40, total / 2.0)
+        score += min(30, up_ratio * 40)
+        score += min(30, rt["turnover_billion"] / 2000 * 30)
+        return {
+            "date": rt["data_date"],
+            "limit_up_count": total,
+            "limit_down_count": rt["limit_down_count"],
+            "max_board_height": 0,
+            "board2_count": 0, "board3_count": 0, "board4p_count": 0,
+            "first_board_count": total,
+            "promotion_rate": None,
+            "sentiment_score": round(min(100, score), 1),
+            "up_count": rt["up_count"], "down_count": rt["down_count"],
+            "turnover_billion": rt["turnover_billion"],
+            "note": "实时快照口径（连板/晋级需库内全市场日线，暂缺）",
+        }
+
     # ---- 阶段判定（游资四阶段 + 冰点） ----
     @staticmethod
     def _stage(stats: dict[str, Any],
@@ -124,6 +206,11 @@ class SentimentCycleAnalyzer:
             return "ice", "冰点期：涨停枯竭 + 跌停潮，空仓等情绪修复"
         if max_h >= 5 and total >= 50:
             return "climax", "高潮期：连板高度 ≥5 且涨停 ≥50，情绪亢奋防兑现"
+        if max_h == 0 and total >= 80:
+            # 实时模式（连板不可得）：涨停家数分级近似阶段
+            return "climax", "高潮期：实时涨停 ≥80 家，情绪亢奋（连板高度待库内全市场日线确认）"
+        if max_h == 0 and total >= 40:
+            return "fermenting", "发酵期：实时涨停 ≥40 家，赚钱效应扩散（连板高度待确认）"
         if pr is not None:
             if pr < 0.25 and max_h >= 3:
                 return "recess", "退潮期：晋级率 <25%，连板高度回落，亏钱效应扩散"
@@ -139,11 +226,35 @@ class SentimentCycleAnalyzer:
 
     # ---- 主分析 ----
     def analyze(self, target_date: Optional[str] = None,
-                lookback: int = 5) -> dict[str, Any]:
+                lookback: int = 5,
+                use_realtime: bool = True) -> dict[str, Any]:
         """情绪周期分析：指定日（默认最新）的情绪指标 + 阶段 + 近 N 日趋势。
 
-        历史日（当日已有 sentiment_daily 记录）直接用缓存，否则现算。
+        今日（target_date 为空）优先实时模式（新浪全市场快照统计真实
+        涨停/涨跌家数——库内仅种子池时统计曾严重失真）；历史日走
+        sentiment_daily 缓存/库内计算。
+
+        Args:
+            target_date: 指定日期（空 = 今日）
+            lookback: 趋势回看天数
+            use_realtime: 今日是否优先实时快照（默认 True）
         """
+        # 实时模式：今日 + 实时统计成功 → 直接输出（连板缺失诚实标注）
+        if target_date is None and use_realtime:
+            import asyncio
+            rt = asyncio.run(self._fetch_realtime_stats())
+            if rt is not None:
+                stats = self._realtime_stats_to_day(rt)
+                stage, stage_zh = self._stage(stats, None)
+                result = {"date": stats["date"], **stats,
+                          "stage": stage, "stage_zh": stage_zh,
+                          "data_source": "realtime",
+                          "trend": [], "warnings": [],
+                          "limit_up_pct_threshold": LIMIT_UP_PCT,
+                          "note": stats.get("note", "") + "；"
+                                  "实时快照口径（今日真实涨跌，非库内种子池）"}
+                return result
+
         store = self._store()
         try:
             latest = target_date or store.get_latest_date("kline_daily")
