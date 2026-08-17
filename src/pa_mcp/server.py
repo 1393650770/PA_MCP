@@ -4500,6 +4500,28 @@ async def calc_vwap(symbol: str, date: str = "") -> dict[str, Any]:
 # ---- MCP Tool: Help / Introspection ----
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def get_strategy_guide(market_state: str = "") -> dict[str, Any]:
+    """策略速查：按市场状态推荐策略 + 新手难度星级。
+
+    11 个策略 × {难度 ⭐~⭐⭐⭐ / 一句话 / 风险 / 适用市场}，自动检测
+    当前市场状态（climax/fermenting/starting/dull/frozen）并给出推荐，
+    含新手默认策略（布林均值回归）。比 get_methodology_guide 更聚焦
+    策略选择（不含方法/验证/LLM 编目）。
+
+    Args:
+        market_state: 市场状态，缺省自动检测（DuckDB 涨停/成交额指标）
+    """
+    try:
+        from pa_mcp.research.strategy_guide import strategy_guide
+        result = strategy_guide(market_state or None)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("get_strategy_guide failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def get_methodology_guide(market_state: str = "") -> dict[str, Any]:
     """新手决策地图：四步研究路径（看环境→选方法→做验证→增强解读）+ 四类资产编目。
 
