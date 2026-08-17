@@ -323,7 +323,8 @@ class TencentAdapter:
             if not line:
                 continue
             parts = line.split("~")
-            if len(parts) < 50 or parts[2] != symbol:
+            # 兼容指数：parts[2] 为无前缀代码（sh000001 → 000001）
+            if len(parts) < 50 or parts[2] != symbol[-6:]:
                 continue
 
             def _f(idx: int, default: float = 0.0) -> float:

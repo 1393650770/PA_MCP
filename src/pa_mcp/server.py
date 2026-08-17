@@ -316,13 +316,46 @@ async def get_market_overview() -> dict[str, Any]:
         data.data_delay_seconds: Approximate data delay (free APIs have 3-15s lag)
     """
     try:
+        # 实时优先：新浪全市场涨跌统计（AKShare 依赖的东财接口被封时仍可用）
+        from pa_mcp.research.sentiment_cycle import SentimentCycleAnalyzer
+        rt = await SentimentCycleAnalyzer._fetch_realtime_stats()
+        if rt:
+            idx = {}
+            try:
+                from pa_mcp.data.sources.tencent_adapter import TencentAdapter
+                t = TencentAdapter()
+                for code, name in (("sh000001", "上证指数"),
+                                   ("sz399001", "深证成指")):
+                    q = await t.get_realtime_quote(code)
+                    if q:
+                        idx[name] = {"close": q.get("price"),
+                                     "change_pct": q.get("pct_change")}
+            except Exception:  # noqa: BLE001 指数缺失不阻断
+                pass
+            return _response(data={
+                "sh_index": (idx.get("上证指数") or {}).get("close"),
+                "sz_index": (idx.get("深证成指") or {}).get("close"),
+                "total_stocks": rt["up_count"] + rt["down_count"],
+                "up_count": rt["up_count"],
+                "down_count": rt["down_count"],
+                "limit_up_count": rt["limit_up_count"],
+                "limit_down_count": rt["limit_down_count"],
+                "turnover_total": rt["turnover_billion"] * 1e8,
+                "data_delay_seconds": 5,
+                "data_source": "realtime_sina",
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("get_market_overview realtime failed", error=str(e)[:80])
+
+    # 降级：AKShare（东财接口恢复后可用）
+    try:
         if _akshare:
             overview = await _akshare.get_market_overview()
             return _response(data=overview)
-        return _response(success=False, error="Data source not initialized", error_type="INTERNAL_ERROR")
     except Exception as e:
         logger.error("get_market_overview failed", error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+    return _response(success=False, error="Data source not initialized", error_type="INTERNAL_ERROR")
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -1143,9 +1176,44 @@ async def list_strategies(category: Literal["trend", "swing", "value", "board", 
 async def get_market_sentiment(date: str = "") -> dict[str, Any]:
     """Get current market sentiment assessment with position suggestion.
 
+    实时优先（新浪全市场快照统计今日真实涨停/涨跌家数——库内仅种子池时
+    统计曾严重失真）；指定历史日期走库内。
+
     Args:
-        date: Trading date, empty for today
+        date: Trading date, empty for today (realtime)
     """
+    if not date:
+        try:
+            # 直接 await 实时统计（analyze 是同步函数，内部 asyncio.run
+            # 在 async 工具里会崩——不能在此调用）
+            from pa_mcp.research.sentiment_cycle import SentimentCycleAnalyzer
+            sc = SentimentCycleAnalyzer()
+            rt = await sc._fetch_realtime_stats()
+            if rt:
+                stats = sc._realtime_stats_to_day(rt)
+                stage, stage_zh = sc._stage(stats, None)
+                lu = stats["limit_up_count"]
+                return _response(data={
+                    "date": stats["date"],
+                    "sentiment": "bullish" if lu > 80
+                                 else ("neutral" if lu > 15 else "bearish"),
+                    "sentiment_stage": stage_zh,
+                    "sentiment_score": stats["sentiment_score"],
+                    "limit_up_count": lu,
+                    "limit_down_count": stats["limit_down_count"],
+                    "up_count": stats["up_count"],
+                    "down_count": stats["down_count"],
+                    "turnover_billion": stats["turnover_billion"],
+                    "data_source": "realtime",
+                    "suggested_position_pct": (
+                        60 if lu > 80 else
+                        40 if lu > 40 else
+                        20 if lu > 15 else 10),
+                    "note": stats.get("note", ""),
+                })
+        except Exception as e:  # noqa: BLE001
+            logger.warning("get_market_sentiment realtime failed",
+                           error=str(e)[:80])
     try:
         if _store:
             target_date = date or _store.get_latest_date("kline_daily")
