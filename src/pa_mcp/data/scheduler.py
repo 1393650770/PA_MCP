@@ -288,6 +288,18 @@ class DataUpdateScheduler:
             # Only keep rows with valid symbols
             basic = basic[basic["symbol"].notna() & (basic["symbol"].str.strip() != "")]
 
+            # 保留已有行业映射（sector 是合成板块/部分选股依赖；快照源如
+            # 新浪不提供行业字段，replace 会清空 → 先 merge 再写入）
+            try:
+                old = self._store.query_df(
+                    "SELECT symbol, sector FROM stock_basic WHERE sector != ''", [])
+                if not old.empty:
+                    sector_map = dict(zip(old["symbol"], old["sector"]))
+                    basic["sector"] = basic["symbol"].map(
+                        lambda s: sector_map.get(s, ""))
+            except Exception:
+                basic["sector"] = ""
+
             self._store.insert_df("stock_basic", basic, mode="replace")
             logger.info("Stock basic updated", rows=len(basic), source=source_name)
             return len(basic)

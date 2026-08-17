@@ -195,12 +195,50 @@ class SinaAdapter:
         "fund_flow": "unavailable",
         "dragon_tiger": "unavailable",
         "realtime_quote": "available",       # 实时快照（免费，延迟3-15s）
+        "spot_all": "available",             # 全市场快照（分页，~5500 只）
     }
 
     @classmethod
     def supports(cls, capability: str) -> bool:
         """Check if this adapter supports a given capability."""
         return cls.CAPABILITIES.get(capability, "unavailable") != "unavailable"
+
+    async def get_realtime_spot_all(self, max_pages: int = 60) -> pd.DataFrame:
+        """全市场实时快照（新浪 Market_Center 分页，~5500 只）。
+
+        标准化列：代码（6 位）/ 名称 / 总市值（接口无此字段，置 None）。
+        实测（2026-08-17）该接口稳定（HTTP 200）——AKShare 依赖的东财
+        spot 接口被封时，此源可支撑 stock_basic 全市场更新。
+        """
+        client = await self._get_client()
+        rows: list[dict] = []
+        for page in range(1, max_pages + 1):
+            url = (
+                "https://vip.stock.finance.sina.com.cn/quotes_service/"
+                "api/json_v2.php/Market_Center.getHQNodeData"
+                f"?page={page}&num=100&sort=symbol&asc=1&node=hs_a")
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("sina spot page failed", page=page,
+                               error=str(e)[:80])
+                break
+            if not data:
+                break
+            rows.extend(data)
+            if len(data) < 100:
+                break
+            await asyncio.sleep(0.15)  # 免费接口限流
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        return pd.DataFrame({
+            "代码": df["code"].astype(str),
+            "名称": df["name"],
+            "总市值": None,
+        })
 
     async def get_realtime_quote(self, symbol: str) -> dict[str, Any]:
         """Get real-time quote from Sina live API.
