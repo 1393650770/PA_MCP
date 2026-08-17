@@ -362,10 +362,11 @@ class DuckDBStore:
             except Exception as e:
                 if "already open" in str(e) or "正在使用" in str(e):
                     raise RuntimeError(
-                        f"DuckDB 文件被其他进程锁定: {self.db_path}\n"
-                        f"原因: 可能有残留的 python 进程仍持有数据库连接。\n"
-                        f"解决: 1) 任务管理器结束残留 python 进程  "
-                        f"2) 或运行: taskkill /F /IM python.exe 3) 重启终端后重试"
+                        f"数据库被其他进程占用（DuckDB 单文件排他锁）: "
+                        f"{self.db_path}\n"
+                        f"原因: UI / MCP Server / 数据调度器同时运行时会互锁。\n"
+                        f"解决: 同一时间只保留一个服务进程（关闭 UI 或调度器后"
+                        f"重试），或运行 taskkill /F /IM python.exe 清残留"
                     ) from e
                 raise
             logger.info("DuckDB connected", path=self.db_path)
