@@ -217,6 +217,34 @@ async def get_realtime_quote(symbol: str, source: Literal["akshare", "sina"] = "
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def analyze_stock(symbol: str, days: int = 120) -> dict[str, Any]:
+    """个股综合分析（数据看板对等）：K线+实时估值+资金流+策略信号+缠论。
+
+    与 UI「📊 数据看板」的「分析」按钮同一实现（确定性，无 LLM）：
+    K 线走势摘要（多源容灾拉取）、实时估值快照（PE/PB/市值/换手/量比）、
+    资金流、最新策略信号、缠论结构方向。
+
+    Args:
+        symbol: 股票代码
+        days: 分析天数（默认 120）
+    """
+    try:
+        from pa_mcp.ui.gradio_app import analyze_stock as _ui_analyze
+        _fig, summary, valuation, source = await asyncio.to_thread(
+            _ui_analyze, symbol, days)
+        return _response(data={
+            "symbol": symbol,
+            "summary": summary,
+            "valuation": valuation,
+            "data_source": source,
+        })
+    except Exception as e:
+        logger.error("analyze_stock failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_kline(
     symbol: str,
     period: Literal["daily", "weekly", "monthly", "1", "5", "15", "30", "60"] = "daily",
