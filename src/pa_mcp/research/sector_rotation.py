@@ -519,6 +519,13 @@ class SectorRotationAnalyzer:
         try:
             from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
             adapter = get_llm_adapter()
+            if adapter is None:
+                # 单例未初始化时主动读配置（与 chat_reply/prediction 同一
+                # 兜底模式，避免配置了 LLM 却静默降级确定性规则）
+                from pa_mcp.agent.llm_factory import init_llm_adapter
+                from pa_mcp.config import PROJECT_ROOT
+                adapter = init_llm_adapter(
+                    str(PROJECT_ROOT / "config" / "llm_config.json"))
             if adapter is not None:
                 user_prompt = SECTOR_ROTATION_PROMPT.format(
                     features=features, rotation_speed=rotation_speed,
