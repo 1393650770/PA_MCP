@@ -126,17 +126,30 @@ class OpenAICompatibleAdapter(LLMPort):
                 provider="openai_compatible",
             )
 
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        """从 LLM 响应中稳健提取 JSON。
+
+        容忍三种常见形态：纯 JSON、```json 包裹、开头无 ``` 但结尾有 ```、
+        前后夹带解释文字。提取第一个 { 到最后一个 } 再解析。
+        """
+        import re
+        # 1) markdown 代码块剥壳（```json ... ``` 或 ``` ... ```）
+        m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+        if m:
+            text = m.group(1)
+        # 2) 提取首尾大括号之间的内容（容忍前后杂质/结尾多余 ```）
+        s, e = text.find("{"), text.rfind("}")
+        if s >= 0 and e > s:
+            text = text[s:e + 1]
+        return json.loads(text.strip())
+
     async def chat_json(self, params: LLMCallParams) -> dict[str, Any]:
         """Chat and parse response as JSON dict."""
         response = await self.chat(params)
         try:
-            content = response.content
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
-            return json.loads(content.strip())
-        except (json.JSONDecodeError, IndexError):
+            return self._extract_json(response.content)
+        except (json.JSONDecodeError, IndexError, ValueError):
             logger.warning(
                 "Failed to parse LLM response as JSON",
                 content_preview=response.content[:200],

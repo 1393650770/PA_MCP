@@ -1917,6 +1917,46 @@ async def predict_resonance(symbol: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def predict_future_chart(symbol: str, horizon: int = 20) -> dict[str, Any]:
+    """未来 K 线路径预测（LLM 全维分析 → 三情景 OHLC 路径）。
+
+    把 agent 能拿到的全部上下文（历史 K 线特征/策略信号/市场状态/
+    板块轮动/游资情绪/近期走势）喂给 LLM，生成未来 N 日三条情景
+    （bull/base/bear）OHLC 路径 + 关键价位 + 风险，用于绘制预测 K 线图。
+
+    Args:
+        symbol: 股票代码
+        horizon: 预测交易日数（默认 20，≤30）
+
+    Returns data.history（近 60 根真实 K 线）+ data.scenarios（三情景路径）
+    + data.key_levels + data.mode（llm/deterministic）。
+    """
+    try:
+        from pa_mcp.research.future_path import predict_future_path
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 250", [symbol])
+                if kline_df is not None and not kline_df.empty:
+                    kline_df = kline_df.sort_values("date").reset_index(
+                        drop=True)
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            return _response(success=False,
+                             error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+        result = await predict_future_path(symbol, kline_df, horizon=horizon,
+                                           use_llm=True)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("predict_future_chart failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
 async def predict_market(symbol: str, horizon: Literal["1d", "5d", "20d"] = "5d",
                          save: bool = True) -> dict[str, Any]:
     """AI 市场预测：基于 K 线技术特征预测未来走势方向与概率。

@@ -1808,6 +1808,28 @@ def decision_tree_fig(symbol: str) -> tuple[Any, str]:
         return None, f"决策树生成失败：{str(e)[:200]}"
 
 
+def future_path_ui(symbol: str) -> tuple[Any, str]:
+    """未来 K 线预测图：LLM 全维分析（K线特征+策略+市场+板块+情绪）
+    → 三情景预测 K 线路径（bull/base/bear）。"""
+    symbol = symbol.strip()
+    if not symbol:
+        return None, "请输入股票代码"
+    try:
+        import asyncio
+        from pa_mcp.research.future_path import predict_future_path, build_chart
+        df = _load_long_history(symbol)
+        if df is None or df.empty:
+            return None, f"{symbol} 无行情数据"
+        r = asyncio.run(predict_future_path(symbol, df, horizon=20,
+                                            use_llm=True))
+        if "error" in r:
+            return None, f"预测失败：{r['error']}"
+        fig = build_chart(r)
+        return fig, r.get("report", "")
+    except Exception as e:
+        return None, f"预测失败：{str(e)[:200]}"
+
+
 def future_expectation_fig(symbol: str) -> tuple[Any, str]:
     """未来走势预期图：K线 + 预测区间阴影 + 方向概率 + 周期演进。"""
     symbol = symbol.strip()
@@ -3870,12 +3892,16 @@ def build_app():
             with gr.Row():
                 tree_btn = gr.Button("🌳 决策树可视化", variant="secondary")
                 expect_btn = gr.Button("📊 未来走势预期图", variant="secondary")
+                path_btn = gr.Button("📈 未来K线预测图（LLM全维分析）",
+                                     variant="secondary")
             tree_fig = gr.Plot()
             tree_out = gr.Markdown()
             tree_btn.click(decision_tree_fig, inputs=[pred_sym],
                            outputs=[tree_fig, tree_out])
             expect_btn.click(future_expectation_fig, inputs=[pred_sym],
                              outputs=[tree_fig, tree_out])
+            path_btn.click(future_path_ui, inputs=[pred_sym],
+                           outputs=[tree_fig, tree_out])
 
             mem_btn = gr.Button("🧠 长期记忆状态（决策胜率/偏差检测）",
                                 variant="secondary")
