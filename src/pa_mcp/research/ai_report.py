@@ -261,7 +261,8 @@ class AiMarketReport:
         llm_analysis = None
         try:
             from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter()
+            from pa_mcp.agent.llm_factory import ensure_llm_adapter
+            adapter = ensure_llm_adapter()
             if adapter is not None:
                 user_prompt = REPORT_PROMPT.format(
                     market_state=sections.get("market_state", "无"),
@@ -279,7 +280,7 @@ class AiMarketReport:
                         "你是有经验的 A 股研究综述编辑。只输出合法 JSON。"
                         "只解释给定数据，不编造新事实。输出是研究参考，非投资建议。"
                     ),
-                    user_prompt=user_prompt, mode="fast", max_tokens=1200,
+                    user_prompt=user_prompt, mode="fast", max_tokens=2000,
                 )
                 raw = await adapter.chat_json(params)
                 if isinstance(raw, dict) and "error" not in raw \

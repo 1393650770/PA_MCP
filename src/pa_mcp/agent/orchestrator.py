@@ -298,7 +298,8 @@ class AgentOrchestrator:
 
         # Try new adapter first, fall back to legacy client
         from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-        adapter = get_llm_adapter()
+        from pa_mcp.agent.llm_factory import ensure_llm_adapter
+        adapter = ensure_llm_adapter()
 
         SYSTEM_PROMPT = (
             "You are a quantitative analyst for Chinese A-share stocks. "
@@ -347,7 +348,8 @@ class AgentOrchestrator:
         由调用方提供（如 agent_market_state 的上下文）。无 LLM 时返回确定性诊断。
         """
         from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-        adapter = get_llm_adapter()
+        from pa_mcp.agent.llm_factory import ensure_llm_adapter
+        adapter = ensure_llm_adapter()
         if adapter is None:
             return self._diagnosis_deterministic(market_context)
 
@@ -379,7 +381,7 @@ class AgentOrchestrator:
             user_prompt=(
                 f"{MARKET_STATE_ANALYST_PROMPT}\n\n【市场观测】\n{ctx}"
             ),
-            mode="fast", max_tokens=600,
+            mode="fast", max_tokens=1500,
         )
         raw = await self._chat_json_with_retry(
             adapter, params, self._validate_diagnosis_json)
@@ -740,7 +742,7 @@ DO NOT output buy/sell. Output scores and evidence only."""
                 user_data = f"{env_context}\n{user_data}"
             params = LLMCallParams(
                 system_prompt=prompt, user_prompt=user_data,
-                mode="fast", max_tokens=800,
+                mode="fast", max_tokens=1500,
             )
             resp = await self._chat_json_with_retry(
                 adapter, params, self._validate_analyst_json)
@@ -776,7 +778,7 @@ DO NOT output buy/sell. Output scores and evidence only."""
             system_prompt=self.PORTFOLIO_MANAGER_PROMPT.format(
                 symbol=symbol, analyst_results=analyst_text),
             user_prompt=pm_user,
-            mode="deep", max_tokens=1200,
+            mode="deep", max_tokens=2000,
         )
         pm_resp = await self._chat_json_with_retry(
             adapter, pm_params, self._validate_pm_json)
@@ -861,7 +863,8 @@ DO NOT output buy/sell. Output scores and evidence only."""
         """Bull 论证 → Bear 反驳 → 投资大师裁定；失败不影响主流程。"""
         try:
             from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter()
+            from pa_mcp.agent.llm_factory import ensure_llm_adapter
+            adapter = ensure_llm_adapter()
             if adapter is None:
                 return
             if pm_resp is not None and "error" not in pm_resp:
@@ -882,7 +885,7 @@ DO NOT output buy/sell. Output scores and evidence only."""
                 system_prompt=self.BULL_ARGUMENT_PROMPT.format(
                     symbol=symbol, analyst_results=analyst_text),
                 user_prompt=f"请为 {symbol} 的多头立场辩护",
-                mode="fast", max_tokens=900,
+                mode="fast", max_tokens=1500,
             )
             bull = await self._chat_json_with_retry(
                 adapter, bull_params, self._validate_bull_bear_json)
@@ -901,7 +904,7 @@ DO NOT output buy/sell. Output scores and evidence only."""
                     symbol=symbol, analyst_results=analyst_text,
                     bull_arguments=bull_txt),
                 user_prompt=f"请反驳 {symbol} 的多头观点并论证空头立场",
-                mode="fast", max_tokens=900,
+                mode="fast", max_tokens=1500,
             )
             bear = await self._chat_json_with_retry(
                 adapter, bear_params, self._validate_bull_bear_json)
@@ -927,7 +930,7 @@ DO NOT output buy/sell. Output scores and evidence only."""
                         symbol=symbol, analyst_results=analyst_text,
                         debate_summary=debate_summary),
                     user_prompt=f"请以{style['name']}视角对 {symbol} 独立判断",
-                    mode="deep", max_tokens=800,
+                    mode="deep", max_tokens=1500,
                 )
                 for style in self.MASTER_STYLES
             ]

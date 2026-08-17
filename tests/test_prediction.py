@@ -408,14 +408,17 @@ def test_by_mode_comparison(tmp_path):
     assert "brier_score" in summary["by_mode"]["llm"]
 
 
-def test_position_sizing_with_history(tmp_path):
+def test_position_sizing_with_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "pa_mcp.agent.llm_factory.ensure_llm_adapter", lambda: None)
     """预测→仓位：同方向历史全中 → hist_hit_rate=1.0 生效；上限 20%。"""
     db = tmp_path / "sizing_test.duckdb"
     svc = PredictionService(store_path=str(db))
 
     # 先预测拿方向，再按该方向灌 5 条全中历史
     df = _make_df()
-    pre = asyncio.run(svc.predict("600000", df, horizon="5d"))
+    pre = asyncio.run(svc.predict("600000", df, horizon="5d",
+                                   use_llm=False))  # 确定性链路（测试意图）
     d = pre.direction
     for i in range(5):
         svc.save_prediction(PredictionResult(
@@ -448,7 +451,9 @@ def test_position_sizing_with_history(tmp_path):
     assert sizing["base_position_pct"] == (10.0 if d == "up" else 0.0)
 
 
-def test_position_sizing_down_zero():
+def test_position_sizing_down_zero(monkeypatch):
+    monkeypatch.setattr(
+        "pa_mcp.agent.llm_factory.ensure_llm_adapter", lambda: None)
     """看跌预测 → 仓位 0（不做空）。"""
     import numpy as np
     np.random.seed(11)
@@ -585,7 +590,9 @@ def test_calibration_figure_build():
     assert "#e03131" in fig.data[0].marker.color
 
 
-def test_position_sizing_resonance_adjust():
+def test_position_sizing_resonance_adjust(monkeypatch):
+    monkeypatch.setattr(
+        "pa_mcp.agent.llm_factory.ensure_llm_adapter", lambda: None)
     """共振校准：强共振同向上调 1.3；分歧收缩 0.7。"""
     import tempfile, os
     import numpy as np

@@ -183,7 +183,8 @@ async def one_click_report(symbols: Optional[list[str]] = None,
     if include_llm:
         try:
             from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter()
+            from pa_mcp.agent.llm_factory import ensure_llm_adapter
+            adapter = ensure_llm_adapter()
             if adapter is not None:
                 data = "\n".join(f"[{t}] {b}" for t, b in sections)
                 params = LLMCallParams(
@@ -193,7 +194,7 @@ async def one_click_report(symbols: Optional[list[str]] = None,
                     user_prompt=(
                         f"基于以下一站式分析结果，给出 3 句总结、2 个关注方向、"
                         f"2 个风险点（JSON：summary/focus_areas/risks）。\n\n{data}"),
-                    mode="fast", max_tokens=900,
+                    mode="fast", max_tokens=1500,
                 )
                 raw = await adapter.chat_json(params)
                 if isinstance(raw, dict) and "error" not in raw and raw.get("summary"):

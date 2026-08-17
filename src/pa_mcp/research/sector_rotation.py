@@ -517,15 +517,9 @@ class SectorRotationAnalyzer:
             return out
 
         try:
-            from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter()
-            if adapter is None:
-                # 单例未初始化时主动读配置（与 chat_reply/prediction 同一
-                # 兜底模式，避免配置了 LLM 却静默降级确定性规则）
-                from pa_mcp.agent.llm_factory import init_llm_adapter
-                from pa_mcp.config import PROJECT_ROOT
-                adapter = init_llm_adapter(
-                    str(PROJECT_ROOT / "config" / "llm_config.json"))
+            from pa_mcp.agent.llm_port import LLMCallParams
+            from pa_mcp.agent.llm_factory import ensure_llm_adapter
+            adapter = ensure_llm_adapter()  # 统一兜底：空单例主动读配置
             if adapter is not None:
                 user_prompt = SECTOR_ROTATION_PROMPT.format(
                     features=features, rotation_speed=rotation_speed,
@@ -535,7 +529,7 @@ class SectorRotationAnalyzer:
                         "你是有经验的 A 股板块轮动研究员。只输出合法 JSON。"
                         "输出是研究参考，不是投资建议。"
                     ),
-                    user_prompt=user_prompt, mode="fast", max_tokens=1000,
+                    user_prompt=user_prompt, mode="fast", max_tokens=3000,
                 )
                 raw = await adapter.chat_json(params)
                 if isinstance(raw, dict) and "error" not in raw:

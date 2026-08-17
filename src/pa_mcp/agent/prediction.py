@@ -393,16 +393,11 @@ class PredictionService:
             raise ValueError(f"无法抽取 {symbol} 的 K 线特征：{features['error']}")
 
         # 尝试 LLM（use_llm=False 时跳过），失败/未配置则确定性降级
+        # ensure_llm_adapter 统一兜底：单例为空时主动读配置初始化
         try:
-            from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter() if use_llm else None
-            if adapter is None and use_llm:
-                # 单例未初始化时主动读配置（与 chat_reply/methodology_guide
-                # 同一兜底模式，避免新进程里配置了 LLM 却降级确定性）
-                from pa_mcp.agent.llm_factory import init_llm_adapter
-                from pa_mcp.config import PROJECT_ROOT
-                adapter = init_llm_adapter(
-                    str(PROJECT_ROOT / "config" / "llm_config.json"))
+            from pa_mcp.agent.llm_port import LLMCallParams
+            from pa_mcp.agent.llm_factory import ensure_llm_adapter
+            adapter = ensure_llm_adapter() if use_llm else None
             if adapter is not None:
                 return await self._predict_with_llm(
                     adapter, symbol, today, horizon, features, kline_df)

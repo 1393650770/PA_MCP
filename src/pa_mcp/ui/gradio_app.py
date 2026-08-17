@@ -332,16 +332,9 @@ def chat_reply(message: str, history: list[dict]) -> str:
     if not message.strip():
         return "请输入问题"
 
-    # LLM 可用性：优先已初始化的 adapter；否则尝试从
-    # config/llm_config.json 或环境变量初始化
-    from pa_mcp.agent.llm_port import get_llm_adapter
-    adapter = get_llm_adapter()
-    if adapter is None:
-        try:
-            from pa_mcp.agent.llm_factory import init_llm_adapter
-            adapter = init_llm_adapter("config/llm_config.json")
-        except Exception:
-            adapter = None
+    # LLM 可用性：ensure_llm_adapter 单例为空时主动读配置（统一兜底）
+    from pa_mcp.agent.llm_factory import ensure_llm_adapter
+    adapter = ensure_llm_adapter()
     if adapter is None:
         return _rule_based_reply(message)
 
@@ -475,7 +468,8 @@ def portfolio_ai_analysis(symbol: str) -> str:
     # 有 LLM 时用 5 分析师团（deep_analyze）深度分析
     try:
         from pa_mcp.agent.llm_port import get_llm_adapter
-        adapter = get_llm_adapter()
+        from pa_mcp.agent.llm_factory import ensure_llm_adapter
+        adapter = ensure_llm_adapter()
         if adapter is not None:
             from pa_mcp.agent.orchestrator import get_orchestrator
             orch = get_orchestrator()
@@ -932,8 +926,9 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     # LLM 综合解读（有配置时增强）
     if rows:
         try:
-            from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-            adapter = get_llm_adapter()
+            from pa_mcp.agent.llm_port import LLMCallParams
+            from pa_mcp.agent.llm_factory import ensure_llm_adapter
+            adapter = ensure_llm_adapter()
             if adapter is not None:
                 cand_text = "\n".join(
                     f"- {r['symbol']} {r['name']}（板块{r.get('sector','?')}）"

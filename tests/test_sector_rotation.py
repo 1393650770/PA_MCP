@@ -60,9 +60,12 @@ def test_analyze_ranking(tmp_path):
     assert a["rotation_speed"] in ("高", "中", "低")
 
 
-def test_predict_deterministic(tmp_path):
+def test_predict_deterministic(tmp_path, monkeypatch):
     db = _seed_sector_daily(tmp_path)
     analyzer = SectorRotationAnalyzer(store_path=db)
+    # 明确模拟未配置 LLM（ensure_llm_adapter 会主动读真实配置）
+    monkeypatch.setattr(
+        "pa_mcp.agent.llm_factory.ensure_llm_adapter", lambda: None)
 
     import asyncio
     pred = asyncio.run(analyzer.predict())

@@ -25,6 +25,25 @@ from pa_mcp.agent.llm_port import LLMPort, get_llm_adapter, register_adapter
 logger = structlog.get_logger(__name__)
 
 
+def ensure_llm_adapter() -> Optional[LLMPort]:
+    """获取 LLM adapter；单例为空时主动从 config/llm_config.json 初始化。
+
+    所有 LLM 触点统一用本函数（chat/prediction/sector_rotation/
+    methodology_guide/ai_report/orchestrator…），避免「配置了 LLM 却
+    静默降级确定性」：进程内单例只在 init_llm_adapter 后被设置，而多数
+    入口（UI 按钮/MCP 工具）启动时并不初始化。
+
+    仍可能返回 None（未配置或初始化失败），调用方照常降级。
+    """
+    from pa_mcp.agent.llm_port import get_llm_adapter
+    adapter = get_llm_adapter()
+    if adapter is None:
+        from pa_mcp.config import PROJECT_ROOT
+        adapter = init_llm_adapter(
+            str(PROJECT_ROOT / "config" / "llm_config.json"))
+    return adapter
+
+
 def init_llm_adapter(config_path: Optional[str] = None) -> Optional[LLMPort]:
     """Initialize the LLM adapter from config.
 

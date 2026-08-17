@@ -413,13 +413,8 @@ def _llm_status() -> tuple[bool, Optional[str]]:
     未配置/初始化失败返回 (False, None)，调用方各自降级。
     """
     try:
-        from pa_mcp.agent.llm_port import get_llm_adapter
-        adapter = get_llm_adapter()
-        if adapter is None:
-            from pa_mcp.agent.llm_factory import init_llm_adapter
-            from pa_mcp.config import PROJECT_ROOT
-            config_file = str(PROJECT_ROOT / "config" / "llm_config.json")
-            adapter = init_llm_adapter(config_file)
+        from pa_mcp.agent.llm_factory import ensure_llm_adapter
+        adapter = ensure_llm_adapter()  # 统一兜底：空单例主动读配置
         if adapter is not None:
             name = getattr(adapter, "provider_name", None)
             if name == "openai_compatible":

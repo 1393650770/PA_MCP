@@ -223,7 +223,8 @@ async def _llm_advice(tone: dict, holdings: list[dict], buys: list[dict],
     """
     try:
         from pa_mcp.agent.llm_port import get_llm_adapter, LLMCallParams
-        adapter = get_llm_adapter()
+        from pa_mcp.agent.llm_factory import ensure_llm_adapter
+        adapter = ensure_llm_adapter()
         if adapter is None:
             return None
         holdings_text = "\n".join(
