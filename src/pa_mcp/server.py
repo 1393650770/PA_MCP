@@ -1319,19 +1319,9 @@ async def portfolio_add(symbol: str, cost: float, shares: int,
         except Exception:
             pass
 
-        # id 为 NOT NULL 主键且 insert_df 会用 None 填充缺失列 →
-        # 显式生成 id（COALESCE(MAX)+1），避免插入 NULL 主键崩溃
-        _pid = 1
-        if _store and _store.table_exists("portfolio"):
-            try:
-                _mx = _store.query_df(
-                    "SELECT COALESCE(MAX(id), 0) AS m FROM portfolio", [])
-                if not _mx.empty:
-                    _pid = int(_mx.iloc[0]["m"]) + 1
-            except Exception:
-                _pid = 1
+        # 表结构统一为 symbol/cost/shares/added_date/created_at（无 id 列，
+        # 与 UI portfolio_add_ui 一致——历史实现依赖 id 列导致删除/插入报错）
         record = pd.DataFrame([{
-            "id": _pid,
             "symbol": symbol,
             "cost": cost,
             "shares": shares,
@@ -1343,17 +1333,17 @@ async def portfolio_add(symbol: str, cost: float, shares: int,
         }])
 
         if _store and _store.table_exists("portfolio"):
-            _store.insert_df("portfolio", record, mode="append")
+            # mode=insert（表无主键，append 的 ON CONFLICT 需要约束；与 UI 一致）
+            _store.insert_df("portfolio", record, mode="insert")
         elif _store:
-            # Create table on first use
+            # Create table on first use（与 UI 同一结构，无 id 列）
             _store.execute("""
                 CREATE TABLE IF NOT EXISTS portfolio (
-                    id INTEGER PRIMARY KEY,
                     symbol VARCHAR(10), cost DOUBLE, shares INTEGER,
                     added_date DATE, created_at TIMESTAMP
                 )
             """)
-            _store.insert_df("portfolio", record, mode="append")
+            _store.insert_df("portfolio", record, mode="insert")
 
         return _response(data={"symbol": symbol, "cost": cost, "shares": shares, "status": "added"})
     except Exception as e:
@@ -1361,19 +1351,23 @@ async def portfolio_add(symbol: str, cost: float, shares: int,
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
-async def portfolio_remove(holding_id: int) -> dict[str, Any]:
-    """Remove a holding from portfolio.
+async def portfolio_remove(symbol: str) -> dict[str, Any]:
+    """Remove a holding from portfolio (按代码删除，与 UI 同一口径).
 
     Args:
-        holding_id: The ID of the holding to remove
+        symbol: Stock code (e.g., '600664') — 持仓代码
     """
     try:
         if _store and _store.table_exists("portfolio"):
-            _store.execute("DELETE FROM portfolio WHERE id = ?", [holding_id])
-            return _response(data={"holding_id": holding_id, "status": "removed"})
-        return _response(success=False, error="Portfolio table not found", error_type="NOT_FOUND")
+            _store.execute("DELETE FROM portfolio WHERE symbol = ?",
+                           [symbol.strip()])
+            return _response(data={"symbol": symbol.strip(),
+                                   "status": "removed"})
+        return _response(success=False, error="Portfolio table not found",
+                         error_type="NOT_FOUND")
     except Exception as e:
-        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
 
 
 # ---- MCP Tools: Watchlist ----
