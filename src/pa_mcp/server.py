@@ -4611,6 +4611,55 @@ async def calc_vwap(symbol: str, date: str = "") -> dict[str, Any]:
 # ---- MCP Tool: Help / Introspection ----
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def agent_plan(goal: str, max_steps: int = 6) -> dict[str, Any]:
+    """Agent 自主规划：把研究目标拆解为可执行的工具调用计划。
+
+    借鉴开源 Agent 规划（plan-then-execute / evaluator-optimizer）：
+    LLM 基于 97 个工具目录生成结构化计划（步骤/工具/参数/依赖/风险），
+    无 LLM 时按目标关键词规则路由。执行中每完成一步可调
+    agent_plan_update 反馈结果 → 动态调整剩余步骤（数据缺口自动补采）。
+
+    Args:
+        goal: 研究目标（如 "研究 601728 并给出操作建议" / "选 3 只股票"）
+        max_steps: 计划步数上限（3-8，默认 6）
+
+    用法示例（Agent 端）：先 agent_plan 拿计划 → 逐步执行各 step.action
+    → 每步完成后 agent_plan_update 反馈 → 按调整后的计划继续。
+    """
+    try:
+        from pa_mcp.research.agent_plan import create_plan
+        result = await create_plan(goal, max_steps=max_steps)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("agent_plan failed", goal=goal, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def agent_plan_update(plan: dict[str, Any], completed_id: int,
+                            result_summary: str) -> dict[str, Any]:
+    """Agent 计划动态重规划：反馈已执行步骤的结果，调整剩余步骤。
+
+    evaluator-optimizer 模式：LLM 评估结果是否满足预期/有无数据缺口，
+    必要时增删剩余步骤；LLM 不可用或评估通过时保持原计划。
+
+    Args:
+        plan: agent_plan 返回的 data（含 steps）
+        completed_id: 刚完成的步骤 id
+        result_summary: 该步骤的输出摘要（≤800 字）
+    """
+    try:
+        from pa_mcp.research.agent_plan import update_plan
+        result = await update_plan(plan, completed_id, result_summary)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("agent_plan_update failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def get_strategy_guide(market_state: str = "") -> dict[str, Any]:
     """策略速查：按市场状态推荐策略 + 新手难度星级。
 
