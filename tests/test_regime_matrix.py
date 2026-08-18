@@ -96,8 +96,13 @@ def test_matrix_ice_any_speed(tmp_path):
     assert r["regime_label"] == "冰点"
 
 
-def test_matrix_missing_data(tmp_path):
-    """无数据 → 降级结论（数据不足）。"""
+def test_matrix_missing_data(tmp_path, monkeypatch):
+    """无数据 + 实时也失败 → 降级结论（数据不足）。"""
+    from pa_mcp.research import sentiment_cycle as sc
+    async def _no_realtime():
+        return None
+    monkeypatch.setattr(sc.SentimentCycleAnalyzer,
+                        "_fetch_realtime_stats", _no_realtime)
     r = RegimeMatrixAnalyzer(store_path=str(tmp_path / "none.db")).analyze()
     assert r["sentiment_stage"] == "unknown"
     assert r["rotation_speed"] == "unknown"

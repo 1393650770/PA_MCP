@@ -68,7 +68,8 @@ def test_extract_features_uptrend_cycle(ohlcv_data):
 async def test_deterministic_prediction(ohlcv_data):
     """无 LLM 配置 → 确定性预测：概率和为 1、区间含期望、方向合法。"""
     svc = PredictionService()
-    result = await svc.predict("000001", ohlcv_data, horizon="5d")
+    result = await svc.predict("000001", ohlcv_data, horizon="5d",
+                              use_llm=False)  # 显式确定性（测试意图）
     assert isinstance(result, PredictionResult)
     assert result.mode == "deterministic"
     assert result.direction in ("up", "down", "sideways")

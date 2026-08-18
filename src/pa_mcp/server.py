@@ -3650,7 +3650,22 @@ async def sentiment_cycle(date: str = "") -> dict[str, Any]:
     try:
         from pa_mcp.research.sentiment_cycle import (
             get_sentiment_analyzer, format_sentiment)
-        result = get_sentiment_analyzer().analyze(target_date=date or None)
+        sc = get_sentiment_analyzer()
+        if not date:
+            # 今日实时优先：直接 await（analyze 的同步实时分支内部
+            # asyncio.run 在 async 工具里会崩）
+            rt = await sc._fetch_realtime_stats()
+            if rt:
+                stats = sc._realtime_stats_to_day(rt)
+                stage, stage_zh = sc._stage(stats, None)
+                result = {**stats, "stage": stage, "stage_zh": stage_zh,
+                          "data_source": "realtime",
+                          "trend": [], "warnings": [],
+                          "limit_up_pct_threshold": 9.5,
+                          "note": stats.get("note", "")}
+                return _response(data={**result,
+                                       "report": format_sentiment(result)})
+        result = sc.analyze(target_date=date or None)
         if "error" in result:
             return _response(success=False, error=result["error"],
                              error_type="DATA_UNAVAILABLE")

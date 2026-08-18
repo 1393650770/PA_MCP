@@ -76,8 +76,11 @@ def _seed(tmp_path):
     return db
 
 
-def test_report_template_fallback(tmp_path):
+def test_report_template_fallback(tmp_path, monkeypatch):
     """无 LLM：确定性模板降级，各段齐全。"""
+    # 显式模拟未配置 LLM（ensure 会主动读真实配置）
+    monkeypatch.setattr(
+        "pa_mcp.agent.llm_factory.ensure_llm_adapter", lambda: None)
     db = _seed(tmp_path)
     gen = AiMarketReport(store_path=db)
     result = asyncio.run(gen.generate(
