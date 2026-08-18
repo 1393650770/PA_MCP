@@ -4660,6 +4660,57 @@ async def agent_plan_update(plan: dict[str, Any], completed_id: int,
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def agent_self_improve() -> dict[str, Any]:
+    """递归自我改进评估：聚合系统运行证据 → 下一轮改进建议。
+
+    聚合四路证据：① 预测验证成绩单（命中率/Brier/IC）② 全策略事件研究
+    （有效/失效策略）③ 经验库 hit/miss ④ 教训库（miss 决策自动沉淀的
+    Reflexion 教训）+ 认知偏差 → LLM 生成改进报告（教训/方法调整/数据
+    缺口/下一步动作）；无 LLM 时确定性统计摘要。
+
+    建议每周末运行（配合 pamcp-weekly-research cron）。
+    """
+    try:
+        from pa_mcp.research.self_improve import run_self_improve
+        result = await run_self_improve()
+        return _response(data=result)
+    except Exception as e:
+        logger.error("agent_self_improve failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def agent_lessons(symbol: str = "", direction: str = "",
+                        limit: int = 5) -> dict[str, Any]:
+    """检索历史教训（Reflexion 沉淀：决策未兑现 → 教训 → 后续参考）。
+
+    每次分析/预测前可调本工具注入相关教训，避免重复犯错；
+    教训在决策回填（record_outcome）miss 时自动沉淀。
+
+    Args:
+        symbol: 按标的过滤（空 = 全部）
+        direction: 按方向过滤（up/down/neutral，空 = 全部）
+        limit: 返回条数（默认 5）
+    """
+    try:
+        from pa_mcp.agent.memory import LongTermMemory
+        mem = LongTermMemory()
+        lessons = mem.get_lessons(symbol=symbol, direction=direction,
+                                  limit=limit)
+        return _response(data={
+            "lessons": lessons,
+            "count": len(lessons),
+            "note": "教训为 Reflexion 沉淀（miss 决策自动生成）；"
+                    "分析前注入可避免重复犯错。研究参考，非投资建议。",
+        })
+    except Exception as e:
+        logger.error("agent_lessons failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def get_strategy_guide(market_state: str = "") -> dict[str, Any]:
     """策略速查：按市场状态推荐策略 + 新手难度星级。
 

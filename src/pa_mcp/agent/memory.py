@@ -127,7 +127,10 @@ class LongTermMemory:
         return decision_id or 0
 
     def record_outcome(self, decision_id: int, forward_return: float, days: int = 5) -> None:
-        """Record the outcome of a past decision."""
+        """Record the outcome of a past decision.
+
+        miss 决策（方向与结果相反）自动沉淀教训（Reflexion 闭环）。
+        """
         conn = self._get_conn()
         conn.execute(
             """INSERT INTO outcomes (decision_id, days_forward, forward_return, outcome_date, was_profitable)
@@ -135,7 +138,113 @@ class LongTermMemory:
             [decision_id, days, forward_return, forward_return > 0],
         )
         conn.commit()
+        # 自动教训沉淀：查决策方向/市场状态，miss 时记录
+        try:
+            row = conn.execute(
+                "SELECT symbol, direction, market_state, key_evidence "
+                "FROM decisions WHERE id = ?", [decision_id]).fetchone()
+            if row and forward_return < 0:
+                conn.close()
+                self.record_lesson(
+                    symbol=row[0], direction=row[1] or "neutral",
+                    market_state=row[2] or "unknown",
+                    context=row[3][:200] if row[3] else "",
+                    forward_return=forward_return)
+                return
+        except Exception:  # noqa: BLE001
+            pass
         conn.close()
+
+    # ---- 教训沉淀（Reflexion 式：决策失败 → 提取教训 → 后续参考） ----
+
+    def _init_lessons_table(self) -> None:
+        conn = self._get_conn()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lessons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(10), direction VARCHAR(10),
+                market_state VARCHAR(20), context TEXT,
+                forward_return DOUBLE, lesson TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def record_lesson(self, symbol: str, direction: str, market_state: str,
+                      context: str, forward_return: float) -> int:
+        """决策未兑现 → 沉淀教训（Reflexion：反思 → 下次行动参考）。
+
+        context 为当时判断摘要；forward_return 为回填收益。
+        规则生成教训文本（方向 vs 结果的偏差类型）；返回 lesson_id。
+        """
+        try:
+            self._init_lessons_table()
+        except Exception:  # noqa: BLE001
+            pass
+        if forward_return >= 0:
+            return 0  # 只有 miss 才沉淀教训
+        if direction == "up" and forward_return < -2.0:
+            lesson = (f"看涨 {symbol} 但 {forward_return:.1f}% 负收益——"
+                      "追高/假突破概率大，下次需确认放量突破+大盘配合")
+        elif direction == "down" and forward_return > 2.0:
+            lesson = (f"看跌 {symbol} 但 {forward_return:+.1f}% 反弹——"
+                      "超跌反弹/利空出尽，下次避免在冰点期过度看空")
+        elif abs(forward_return) >= 1.0:
+            lesson = (f"方向误判（{direction} vs {forward_return:+.1f}%）——"
+                      f"上下文: {context[:60]}，下次降低该环境下的仓位")
+        else:
+            return 0  # 幅度太小不算教训
+        conn = self._get_conn()
+        cur = conn.execute(
+            """INSERT INTO lessons (symbol, direction, market_state, context,
+               forward_return, lesson) VALUES (?, ?, ?, ?, ?, ?)""",
+            [symbol, direction, market_state, context[:200],
+             round(forward_return, 2), lesson])
+        conn.commit()
+        conn.close()
+        logger.info("Lesson recorded", id=cur.lastrowid, symbol=symbol)
+        return cur.lastrowid or 0
+
+    def get_lessons(self, symbol: str = "", direction: str = "",
+                    limit: int = 5) -> list[dict[str, Any]]:
+        """检索历史教训（Reflexion 注入：分析前查相关教训）。"""
+        try:
+            self._init_lessons_table()
+        except Exception:  # noqa: BLE001
+            return []
+        sql = "SELECT * FROM lessons WHERE 1=1"
+        params: list[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            params.append(symbol)
+        if direction:
+            sql += " AND direction = ?"
+            params.append(direction)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        conn = self._get_conn()
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [{
+            "id": r[0], "symbol": r[1], "direction": r[2],
+            "market_state": r[3], "context": r[4],
+            "forward_return": r[5], "lesson": r[6],
+            "created_at": r[7],
+        } for r in rows]
+
+    def lessons_stats(self) -> dict[str, Any]:
+        """教训库统计（供自我改进报告）。"""
+        try:
+            self._init_lessons_table()
+        except Exception:  # noqa: BLE001
+            return {"total": 0}
+        conn = self._get_conn()
+        total = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        by_dir = dict(conn.execute(
+            "SELECT direction, COUNT(*) FROM lessons GROUP BY direction").fetchall())
+        conn.close()
+        return {"total": total, "by_direction": by_dir}
 
     def update_strategy_weight(self, strategy_name: str, win: bool) -> None:
         """Update strategy weight using Bayesian blending."""
