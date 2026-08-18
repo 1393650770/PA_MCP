@@ -37,6 +37,7 @@ def build_source_factory(
         return _make
 
     return {
+        "astock": _new_astock,
         "akshare": _lazy("akshare"),
         "sina": _lazy("sina"),
         "tencent": _new_tencent,
@@ -57,6 +58,11 @@ def _new_adapter(name: str):
 
 
 _new_adapter.cache: dict[str, Any] = {}
+
+
+def _new_astock():
+    from pa_mcp.data.sources.astock_adapter import AstockAdapter
+    return AstockAdapter()
 
 
 def _new_tencent():

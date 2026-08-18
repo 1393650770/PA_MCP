@@ -2,10 +2,10 @@
 
 data_sources:
   # 多源容灾：顺序尝试，主源失败自动切备用；连续失败触发熔断冷却
-  # 实测（2026-08-17）：tencent 最快最稳（~120ms，唯一免费实时快照 PE/PB）；
-  #   sina ~75ms；ths 全历史补数（限流 ~400ms）；akshare 全市场快照唯一源
-  #   （当前上游挂）；eastmoney 快但偶发断连（实测首轮即失败）→ 放最后
-  sources: [tencent, sina, ths, akshare, eastmoney]
+  # astock（a-stock-data 移植）首选：腾讯质量版报价（is_stale 僵尸检测）+
+  #   百度 K 线（自带 MA5/10/20）；失败回退 tencent（~120ms 最快）→
+  #   sina → ths 全历史 → akshare（全市场快照）→ eastmoney（不稳定放最后）
+  sources: [astock, tencent, sina, ths, akshare, eastmoney]
   circuit:
     failure_threshold: 3
     cooldown_seconds: 300
