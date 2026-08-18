@@ -4660,6 +4660,76 @@ async def agent_plan_update(plan: dict[str, Any], completed_id: int,
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def compress_context(text: str, max_chars: int = 2000,
+                           use_llm: bool = True) -> dict[str, Any]:
+    """上下文压缩：长文本 LLM 精炼（保留关键数字/结论/风险，≤max_chars）。
+
+    用于长报告/多轮证据/长历史 K 线文本注入 LLM 前压缩——防超限降成本。
+    LLM 不可用时自动降级为保头尾截断（mode=truncate）。
+
+    Args:
+        text: 待压缩内容
+        max_chars: 目标长度（200-8000，默认 2000）
+        use_llm: 是否尝试 LLM 精炼（默认 True）
+    """
+    try:
+        from pa_mcp.research.context_compress import compress_text
+        result = await compress_text(text, max_chars=max_chars,
+                                     use_llm=use_llm)
+        return _response(data=result)
+    except Exception as e:
+        logger.error("compress_context failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+async def compress_kline_data(symbol: str, detail_bars: int = 30,
+                              summary_weeks: int = 26) -> dict[str, Any]:
+    """K 线上下文压缩：近期明细 + 早期周聚合 + 整体统计。
+
+    长历史 K 线（如 1000 根）注入 LLM 前压缩为紧凑文本——
+    近 detail_bars 根逐根 + 更早部分周聚合 + 区间/涨跌/均量统计。
+
+    Args:
+        symbol: 股票代码
+        detail_bars: 近期逐根明细根数（默认 30）
+        summary_weeks: 早期周聚合周数上限（默认 26）
+    """
+    try:
+        from pa_mcp.research.context_compress import compress_kline
+        kline_df = None
+        if _store:
+            try:
+                kline_df = _store.query_df(
+                    "SELECT date, open, high, low, close, volume, "
+                    "pct_change FROM kline_daily WHERE symbol = ? "
+                    "ORDER BY date DESC LIMIT 800", [symbol])
+                if kline_df is not None and not kline_df.empty:
+                    kline_df = kline_df.sort_values("date").reset_index(
+                        drop=True)
+            except Exception:
+                pass
+        if kline_df is None or kline_df.empty:
+            return _response(success=False,
+                             error=f"No data for symbol {symbol}",
+                             error_type="NOT_FOUND")
+        text = compress_kline(kline_df, detail_bars=detail_bars,
+                              summary_weeks=summary_weeks)
+        return _response(data={
+            "symbol": symbol,
+            "compressed": text,
+            "original_bars": len(kline_df),
+            "note": "近 N 根明细 + 早期周聚合；适合注入 LLM prompt 前调用。",
+        })
+    except Exception as e:
+        logger.error("compress_kline_data failed", symbol=symbol,
+                     error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def agent_self_improve() -> dict[str, Any]:
     """递归自我改进评估：聚合系统运行证据 → 下一轮改进建议。
 
