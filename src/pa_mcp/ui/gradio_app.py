@@ -13,8 +13,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
+import threading
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -750,11 +753,24 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     from pa_mcp.engine.strategies.tips import get_strategy_tip
     from pa_mcp.research.event_study import signal_forward_returns
 
-    # 股票池：板块成分（热门+冷门）∪ 用户持仓股 ∪ 内置常用股
+    # 股票池：全市场今日强势池（动态）∪ 板块成分（热门+冷门）∪ 持仓股 ∪ 白马
+    # 动态池优先：每天从 ~5500 只里按涨幅/成交额过滤，解决"总是那几只老票"
+    from pa_mcp.research.market_pool import build_market_scan_pool
+
+    dynamic = []
+    try:
+        import asyncio
+        dynamic = asyncio.run(build_market_scan_pool(limit=universe_size))
+    except Exception as e:
+        # 全市场快照失败 → 降级原静态池（日志可见，不静默）
+        logging.getLogger(__name__).warning(
+            "全市场动态池抓取失败，降级静态池: %s", str(e)[:80])
+    dynamic_symbols = [d["symbol"] for d in dynamic]
+
     sector_info, sector_stocks, sector_source = fetch_sector_universe(
         hot_count=6, cold_count=3, stocks_per_sector=6)
 
-    symbols = []
+    symbols = [s for s in dynamic_symbols]
     for codes in sector_stocks.values():
         for c in codes:
             if c not in symbols:
@@ -779,6 +795,8 @@ def scan_market_ui(strategy: str, top_n: int = 10,
 
     universe_size = len(symbols)
     sector_name_of: dict[str, str] = {}
+    for d in dynamic:
+        sector_name_of.setdefault(d["symbol"], "今日强势")
     for sec, codes in sector_stocks.items():
         for c in codes:
             sector_name_of.setdefault(c, sec)
@@ -789,11 +807,14 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     if base is None:
         return f"策略 {strategy} 未注册"
 
+    # 并发预加载 K 线（TTL 缓存），主/互补策略共用一次网络拉取
+    kline_map = _load_klines_cached(symbols)
+
     rows = []
     for sym in symbols:
         try:
-            df = _load_long_history(sym)
-            if df.empty or len(df) < 120:
+            df = kline_map.get(sym)
+            if df is None or df.empty or len(df) < 120:
                 continue
             # 当前信号：最近 10 个交易日内有买入信号
             inst = base.__class__(**getattr(base, "__dict__", {}))
@@ -840,40 +861,40 @@ def scan_market_ui(strategy: str, top_n: int = 10,
         except Exception:
             continue
 
-    if not rows:
-        # 主策略无近期信号 → 用 ma_golden_cross 互补扫描（趋势型更常触发）
-        try:
-            alt = registry.get("ma_golden_cross")
-            if alt is not None:
-                for sym in symbols:
-                    try:
-                        df = _load_long_history(sym)
-                        if df.empty or len(df) < 120:
-                            continue
-                        signals = alt.generate_signals(df.copy())
-                        if not signals:
-                            continue
-                        window_start = str(df["date"].astype(str).str[:10].iloc[-11])
-                        recent = [
-                            s for s in signals
-                            if (getattr(s, "signal_time", None) or str(getattr(s, "timestamp", ""))[:10]) >=
-                            window_start
-                        ]
-                        if not recent:
-                            continue
-                        s = recent[-1]
-                        rows.append({
-                            "symbol": sym, "name": get_stock_name(sym),
-                            "signal_date": (getattr(s, "signal_time", None) or
-                                            str(getattr(s, "timestamp", ""))[:10]),
-                            "strength": float(getattr(s, "strength_score", 50)),
-                            "win_rate": None,
-                            "alt_strategy": "ma_golden_cross",
-                        })
-                    except Exception:
+    # 互补扫描（ma_golden_cross 金叉）总是执行并合并：
+    # 主策略（均值回归）只从超跌票出信号，强势新票只有趋势策略才扫得出
+    try:
+        alt = registry.get("ma_golden_cross")
+        if alt is not None:
+            for sym in symbols:
+                try:
+                    df = kline_map.get(sym)
+                    if df is None or df.empty or len(df) < 120:
                         continue
-        except Exception:
-            pass
+                    signals = alt.generate_signals(df.copy())
+                    if not signals:
+                        continue
+                    window_start = str(df["date"].astype(str).str[:10].iloc[-11])
+                    recent = [
+                        s for s in signals
+                        if (getattr(s, "signal_time", None) or str(getattr(s, "timestamp", ""))[:10]) >=
+                        window_start
+                    ]
+                    if not recent:
+                        continue
+                    s = recent[-1]
+                    rows.append({
+                        "symbol": sym, "name": get_stock_name(sym),
+                        "signal_date": (getattr(s, "signal_time", None) or
+                                        str(getattr(s, "timestamp", ""))[:10]),
+                        "strength": float(getattr(s, "strength_score", 50)),
+                        "win_rate": None,
+                        "alt_strategy": "ma_golden_cross",
+                    })
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
         if not rows:
             holding_note = ""
@@ -890,7 +911,15 @@ def scan_market_ui(strategy: str, top_n: int = 10,
                     f"*研究参考，非投资建议。*")
 
     rows.sort(key=lambda r: r["strength"], reverse=True)
-    rows = rows[:top_n]
+    # 同票多策略去重：保留强度最高的一条（主策略与金叉可能都触发）
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        if r["symbol"] in seen:
+            continue
+        seen.add(r["symbol"])
+        deduped.append(r)
+    rows = deduped[:top_n]
 
     held_set = set(holdings) if holdings else set()
     if sector_source == "eastmoney":
@@ -905,7 +934,7 @@ def scan_market_ui(strategy: str, top_n: int = 10,
 
     lines = [
         f"## 📡 市场扫描：{strategy} 当前买入信号候选（TOP {len(rows)}）",
-        f"*扫描 {universe_size} 只（板块 + 持仓"
+        f"*扫描 {universe_size} 只（今日强势{len(dynamic)}只 + 板块 + 持仓"
         f"{'📌' if holdings else ''}）· 信号日期 = 最近触发日（近10日）*",
         "",
         env_line,
@@ -965,57 +994,81 @@ def scan_market_ui(strategy: str, top_n: int = 10,
 
 # ---- Walk-Forward 研究评估 ----
 
-def _load_long_history(symbol: str, years: float = 5.0) -> pd.DataFrame:
-    """分页拉取长历史日线（腾讯单次上限640根，分2-3段拼接）。"""
-    store = _get_store()
-    today = datetime.now().date()
-    # 先查 DB（scheduler 积累的数据更全）
+def _save_kline_to_store(symbol: str, df: pd.DataFrame) -> None:
+    """网络拉取的 K 线写回 DuckDB（跨进程复用；best-effort 失败静默）。
+
+    MCP stdio 每次调用都是新进程，进程内缓存无效——落库后
+    后续任何进程的 _load_long_history 都直接命中数据库（秒回）。
+    """
     try:
-        if store.table_exists("kline_daily"):
-            df = store.query_df(
-                "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date ASC",
-                [symbol],
-            )
-            if len(df) >= 500:
-                return df
+        store = _get_store()
+        try:
+            # UPSERT 语义：先删该票旧行再插入（append 会重复）
+            store.execute("DELETE FROM kline_daily WHERE symbol = ?", [symbol])
+            table_cols = set(store._get_table_columns("kline_daily"))
+            keep = [c for c in df.columns if c in table_cols]
+            if keep:
+                store.insert_df("kline_daily", df[keep], mode="append")
+        finally:
+            store.close()  # 释放 DuckDB 排他锁（防多进程互锁）
+    except Exception:
+        pass
+
+
+def _load_long_history(symbol: str, years: float = 5.0) -> pd.DataFrame:
+    """分页拉取长历史日线（腾讯单次上限640根，分2-3段拼接）。
+
+    查库优先（scheduler/扫描回填落库的数据）；缺则网络拉取并
+    写回 DuckDB（best-effort），下次任意进程直接命中。
+    """
+    today = datetime.now().date()
+    # 先查 DB（scheduler 积累 + 扫描回填的数据更全）
+    try:
+        store = _get_store()
+        try:
+            if store.table_exists("kline_daily"):
+                df = store.query_df(
+                    "SELECT * FROM kline_daily WHERE symbol = ? ORDER BY date ASC",
+                    [symbol],
+                )
+                if len(df) >= 500:
+                    return df
+        finally:
+            store.close()
     except Exception:
         pass
 
     async def _fetch() -> pd.DataFrame:
-        from pa_mcp.data.router import DataSourceRouter, CircuitBreakerConfig
-        from pa_mcp.data.sources.tencent_adapter import TencentAdapter
-        from pa_mcp.data.sources.sina_adapter import SinaAdapter
+        from pa_mcp.data.source_factory import build_router
         from pa_mcp.config import get_settings
 
-        # 多源 router：腾讯被风控(501)时自动切新浪
-        settings = get_settings()
-        cfg = CircuitBreakerConfig(
-            failure_threshold=settings.router.circuit.failure_threshold,
-            cooldown_seconds=settings.router.circuit.cooldown_seconds,
-        )
-        router = DataSourceRouter(
-            [("tencent", TencentAdapter()), ("sina", SinaAdapter())],
-            {n: cfg for n, _ in [("tencent", None), ("sina", None)]},
-        )
+        # 配置驱动的多源 router：astock → tencent → sina → ths → akshare → eastmoney
+        # （腾讯 501 风控时自动切新浪/同花顺，全源失败才抛错）
+        router = build_router(get_settings())
         try:
             segments = []
             end_d = today
-            for _ in range(4):
-                start_d = end_d - timedelta(days=700)
+            for _ in range(2):
+                # 大区间单段请求：ths 全历史按年拉全只需 ~6 个年请求；
+                # tencent 上限 640 根返回截断 → 回溯补一段（共 2 段）
+                start_d = end_d - timedelta(days=int(years * 365))
                 df, src = await router.fetch_daily_kline(
                     symbol, start_date=start_d.strftime("%Y%m%d"),
                     end_date=end_d.strftime("%Y%m%d"), adjust="qfq",
                 )
                 if not df.empty:
                     segments.append(df)
-                    if len(df) < 300:
-                        break  # 已到历史尽头
+                    if len(df) < 600:
+                        break  # 源已给全区间（非截断）
                 end_d = start_d - timedelta(days=1)
-                if end_d < today - timedelta(days=int(years * 365)):
-                    break
             if not segments:
                 return pd.DataFrame()
             merged = pd.concat(segments).drop_duplicates(subset=["date"]).sort_values("date")
+            # 落库（best-effort）：任意进程下次查库秒回（router 缓存仅本进程有效）
+            try:
+                await asyncio.to_thread(_save_kline_to_store, symbol, merged)
+            except Exception:  # noqa: BLE001
+                pass
             return merged
         finally:
             pass
@@ -1023,9 +1076,68 @@ def _load_long_history(symbol: str, years: float = 5.0) -> pd.DataFrame:
     try:
         return asyncio.run(_fetch())
     except RuntimeError:
-        # 已在运行的事件循环中 → 直接跑
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(_fetch())
+        # 已在运行的事件循环中 → 新建独立循环执行
+        # （Python 3.14 起 get_event_loop 不再隐式创建，必须 new）
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_fetch())
+        finally:
+            loop.close()
+
+
+# ---- 扫描 K 线并发预加载 + TTL 缓存（主/互补策略共用，避免重复网络拉取） ----
+_scan_kline_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+_scan_kline_lock = threading.Lock()
+_SCAN_KLINE_TTL = 300.0
+
+
+def _load_klines_cached(symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """并发预加载 K 线（semaphore 5 + 进程内 TTL + 落库回写）。
+
+    动态池新票不在本地库 → 网络拉取较慢；_load_long_history 会把
+    拉到的数据写回 DuckDB——本进程首次 ~15s，之后任意进程查库秒回。
+    """
+    now = time.time()
+    out: dict[str, pd.DataFrame] = {}
+    todo: list[str] = []
+    with _scan_kline_lock:
+        for s in symbols:
+            hit = _scan_kline_cache.get(s)
+            if hit is not None and now - hit[0] < _SCAN_KLINE_TTL:
+                out[s] = hit[1]
+            else:
+                todo.append(s)
+    if not todo:
+        return out
+
+    async def _fetch_all() -> dict[str, pd.DataFrame]:
+        sem = asyncio.Semaphore(5)
+
+        async def _one(s: str) -> tuple[str, pd.DataFrame]:
+            async with sem:
+                try:
+                    return s, await asyncio.to_thread(_load_long_history, s)
+                except Exception:  # noqa: BLE001 单票失败不影响整池
+                    return s, None
+
+        results = await asyncio.gather(*(_one(s) for s in todo))
+        return dict(results)
+
+    try:
+        fetched = asyncio.run(_fetch_all())
+    except RuntimeError:
+        # 已存在事件循环（MCP 工具线程等）→ 新建独立循环执行
+        loop = asyncio.new_event_loop()
+        try:
+            fetched = loop.run_until_complete(_fetch_all())
+        finally:
+            loop.close()
+    with _scan_kline_lock:
+        for s, df in fetched.items():
+            if df is not None and not df.empty:
+                _scan_kline_cache[s] = (time.time(), df)
+                out[s] = df
+    return out
 
 def walk_forward_ui(symbol: str, strategy: str) -> str:
     """对策略做 walk-forward OOS 评估（真实数据，长历史分页）。"""
@@ -3969,6 +4081,8 @@ def build_app():
 
 def main() -> None:
     """启动 Gradio UI：python -m pa_mcp.ui.gradio_app"""
+    from pa_mcp.logging_setup import setup_logging
+    setup_logging()
     import socket
     import gradio as gr
 

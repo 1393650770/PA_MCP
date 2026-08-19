@@ -112,9 +112,60 @@ class SentimentCycleAnalyzer:
 
     # ---- 实时模式（新浪全市场快照，库内仅 86 只时涨停统计严重失真） ----
 
+    _MARKET_URL = (
+        "https://vip.stock.finance.sina.com.cn/quotes_service/"
+        "api/json_v2.php/Market_Center.getHQNodeData"
+        "?page={page}&num=100&sort=changepercent&asc=0&node=hs_a")
+
     @staticmethod
-    async def _fetch_realtime_stats() -> Optional[dict[str, Any]]:
-        """新浪全市场今日涨跌统计（分页遍历，~9s）。
+    async def _fetch_market_snapshot(max_pages: int = 60,
+                                     concurrency: int = 4,
+                                     ) -> list[dict]:
+        """新浪全市场实时快照（并发分页 + 单页重试，~5s）。
+
+        免费接口对并发敏感（HTTP 456 限流）：单页失败只重试该页
+        （退避 0.8s），不影响其他页；页面本身报错返回 [] 由调用方降级。
+
+        Returns:
+            全部个股原始行列表（含 changepercent/turnoverratio 等）；
+            全失败返回空列表。
+        """
+        import asyncio
+        import json
+        import urllib.request
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def fetch_page(page: int) -> list[dict]:
+            async with sem:
+                url = SentimentCycleAnalyzer._MARKET_URL.format(page=page)
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "Mozilla/5.0"})
+                for attempt in range(3):
+                    try:
+                        raw = await asyncio.to_thread(
+                            urllib.request.urlopen, req, timeout=12)
+                        data = json.loads(
+                            raw.read().decode("gbk", errors="ignore"))
+                        return data if isinstance(data, list) else []
+                    except Exception:  # noqa: BLE001
+                        if attempt < 2:
+                            await asyncio.sleep(0.8 * (attempt + 1))
+                return []
+
+        results = await asyncio.gather(
+            *(fetch_page(p) for p in range(1, max_pages + 1)))
+        rows: list[dict] = []
+        for r in results:
+            if r:
+                rows.extend(r)
+            else:
+                break  # 空页提前停（已到最后）
+        return rows
+
+    @classmethod
+    async def _fetch_realtime_stats(cls) -> Optional[dict[str, Any]]:
+        """新浪全市场今日涨跌统计（并发分页，~5s）。
 
         库内 kline_daily 若只覆盖种子池，涨停/跌停统计严重失真（曾出现
         真实 162+ 涨停 vs 库内 0 家）。实时快照按涨跌幅排序全量遍历，
@@ -124,44 +175,23 @@ class SentimentCycleAnalyzer:
             {limit_up_count, limit_down_count, up_count, down_count,
              turnover_billion, data_date}；失败返回 None。
         """
-        import asyncio
-        import urllib.request
-
         limit_up = limit_down = up = down = 0
         turnover = 0.0
-        try:
-            for page in range(1, 61):  # 全市场 ~5500 只 / 100 每页
-                url = (
-                    "https://vip.stock.finance.sina.com.cn/quotes_service/"
-                    "api/json_v2.php/Market_Center.getHQNodeData"
-                    f"?page={page}&num=100&sort=changepercent&asc=0&node=hs_a")
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "Mozilla/5.0"})
-                raw = urllib.request.urlopen(req, timeout=12).read().decode(
-                    "gbk", errors="ignore")
-                import json
-                data = json.loads(raw)
-                if not data:
-                    break
-                for t in data:
-                    try:
-                        chg = float(t.get("changepercent", 0))
-                        amt = float(t.get("amount", 0) or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    turnover += amt
-                    if chg >= 9.5:
-                        limit_up += 1
-                    elif chg <= -9.5:
-                        limit_down += 1
-                    if chg > 0:
-                        up += 1
-                    elif chg < 0:
-                        down += 1
-                await asyncio.sleep(0.12)  # 免费接口限流
-        except Exception as e:  # noqa: BLE001
-            logger.warning("实时情绪统计失败", error=str(e)[:80])
-            return None
+        for t in await cls._fetch_market_snapshot():
+            try:
+                chg = float(t.get("changepercent", 0))
+                amt = float(t.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            turnover += amt
+            if chg >= 9.5:
+                limit_up += 1
+            elif chg <= -9.5:
+                limit_down += 1
+            if chg > 0:
+                up += 1
+            elif chg < 0:
+                down += 1
         if limit_up == 0 and limit_down == 0 and up == 0:
             return None
         return {"limit_up_count": limit_up, "limit_down_count": limit_down,
@@ -405,7 +435,7 @@ class SentimentCycleAnalyzer:
                 "board4p_count": r["board4p_count"],
             }
         except Exception as e:  # noqa: BLE001
-            logger.debug("sentiment summary unavailable", error=str(e))
+            logger.debug("sentiment summary unavailable: %s", str(e))
             return {}
 
 

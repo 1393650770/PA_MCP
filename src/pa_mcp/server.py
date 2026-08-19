@@ -4986,9 +4986,12 @@ _register_prompts()
 
 def run() -> None:
     """Run the MCP server."""
+    from pa_mcp.logging_setup import setup_logging
+    setup_logging()
     transport = settings.server.transport
 
     if transport == "stdio":
+        # stdout 只允许 JSON-RPC 消息：所有日志已由 setup_logging 导向 stderr
         logger.info("Starting PA_MCP in stdio mode")
         mcp.run(transport="stdio")
     elif transport == "http":

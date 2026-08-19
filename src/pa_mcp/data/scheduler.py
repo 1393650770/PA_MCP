@@ -831,6 +831,8 @@ async def _main() -> None:
 
 def _main_cli() -> None:
     """CLI wrapper for pa-mcp-scheduler entry point."""
+    from pa_mcp.logging_setup import setup_logging
+    setup_logging()
     asyncio.run(_main())
 
 
