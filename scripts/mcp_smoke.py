@@ -23,6 +23,7 @@ DEFAULT_TOOLS = [
     ("sector_hot_cold", {}),
     ("get_strategy_guide", {}),
     ("get_methodology_guide", {}),
+    ("get_data_source_health", {}),
 ]
 
 
