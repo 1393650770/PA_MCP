@@ -24,6 +24,8 @@ DEFAULT_TOOLS = [
     ("get_strategy_guide", {}),
     ("get_methodology_guide", {}),
     ("get_data_source_health", {}),
+    ("agent_two_stage_analysis", {"symbol": "000001", "stance": "均衡"}),
+    ("get_kline_geometry", {"symbol": "000001", "detail_bars": 10}),
 ]
 
 

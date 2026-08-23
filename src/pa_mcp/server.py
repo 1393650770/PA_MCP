@@ -3826,6 +3826,66 @@ async def scan_canslim(top_n: int = 20, pool: str = "") -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def agent_two_stage_analysis(
+    symbol: str, stance: str = "均衡",
+    strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
+    """两阶段研究分析（诊断→路由→决策，借鉴 PA_Agent 决策纪律链）。
+
+    阶段一：数据闸门 + 市场环境/情绪/方向定性诊断（LLM，规则降级）
+    阶段二：信号验证→风险收益→交易者方程→最终裁定（LLM 带决策链
+    trace 校验 + 反馈式重试，规则降级）
+    闸门短路：数据不可靠直接"等待"；环境不明 soft 降级（trade→observe）。
+
+    Args:
+        symbol: 6位股票代码
+        stance: 决策倾向（保守/均衡/激进/极度激进）
+        strategy: 候选策略（默认布林均值回归）
+    """
+    try:
+        from pa_mcp.research.two_stage import run_two_stage_analysis
+        result = await run_two_stage_analysis(symbol, stance=stance,
+                                              strategy=strategy)
+        return _response(data={
+            "report": result["report"], "action": result["action"],
+            "mode": result["mode"], "summary": result["summary"],
+            "trace": result.get("trace", []), "stage1": result.get("stage1"),
+            "stage2": result.get("stage2"), "symbol": symbol,
+        }, source="two_stage")
+    except Exception as e:
+        logger.error("agent_two_stage_analysis failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_kline_geometry(symbol: str, detail_bars: int = 30) -> dict[str, Any]:
+    """K 线几何形态特征（借鉴 PA_Agent 价格行为特征工程）。
+
+    每根 K 线的确定性形态标签：趋势棒/十字星/内包/外包、实体比、
+    影线比、收盘位置、ATR 比、EMA 关系、ii/iii 内包序列、IOI 蓄势、
+    微型双底/双顶、突破前 5 根区间、信号棒跟随/失败。
+    供 LLM 分析的"看图能力"（数值化形态，非截图）。
+
+    Args:
+        symbol: 6位股票代码
+        detail_bars: 输出最近 N 根（默认 30）
+    """
+    try:
+        from pa_mcp.research.kline_geometry import (
+            compute_kline_geometry, format_geometry_text)
+        from pa_mcp.ui.gradio_app import _load_long_history
+        df = await asyncio.to_thread(_load_long_history, symbol)
+        features = compute_kline_geometry(df, detail_bars=detail_bars)
+        return _response(data={
+            "symbol": symbol, "count": len(features),
+            "features": features,
+            "text": format_geometry_text(features),
+        }, source="kline_geometry")
+    except Exception as e:
+        logger.error("get_kline_geometry failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def chan_analysis(symbol: str) -> dict[str, Any]:
     """缠论结构分析（缠中说禅体系）：分型→笔→中枢→背驰。
 

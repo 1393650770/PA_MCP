@@ -2368,6 +2368,41 @@ def ai_report_ui(symbols: str) -> str:
         return f"研究报告失败：{str(e)[:200]}"
 
 
+def two_stage_ui(symbol: str, stance: str = "均衡") -> str:
+    """两阶段研究分析（诊断→路由→决策，决策纪律链）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.two_stage import run_two_stage_analysis
+        symbol = (symbol or "").strip()
+        if not symbol:
+            return "请输入股票代码"
+        result = _asyncio.run(run_two_stage_analysis(symbol, stance=stance))
+        return result["report"]
+    except Exception as e:
+        return f"两阶段分析失败：{str(e)[:200]}"
+
+
+def kline_geometry_ui(symbol: str) -> str:
+    """K 线几何形态特征（价格行为标签，供 LLM 看图能力）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.kline_geometry import (
+            compute_kline_geometry, format_geometry_text)
+        symbol = (symbol or "").strip()
+        if not symbol:
+            return "请输入股票代码"
+        df = _asyncio.run(_asyncio.to_thread(_load_long_history, symbol))
+        feats = compute_kline_geometry(df, detail_bars=20)
+        if not feats:
+            return f"{symbol} 无K线数据"
+        return ("## 📐 K 线几何形态（近 20 日，最新在前）\n\n"
+                "```text\n" + format_geometry_text(feats) + "\n```\n\n"
+                "*标签说明：趋势棒/十字星/内包/外包·实体比·收位·ii/iii·"
+                "IOI 蓄势·MDB/MDT 微型双底顶·破前5区间·信号棒跟随*")
+    except Exception as e:
+        return f"K线形态失败：{str(e)[:200]}"
+
+
 def value_momentum_backtest_ui(symbols: str) -> str:
     """价值×动量滚动调仓组合回测。"""
     try:
@@ -3751,6 +3786,20 @@ def build_app():
                 report_out = gr.Markdown()
                 report_btn.click(ai_report_ui, inputs=[fs_pool],
                                  outputs=[report_out])
+                gr.Markdown("---")
+                ts_sym = gr.Textbox(value="000001", label="个股代码（两阶段研究）")
+                ts_stance = gr.Dropdown(
+                    ["保守", "均衡", "激进", "极度激进"], value="均衡",
+                    label="决策倾向")
+                with gr.Row():
+                    ts_btn = gr.Button("🔀 两阶段研究分析（诊断→决策）",
+                                       variant="primary", elem_id="ts_btn")
+                    ts_geo_btn = gr.Button("📐 K线几何形态", elem_id="ts_geo_btn")
+                ts_out = gr.Markdown()
+                ts_btn.click(two_stage_ui, inputs=[ts_sym, ts_stance],
+                             outputs=[ts_out])
+                ts_geo_btn.click(kline_geometry_ui, inputs=[ts_sym],
+                                 outputs=[ts_out])
 
             # ── 按钮用法速查（METHOD_CATALOG 动态生成）──────────
             with gr.Accordion("📖 按钮用法速查", open=False):
