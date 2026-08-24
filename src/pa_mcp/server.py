@@ -4043,6 +4043,27 @@ async def scan_etf(top_n: int = 10, pool_size: int = 200,
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def etf_backfill(limit: int = 300, concurrency: int = 8) -> dict[str, Any]:
+    """批量回填 ETF K 线到本地库（扫描提速治本）。
+
+    scan_etf 首次对未落库 ETF 会网络拉取（慢 ~70s）；本工具一次性
+    拉取 ETF 列表前 N 只的日线并落库，之后 scan_etf / etf_market
+    全走查库秒回。建议每周末跑一次。
+
+    Args:
+        limit: 回填数量（默认 300，可 1000 全量；全量约 5-10 分钟）
+        concurrency: 并发数（默认 8）
+    """
+    try:
+        from pa_mcp.research.etf import backfill_etf_klines
+        result = await backfill_etf_klines(limit=limit, concurrency=concurrency)
+        return _response(data=result, source="etf_backfill")
+    except Exception as e:
+        logger.error("etf_backfill failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_etf_quote(symbol: str) -> dict[str, Any]:
     """单只 ETF 行情详情（含 IOPV 参考净值与折溢价）。
 

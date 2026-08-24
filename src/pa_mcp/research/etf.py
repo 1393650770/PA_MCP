@@ -266,3 +266,118 @@ def format_etf_line(q: dict[str, Any]) -> str:
     return (f"{q.get('symbol')} {q.get('name')} 价{q.get('price')} "
             f"{q.get('change_pct', 0):+.2f}% {prem_s}"
             f"{stale}")
+
+
+# ---- 全源失败黑名单（跳过已知无数据的 ETF，扫描提速） ----
+# 部分 ETF（LOF/货币/冷门品种）所有源均无 K 线，每只全源重试耗 5-10s；
+# 记录后下次扫描直接跳过（TTL 7 天自动过期重试）。
+
+_failed_cache: dict[str, float] = {}
+_failed_lock = threading.Lock()
+_FAILED_TTL = 7 * 24 * 3600.0
+_FAILED_FILE = None  # 惰性初始化（项目 data 目录）
+
+
+def _failed_path() -> str:
+    global _FAILED_FILE
+    if _FAILED_FILE is None:
+        from pa_mcp.config import PROJECT_ROOT
+        _FAILED_FILE = str(PROJECT_ROOT / "data" / "etf_failed.json")
+    return _FAILED_FILE
+
+
+def load_failed_blacklist() -> set[str]:
+    """读取黑名单（文件 + 内存合并，TTL 过滤）。"""
+    import json
+    import os
+    global _failed_cache
+    now = time.time()
+    out = set()
+    try:
+        with _failed_lock:
+            if _failed_cache:
+                for sym, ts in _failed_cache.items():
+                    if now - ts < _FAILED_TTL:
+                        out.add(sym)
+            if os.path.exists(_failed_path()):
+                with open(_failed_path(), encoding="utf-8") as f:
+                    data = json.load(f)
+                for sym, ts in (data or {}).items():
+                    if now - ts < _FAILED_TTL:
+                        out.add(sym)
+                        _failed_cache.setdefault(sym, ts)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def mark_failed(symbols: list[str]) -> None:
+    """记录全源失败票（best-effort 持久化）。"""
+    global _failed_cache
+    if not symbols:
+        return
+    now = time.time()
+    with _failed_lock:
+        for s in symbols:
+            _failed_cache[s] = now
+    try:
+        import json
+        import os
+        path = _failed_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {s: ts for s, ts in _failed_cache.items()
+                if now - ts < _FAILED_TTL}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def clear_failed_blacklist() -> None:
+    """清空黑名单（测试/手动重试）。"""
+    global _failed_cache
+    with _failed_lock:
+        _failed_cache = {}
+    try:
+        import os
+        if os.path.exists(_failed_path()):
+            os.remove(_failed_path())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---- K 线批量回填（扫描提速治本：一次落库，之后查库秒回） ----
+
+async def backfill_etf_klines(limit: int = 300, concurrency: int = 8) -> dict[str, Any]:
+    """批量拉取 ETF K 线并落库 DuckDB（best-effort）。
+
+    背景：scan_etf 每次网络拉取新票耗时 ~70s；回填后扫描全查库秒回。
+    复用 gradio_app._load_long_history（查库优先 + 网络拉取 + 自动落库）。
+
+    Returns:
+        {"total": N, "ok": M, "failed": K, "elapsed_seconds": S}
+    """
+    import asyncio
+    import time
+
+    from pa_mcp.ui.gradio_app import _load_long_history
+    etfs = await fetch_etf_list(limit=limit)
+    if not etfs:
+        return {"total": 0, "ok": 0, "failed": 0, "elapsed_seconds": 0,
+                "error": "ETF 列表获取失败"}
+    symbols = [e["symbol"] for e in etfs]
+    t0 = time.time()
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(sym: str) -> bool:
+        async with sem:
+            try:
+                df = await asyncio.to_thread(_load_long_history, sym)
+                return df is not None and not df.empty
+            except Exception:  # noqa: BLE001
+                return False
+
+    results = await asyncio.gather(*(_one(s) for s in symbols))
+    ok = sum(1 for r in results if r)
+    return {"total": len(symbols), "ok": ok, "failed": len(symbols) - ok,
+            "elapsed_seconds": round(time.time() - t0, 1)}

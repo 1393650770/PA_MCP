@@ -855,6 +855,8 @@ def scan_market_ui(strategy: str, top_n: int = 10,
             strength = float(getattr(s, "strength_score", 50))
 
             # 该信号历史 5 日胜率（预测力参考）
+            # 性能：全历史回放昂贵（扫描 100+ 只时占大半耗时）；
+            # 样本取最近 30 个信号（长历史 ETF/股票足够，且显著提速）
             win_rate = None
             if len(signals) >= 10:
                 sig_df = pd.DataFrame([{
@@ -864,7 +866,7 @@ def scan_market_ui(strategy: str, top_n: int = 10,
                                 if hasattr(getattr(x, "direction", None), "value")
                                 else str(getattr(x, "direction", "neutral")),
                     "strategy_name": strategy,
-                } for x in signals])
+                } for x in signals[-30:]])
                 results = signal_forward_returns(df, sig_df, [5])
                 if results and results[0].n_events >= 10:
                     win_rate = results[0].win_rate_pct
@@ -1063,7 +1065,8 @@ def _load_long_history(symbol: str, years: float = 5.0) -> pd.DataFrame:
 
         # 配置驱动的多源 router：astock → tencent → sina → ths → akshare → eastmoney
         # （腾讯 501 风控时自动切新浪/同花顺，全源失败才抛错）
-        router = build_router(get_settings())
+        # ths 按年请求限流 0.4s→0.2s：扫描批量拉取提速（实测无封禁）
+        router = build_router(get_settings(), min_source_interval={"ths": 0.2})
         try:
             segments = []
             end_d = today
@@ -1119,24 +1122,32 @@ def _load_klines_cached(symbols: list[str]) -> dict[str, pd.DataFrame]:
     now = time.time()
     out: dict[str, pd.DataFrame] = {}
     todo: list[str] = []
+    # 全源失败黑名单：跳过已知无数据的票（每只全源重试耗 5-10s）
+    from pa_mcp.research.etf import load_failed_blacklist
+    blacklist = load_failed_blacklist()
     with _scan_kline_lock:
         for s in symbols:
             hit = _scan_kline_cache.get(s)
             if hit is not None and now - hit[0] < _SCAN_KLINE_TTL:
                 out[s] = hit[1]
+            elif s in blacklist:
+                continue  # 已知无数据，跳过（TTL 后自动重试）
             else:
                 todo.append(s)
     if not todo:
         return out
 
+    failed: list[str] = []
+
     async def _fetch_all() -> dict[str, pd.DataFrame]:
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(10)
 
         async def _one(s: str) -> tuple[str, pd.DataFrame]:
             async with sem:
                 try:
                     return s, await asyncio.to_thread(_load_long_history, s)
                 except Exception:  # noqa: BLE001 单票失败不影响整池
+                    failed.append(s)
                     return s, None
 
         results = await asyncio.gather(*(_one(s) for s in todo))
@@ -1151,6 +1162,9 @@ def _load_klines_cached(symbols: list[str]) -> dict[str, pd.DataFrame]:
             fetched = loop.run_until_complete(_fetch_all())
         finally:
             loop.close()
+    if failed:
+        from pa_mcp.research.etf import mark_failed
+        mark_failed(failed)  # 记录全源失败票，下次扫描直接跳过
     with _scan_kline_lock:
         for s, df in fetched.items():
             if df is not None and not df.empty:
