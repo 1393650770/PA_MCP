@@ -760,7 +760,7 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     if etf_mode:
         from pa_mcp.research.etf import fetch_etf_list
         import asyncio as _a
-        etfs = _a.run(fetch_etf_list(limit=300))
+        etfs = _a.run(fetch_etf_list(limit=universe_size or 300))
         symbols = [e["symbol"] for e in etfs]
         etf_names = {e["symbol"]: e["name"] for e in etfs}
         sector_info: dict[str, str] = {}

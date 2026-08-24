@@ -193,24 +193,61 @@ async def _get_kline_fallback(
 # ---- MCP Tools: Market Data ----
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def get_realtime_quote(symbol: str, source: Literal["akshare", "sina"] = "akshare") -> dict[str, Any]:
-    """Get real-time stock quote with 5-level depth.
+async def get_realtime_quote(
+    symbol: str,
+    source: Literal["akshare", "sina", "tencent", "auto"] = "auto",
+) -> dict[str, Any]:
+    """Get real-time quote (stock or ETF).
 
     Args:
-        symbol: Stock code (e.g., '000001' for 平安银行)
-        source: Data source, default 'akshare'
+        symbol: Stock/ETF code (e.g., '000001' for 平安银行, '510300' for 沪深300ETF)
+        source: Data source, default 'auto'（akshare→sina→tencent 依次降级；
+            腾讯最稳且支持 ETF，AKShare 依赖的东财接口被封时自动切换）
     """
     try:
-        if source == "akshare" and _akshare:
-            df = await _akshare.get_realtime_spot_all()
-            stock_data = df[df["代码"] == symbol]
-            if stock_data.empty:
-                return _response(error=f"Symbol {symbol} not found", error_type="NOT_FOUND")
-            row = stock_data.iloc[0].to_dict()
-            # Convert numpy types to native Python
-            row = {k: (float(v) if hasattr(v, "item") else v) for k, v in row.items()}
-            return _response(data={"symbol": symbol, "quote": row, "data_delay_seconds": 5})
-        return _response(error=f"Unknown source: {source}", error_type="INVALID_PARAM")
+        # ETF 默认走腾讯（AKShare/Sina 对 ETF 支持参差）
+        from pa_mcp.research.etf import is_etf
+        sources = (["tencent"] if is_etf(symbol) else
+                   ["akshare", "sina", "tencent"] if source == "auto" else
+                   [source])
+        last_err = ""
+        for src in sources:
+            try:
+                if src == "akshare":
+                    if not _akshare:
+                        continue
+                    df = await _akshare.get_realtime_spot_all()
+                    stock_data = df[df["代码"] == symbol]
+                    if stock_data.empty:
+                        return _response(error=f"Symbol {symbol} not found",
+                                         error_type="NOT_FOUND")
+                    row = stock_data.iloc[0].to_dict()
+                    row = {k: (float(v) if hasattr(v, "item") else v)
+                           for k, v in row.items()}
+                    return _response(data={"symbol": symbol, "quote": row,
+                                           "data_delay_seconds": 5,
+                                           "source": "akshare"})
+                elif src == "tencent":
+                    from pa_mcp.data.sources.tencent_adapter import TencentAdapter
+                    q = await TencentAdapter().get_realtime_quote(symbol)
+                    if q:
+                        return _response(data={"symbol": symbol, "quote": q,
+                                               "data_delay_seconds": 5,
+                                               "source": "tencent"})
+                    last_err = f"{symbol} 腾讯无数据"
+                elif src == "sina":
+                    from pa_mcp.data.sources.sina_adapter import SinaAdapter
+                    q = await SinaAdapter().get_realtime_quote(symbol)
+                    if q:
+                        return _response(data={"symbol": symbol, "quote": q,
+                                               "data_delay_seconds": 5,
+                                               "source": "sina"})
+                    last_err = f"{symbol} 新浪无数据"
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)[:80]
+                continue
+        return _response(success=False, error=last_err or "所有数据源失败",
+                         error_type="DATA_UNAVAILABLE")
     except Exception as e:
         logger.error("get_realtime_quote failed", symbol=symbol, error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
@@ -382,14 +419,55 @@ async def search_stock(keyword: str) -> dict[str, Any]:
         keyword: Stock name or code fragment
     """
     try:
+        matches: list[dict[str, Any]] = []
         if _store:
             df = _store.query_df(
                 "SELECT symbol, name, industry, market_cap FROM stock_basic "
                 "WHERE symbol LIKE ? OR name LIKE ? LIMIT 20",
                 [f"%{keyword}%", f"%{keyword}%"],
             )
-            return _response(data={"matches": df.to_dict(orient="records"), "count": len(df)})
-        return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
+            matches = df.to_dict(orient="records")
+        # ETF 名称/代码补充搜索（stock_basic 不含 ETF；拉全量防涨幅截断）
+        try:
+            from pa_mcp.research.etf import fetch_etf_list
+            etfs = await fetch_etf_list(limit=2000)
+            kw = keyword.strip().lower()
+            for e in etfs:
+                if kw in e["symbol"] or kw in (e["name"] or "").lower():
+                    if not any(m.get("symbol") == e["symbol"] for m in matches):
+                        matches.append({"symbol": e["symbol"], "name": e["name"],
+                                        "industry": "ETF", "market_cap": None,
+                                        "asset_type": "etf"})
+        except Exception:  # noqa: BLE001  ETF 搜索失败不影响股票结果
+            pass
+        # 新浪联想兜底（东财列表漏收的 ETF，如 159915/588000）
+        if not any(m.get("asset_type") == "etf" for m in matches):
+            try:
+                import asyncio as _aio
+                import urllib.parse
+                import urllib.request
+                url = ("https://suggest3.sinajs.cn/suggest/type=11,12,15,21,"
+                       "22,23,24,25,26,31,33,41,42,43,44,45,46&key="
+                       + urllib.parse.quote(keyword))
+                raw = await _aio.to_thread(
+                    lambda: urllib.request.urlopen(
+                        urllib.request.Request(
+                            url, headers={"User-Agent": "Mozilla/5.0",
+                                          "Referer": "https://finance.sina.com.cn"}),
+                        timeout=8).read().decode("gbk", errors="ignore"))
+                for item in (raw.split('"')[1].split(";") if '"' in raw else []):
+                    parts = item.split(",")
+                    if len(parts) < 3 or parts[1] != "22":
+                        continue  # 类型 22 = ETF/场内基金
+                    code, name = parts[2], parts[0]
+                    if code.isdigit() and len(code) == 6 and name:
+                        if not any(m.get("symbol") == code for m in matches):
+                            matches.append({"symbol": code, "name": name,
+                                            "industry": "ETF", "market_cap": None,
+                                            "asset_type": "etf"})
+            except Exception:  # noqa: BLE001 新浪兜底失败忽略
+                pass
+        return _response(data={"matches": matches[:20], "count": len(matches)})
     except Exception as e:
         # If table doesn't exist yet, return graceful empty
         logger.warning("search_stock fallback", error=str(e))
@@ -408,10 +486,22 @@ async def get_stock_info(symbol: str) -> dict[str, Any]:
             df = _store.query_df(
                 "SELECT * FROM stock_basic WHERE symbol = ?", [symbol],
             )
-            if df.empty:
-                return _response(error=f"Symbol {symbol} not found", error_type="NOT_FOUND")
-            return _response(data=df.iloc[0].to_dict())
-        return _response(success=False, error="Database not initialized", error_type="INTERNAL_ERROR")
+            if not df.empty:
+                return _response(data=df.iloc[0].to_dict())
+        # ETF 兜底：无 F10 个股信息，返回基金基础描述
+        from pa_mcp.research.etf import is_etf
+        if is_etf(symbol):
+            from pa_mcp.research.etf import fetch_etf_list, get_etf_name, etf_exchange
+            await fetch_etf_list(limit=300)  # 填充名称缓存（best-effort）
+            name = get_etf_name(symbol) or ""
+            return _response(data={
+                "symbol": symbol, "name": name, "asset_type": "etf",
+                "exchange": etf_exchange(symbol),
+                "note": ("ETF 为指数化基金，无个股 F10/财务/主营信息；"
+                         "请用 get_etf_quote（IOPV/折溢价）、etf_market、"
+                         "scan_etf 或技术面分析工具。"),
+            })
+        return _response(error=f"Symbol {symbol} not found", error_type="NOT_FOUND")
     except Exception as e:
         logger.warning("get_stock_info fallback", error=str(e))
         return _response(data={})
@@ -3925,22 +4015,27 @@ async def etf_market(limit: int = 100, strategy: str = "bollinger_mean_reversion
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def scan_etf(top_n: int = 10,
+async def scan_etf(top_n: int = 10, pool_size: int = 200,
                    strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
-    """ETF 策略信号扫描（池 = 沪深全部 ETF，与股票同等信号逻辑）。
+    """ETF 策略信号扫描（池 = 沪深 ETF 列表，与股票同等信号逻辑）。
 
     输出：ETF 代码/名称/信号日期/强度/历史 5 日胜率。ETF 无财务维度，
     技术面策略（布林/金叉/趋势）完全适用——适合宽基/行业 ETF 轮动。
+    池默认涨幅榜前 200（覆盖活跃 ETF；加大 pool_size 全量 1000+，
+    首次会拉取 K 线较慢，之后落库秒回）。
 
     Args:
         top_n: 返回候选数
+        pool_size: 扫描池大小（默认 200，上限 1000+）
         strategy: 策略名（默认 bollinger_mean_reversion）
     """
     try:
         from pa_mcp.ui.gradio_app import scan_market_ui
-        result = await asyncio.to_thread(scan_market_ui, strategy, top_n, 30, True)
+        result = await asyncio.to_thread(
+            scan_market_ui, strategy, top_n, pool_size, True)
         return _response(data={"report": result, "strategy": strategy,
-                               "top_n": top_n, "pool_type": "etf"},
+                               "top_n": top_n, "pool_size": pool_size,
+                               "pool_type": "etf"},
                          source="scan_etf")
     except Exception as e:
         logger.error("scan_etf failed", error=str(e))

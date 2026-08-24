@@ -73,14 +73,20 @@ def get_etf_name(symbol: str) -> str:
 
 # ---- ETF 列表（东财 push2delay clist） ----
 
+# 5 个 ETF 板块合并 = 全市场（与 AKShare fund_etf_spot_em 同源）：
+# MK0021 沪市ETF / MK0022 深市ETF / MK0023 沪市LOF / MK0024 深市LOF /
+# MK0827 跨市场ETF。单板块（如 b:MK0021）仅 98 只精选，必须合并。
+_ETF_FS = "b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827"
 _ETF_LIST_URL = (
     "https://push2delay.eastmoney.com/api/qt/clist/get"
-    "?pn={page}&pz={size}&po=1&np=1&fltt=2&invt=2&fid=f3"
-    "&fs=b:MK0021&fields=f12,f14,f2,f3,f6,f8")
+    "?pn={page}&pz=100&po=1&np=1&fltt=2&invt=2"
+    "&ut=bd1d9ddb04089700cf9c27f6f7426281&fid=f3"
+    f"&fs={_ETF_FS}&fields=f12,f14,f2,f3,f6,f8")
 _ETF_LIST_FALLBACK_URL = (
     "https://push2.eastmoney.com/api/qt/clist/get"
-    "?pn={page}&pz={size}&po=1&np=1&fltt=2&invt=2&fid=f3"
-    "&fs=b:MK0021&fields=f12,f14,f2,f3,f6,f8")
+    "?pn={page}&pz=100&po=1&np=1&fltt=2&invt=2"
+    "&ut=bd1d9ddb04089700cf9c27f6f7426281&fid=f3"
+    f"&fs={_ETF_FS}&fields=f12,f14,f2,f3,f6,f8")
 
 _list_cache: Optional[list[dict[str, Any]]] = None
 _list_ts: float = 0.0
@@ -114,23 +120,37 @@ async def fetch_etf_list(limit: int = 300, use_cache: bool = True) -> list[dict[
     rows: list[dict[str, Any]] = []
     for url_tpl in (_ETF_LIST_URL, _ETF_LIST_FALLBACK_URL):
         try:
-            raw = await _fetch_json(url_tpl.format(page=1, size=min(limit, 300)))
-            diff = (raw.get("data") or {}).get("diff") or []
-            for r in diff:
-                code = str(r.get("f12", ""))
-                name = str(r.get("f14", ""))
-                if not (code.isdigit() and len(code) == 6 and name):
-                    continue
-                if not is_etf(code):
-                    continue  # 板块里偶发混入非 ETF
-                rows.append({
-                    "symbol": code,
-                    "name": name,
-                    "price": _f(r, "f2"),
-                    "change_pct": _f(r, "f3"),
-                    "amount_billion": round(_f(r, "f6") / 1e8, 2),
-                    "turnover_pct": _f(r, "f8"),
-                })
+            # 分页拉全量（每页 100；用东财 total 判断完整性，
+            # 单页限流返空不提前停——重试一次再判）
+            total = None
+            for page in range(1, 12):
+                raw = await _fetch_json(url_tpl.format(page=page))
+                data = (raw or {}).get("data") or {}
+                if total is None:
+                    total = int(data.get("total") or 0)
+                diff = data.get("diff") or []
+                if not diff:
+                    if total and len(rows) >= total:
+                        break
+                    raw = await _fetch_json(url_tpl.format(page=page))  # 限流重试
+                    diff = ((raw or {}).get("data") or {}).get("diff") or []
+                    if not diff:
+                        break
+                for r in diff:
+                    code = str(r.get("f12", ""))
+                    name = str(r.get("f14", ""))
+                    if not (code.isdigit() and len(code) == 6 and name):
+                        continue
+                    if not is_etf(code):
+                        continue  # 板块里偶发混入非 ETF
+                    rows.append({
+                        "symbol": code,
+                        "name": name,
+                        "price": _f(r, "f2"),
+                        "change_pct": _f(r, "f3"),
+                        "amount_billion": round(_f(r, "f6") / 1e8, 2),
+                        "turnover_pct": _f(r, "f8"),
+                    })
             if rows:
                 break
         except Exception as e:  # noqa: BLE001
