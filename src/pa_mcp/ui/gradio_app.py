@@ -742,9 +742,12 @@ def fetch_sector_universe(hot_count: int = 6, cold_count: int = 3,
 
 
 def scan_market_ui(strategy: str, top_n: int = 10,
-                    universe_size: int = 30) -> str:
-    """扫描股票池：找当前处于买入信号状态的股票，输出候选清单。
+                    universe_size: int = 30,
+                    etf_mode: bool = False) -> str:
+    """扫描股票池：找当前处于买入信号状态的标的，输出候选清单。
 
+    etf_mode=True 时池 = 沪深 ETF 列表（无财务维度的指数化标的，
+    技术面策略如布林/金叉完全适用）。
     输出：代码/名称/信号日期/强度/该信号历史 5 日胜率。
     基于统计而非预测——标明"信号候选"而非"预测上涨"。
     """
@@ -753,45 +756,55 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     from pa_mcp.engine.strategies.tips import get_strategy_tip
     from pa_mcp.research.event_study import signal_forward_returns
 
-    # 股票池：全市场今日强势池（动态）∪ 板块成分（热门+冷门）∪ 持仓股 ∪ 白马
-    # 动态池优先：每天从 ~5500 只里按涨幅/成交额过滤，解决"总是那几只老票"
-    from pa_mcp.research.market_pool import build_market_scan_pool
+    # ETF 模式：池 = 沪深 ETF 列表（跳过动态池/板块/白马）
+    if etf_mode:
+        from pa_mcp.research.etf import fetch_etf_list
+        import asyncio as _a
+        etfs = _a.run(fetch_etf_list(limit=300))
+        symbols = [e["symbol"] for e in etfs]
+        etf_names = {e["symbol"]: e["name"] for e in etfs}
+        sector_info: dict[str, str] = {}
+        sector_stocks: dict[str, list[str]] = {}
+        sector_source = "etf_list"
+        dynamic: list[dict] = []
+        holdings: list[str] = []
+    else:
+        etf_names = {}
+        dynamic = []
+        try:
+            import asyncio
+            dynamic = asyncio.run(build_market_scan_pool(limit=universe_size))
+        except Exception as e:
+            # 全市场快照失败 → 降级原静态池（日志可见，不静默）
+            logging.getLogger(__name__).warning(
+                "全市场动态池抓取失败，降级静态池: %s", str(e)[:80])
+        dynamic_symbols = [d["symbol"] for d in dynamic]
 
-    dynamic = []
-    try:
-        import asyncio
-        dynamic = asyncio.run(build_market_scan_pool(limit=universe_size))
-    except Exception as e:
-        # 全市场快照失败 → 降级原静态池（日志可见，不静默）
-        logging.getLogger(__name__).warning(
-            "全市场动态池抓取失败，降级静态池: %s", str(e)[:80])
-    dynamic_symbols = [d["symbol"] for d in dynamic]
+        sector_info, sector_stocks, sector_source = fetch_sector_universe(
+            hot_count=6, cold_count=3, stocks_per_sector=6)
 
-    sector_info, sector_stocks, sector_source = fetch_sector_universe(
-        hot_count=6, cold_count=3, stocks_per_sector=6)
+        symbols = [s for s in dynamic_symbols]
+        for codes in sector_stocks.values():
+            for c in codes:
+                if c not in symbols:
+                    symbols.append(c)
 
-    symbols = [s for s in dynamic_symbols]
-    for codes in sector_stocks.values():
-        for c in codes:
+        holdings = []
+        try:
+            store = _get_store()
+            if store.table_exists("portfolio"):
+                hdf = store.query_df("SELECT symbol FROM portfolio")
+                holdings = hdf["symbol"].tolist() if not hdf.empty else []
+        except Exception:
+            pass
+        if holdings:
+            # 持仓股排在最前（优先扫描）
+            symbols = [s for s in holdings if s not in symbols] + symbols
+
+        # 补充内置常用股（覆盖板块外的白马）
+        for c in list(COMMON_NAMES.keys())[:universe_size]:
             if c not in symbols:
                 symbols.append(c)
-
-    holdings = []
-    try:
-        store = _get_store()
-        if store.table_exists("portfolio"):
-            hdf = store.query_df("SELECT symbol FROM portfolio")
-            holdings = hdf["symbol"].tolist() if not hdf.empty else []
-    except Exception:
-        pass
-    if holdings:
-        # 持仓股排在最前（优先扫描）
-        symbols = [s for s in holdings if s not in symbols] + symbols
-
-    # 补充内置常用股（覆盖板块外的白马）
-    for c in list(COMMON_NAMES.keys())[:universe_size]:
-        if c not in symbols:
-            symbols.append(c)
 
     universe_size = len(symbols)
     sector_name_of: dict[str, str] = {}
@@ -800,6 +813,10 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     for sec, codes in sector_stocks.items():
         for c in codes:
             sector_name_of.setdefault(c, sec)
+
+    def _name_of(sym: str) -> str:
+        """名称：ETF 列表名优先，其次内置白马库。"""
+        return etf_names.get(sym) or get_stock_name(sym)
 
     registry = StrategyRegistry()
     registry.auto_discover()
@@ -853,7 +870,7 @@ def scan_market_ui(strategy: str, top_n: int = 10,
                     win_rate = results[0].win_rate_pct
 
             rows.append({
-                "symbol": sym, "name": get_stock_name(sym),
+                "symbol": sym, "name": _name_of(sym),
                 "signal_date": sig_date, "strength": strength,
                 "win_rate": win_rate,
                 "sector": sector_name_of.get(sym, ""),
@@ -884,7 +901,7 @@ def scan_market_ui(strategy: str, top_n: int = 10,
                         continue
                     s = recent[-1]
                     rows.append({
-                        "symbol": sym, "name": get_stock_name(sym),
+                        "symbol": sym, "name": _name_of(sym),
                         "signal_date": (getattr(s, "signal_time", None) or
                                         str(getattr(s, "timestamp", ""))[:10]),
                         "strength": float(getattr(s, "strength_score", 50)),
@@ -932,10 +949,12 @@ def scan_market_ui(strategy: str, top_n: int = 10,
     else:
         env_line = f"**板块环境**（内置模板）：{' '.join(sector_info.keys())}（东财板块接口暂不可用，已用内置板块兜底）"
 
+    pool_desc = (f"ETF {universe_size} 只" if etf_mode else
+                 f"{universe_size} 只（今日强势{len(dynamic)}只 + 板块 + 持仓"
+                 f"{'📌' if holdings else ''}）")
     lines = [
         f"## 📡 市场扫描：{strategy} 当前买入信号候选（TOP {len(rows)}）",
-        f"*扫描 {universe_size} 只（今日强势{len(dynamic)}只 + 板块 + 持仓"
-        f"{'📌' if holdings else ''}）· 信号日期 = 最近触发日（近10日）*",
+        f"*扫描 {pool_desc}· 信号日期 = 最近触发日（近10日）*",
         "",
         env_line,
         "",
@@ -2403,6 +2422,30 @@ def kline_geometry_ui(symbol: str) -> str:
         return f"K线形态失败：{str(e)[:200]}"
 
 
+def _etf_quote_ui(symbol: str) -> str:
+    """ETF 行情（含 IOPV 折溢价）。"""
+    try:
+        import asyncio as _asyncio
+        from pa_mcp.research.etf import (
+            fetch_etf_quotes, format_etf_line, is_etf)
+        symbol = (symbol or "").strip()
+        if not symbol:
+            return "请输入 ETF 代码"
+        if not is_etf(symbol):
+            return f"{symbol} 不是 ETF 代码（ETF 示例：510300/159915/588000）"
+        q = _asyncio.run(fetch_etf_quotes([symbol])).get(symbol)
+        if not q:
+            return f"{symbol} 行情获取失败"
+        return (f"## 📊 ETF 行情\n\n{format_etf_line(q)}\n\n"
+                f"- 开盘 {q.get('open')}｜最高 {q.get('high')}｜最低 {q.get('low')}\n"
+                f"- 成交额 {q.get('amount_billion')} 亿｜换手 {q.get('turnover_pct')}%\n"
+                f"- IOPV 参考净值 {q.get('iopv')}"
+                f"（折溢价 = 价格相对 IOPV 偏离）\n\n"
+                f"*折溢价显著时注意申赎套利力量。研究参考，非投资建议。*")
+    except Exception as e:
+        return f"ETF 行情失败：{str(e)[:200]}"
+
+
 def value_momentum_backtest_ui(symbols: str) -> str:
     """价值×动量滚动调仓组合回测。"""
     try:
@@ -3800,6 +3843,21 @@ def build_app():
                              outputs=[ts_out])
                 ts_geo_btn.click(kline_geometry_ui, inputs=[ts_sym],
                                  outputs=[ts_out])
+                gr.Markdown("---")
+                gr.Markdown("### 🎯 ETF（指数化资产：无财务维度，技术面策略适用）")
+                etf_sym = gr.Textbox(value="510300",
+                                     label="ETF 代码（510300/159915/588000 等）")
+                with gr.Row():
+                    etf_q_btn = gr.Button("📊 ETF 行情（含折溢价）",
+                                          elem_id="etf_q_btn")
+                    etf_scan_btn = gr.Button("🔎 ETF 信号扫描（全市场 ETF 池）",
+                                             elem_id="etf_scan_btn")
+                etf_out = gr.Markdown()
+                etf_q_btn.click(_etf_quote_ui, inputs=[etf_sym],
+                                outputs=[etf_out])
+                etf_scan_btn.click(
+                    lambda s: scan_market_ui(s, top_n=10, etf_mode=True),
+                    inputs=[sm_strategy], outputs=[etf_out])
 
             # ── 按钮用法速查（METHOD_CATALOG 动态生成）──────────
             with gr.Accordion("📖 按钮用法速查", open=False):

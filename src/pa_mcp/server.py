@@ -232,12 +232,28 @@ async def analyze_stock(symbol: str, days: int = 120) -> dict[str, Any]:
         from pa_mcp.ui.gradio_app import analyze_stock as _ui_analyze
         _fig, summary, valuation, source = await asyncio.to_thread(
             _ui_analyze, symbol, days)
-        return _response(data={
+        result: dict[str, Any] = {
             "symbol": symbol,
             "summary": summary,
             "valuation": valuation,
             "data_source": source,
-        })
+        }
+        # ETF 适配：无单股财务维度，附加 IOPV/折溢价
+        from pa_mcp.research.etf import fetch_etf_quotes, is_etf
+        if is_etf(symbol):
+            q = (await fetch_etf_quotes([symbol])).get(symbol, {})
+            result["asset_type"] = "etf"
+            result["etf_note"] = (
+                "ETF 无单股财务维度（PE/PB 不适用），估值字段仅供参考；"
+                "关注 IOPV 折溢价与跟踪指数趋势。")
+            if q:
+                result["etf_quote"] = q
+                result["summary"] = (summary + f"\n\n📈 **ETF 行情**：{q.get('name')} "
+                                     f"价 {q.get('price')} {q.get('change_pct', 0):+.2f}%"
+                                     + (f"，IOPV {q.get('iopv')}，折溢价 "
+                                        f"{q.get('premium_pct'):+.2f}%"
+                                        if q.get('premium_pct') is not None else ""))
+        return _response(data=result)
     except Exception as e:
         logger.error("analyze_stock failed", symbol=symbol, error=str(e))
         return _response(success=False, error=str(e),
@@ -3853,6 +3869,108 @@ async def agent_two_stage_analysis(
         }, source="two_stage")
     except Exception as e:
         logger.error("agent_two_stage_analysis failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def etf_market(limit: int = 100, strategy: str = "bollinger_mean_reversion",
+                     scan: bool = False) -> dict[str, Any]:
+    """ETF 市场全景：沪深 ETF 列表 + 实时行情 + IOPV 折溢价。
+
+    可附带策略信号扫描（scan=True 时对 ETF 池跑买入信号）。
+
+    Args:
+        limit: 返回 ETF 数量（涨幅降序，默认 100）
+        strategy: 信号扫描策略（scan=True 时生效）
+        scan: 是否附带策略信号扫描
+    """
+    try:
+        from pa_mcp.research.etf import (
+            fetch_etf_list, fetch_etf_quotes, format_etf_line)
+        etfs = await fetch_etf_list(limit=limit)
+        if not etfs:
+            return _response(success=False, error="ETF 列表获取失败",
+                             error_type="DATA_UNAVAILABLE")
+        codes = [e["symbol"] for e in etfs]
+        quotes = await fetch_etf_quotes(codes)
+        items = []
+        for e in etfs:
+            q = quotes.get(e["symbol"], {})
+            item = {**e, **{k: q.get(k) for k in ("iopv", "premium_pct",
+                                                   "is_stale", "turnover_pct")}}
+            items.append(item)
+        lines = ["## 📈 ETF 市场全景（涨幅降序）", "",
+                 "| 代码 | 名称 | 价格 | 涨跌% | 成交额(亿) | IOPV | 折溢价 |",
+                 "|---|---|---|---|---|---|---|"]
+        for it in items:
+            prem = (f"{it['premium_pct']:+.2f}%" if it.get("premium_pct")
+                    is not None else "—")
+            lines.append(f"| {it['symbol']} | {it['name']} | {it['price']} | "
+                         f"{it['change_pct']:+.2f}% | {it['amount_billion']} | "
+                         f"{it.get('iopv') or '—'} | {prem} |")
+        report = "\n".join(lines)
+        scan_report = ""
+        if scan:
+            from pa_mcp.ui.gradio_app import scan_market_ui
+            scan_report = await asyncio.to_thread(
+                scan_market_ui, strategy, 10, 30, True)
+        return _response(data={
+            "count": len(items), "items": items[:limit],
+            "report": report + (f"\n\n{scan_report}" if scan_report else ""),
+            "scan": scan_report,
+        }, source="etf_market")
+    except Exception as e:
+        logger.error("etf_market failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def scan_etf(top_n: int = 10,
+                   strategy: str = "bollinger_mean_reversion") -> dict[str, Any]:
+    """ETF 策略信号扫描（池 = 沪深全部 ETF，与股票同等信号逻辑）。
+
+    输出：ETF 代码/名称/信号日期/强度/历史 5 日胜率。ETF 无财务维度，
+    技术面策略（布林/金叉/趋势）完全适用——适合宽基/行业 ETF 轮动。
+
+    Args:
+        top_n: 返回候选数
+        strategy: 策略名（默认 bollinger_mean_reversion）
+    """
+    try:
+        from pa_mcp.ui.gradio_app import scan_market_ui
+        result = await asyncio.to_thread(scan_market_ui, strategy, top_n, 30, True)
+        return _response(data={"report": result, "strategy": strategy,
+                               "top_n": top_n, "pool_type": "etf"},
+                         source="scan_etf")
+    except Exception as e:
+        logger.error("scan_etf failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_etf_quote(symbol: str) -> dict[str, Any]:
+    """单只 ETF 行情详情（含 IOPV 参考净值与折溢价）。
+
+    Args:
+        symbol: ETF 代码（如 510300 / 159915 / 588000）
+    """
+    try:
+        from pa_mcp.research.etf import (
+            fetch_etf_quotes, format_etf_line, is_etf)
+        if not is_etf(symbol):
+            return _response(success=False, error=f"{symbol} 不是 ETF 代码",
+                             error_type="INVALID_SYMBOL")
+        q = (await fetch_etf_quotes([symbol])).get(symbol)
+        if not q:
+            return _response(success=False, error=f"{symbol} 行情获取失败",
+                             error_type="DATA_UNAVAILABLE")
+        return _response(data={
+            "quote": q, "report": format_etf_line(q),
+            "note": ("IOPV=盘中参考净值；折溢价 = (价格-IOPV)/IOPV。"
+                     "折溢价显著时注意申赎套利力量，研究参考非投资建议。"),
+        }, source="tencent")
+    except Exception as e:
+        logger.error("get_etf_quote failed", error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 

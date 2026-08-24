@@ -79,20 +79,27 @@ class TencentAdapter:
         if code[:2].lower() in ("sh", "sz", "bj"):
             return code
 
-        prefixes_sh = ["600", "601", "603", "605", "688", "689"]
-        prefixes_sz = ["000", "001", "002", "003", "300", "301"]
+        # 沪市指数白名单（000300 等裸代码不能落 sz——会返回错票，比返空更危险）。
+        # 注意：000001 不入白名单——裸 000001 默认 sz（平安银行），
+        # 上证指数需显式传 sh000001（与 a-stock-data 规则一致）。
+        SH_INDEX = {"000300", "000905", "000016", "000688", "000852",
+                    "000010", "000015"}
+        prefixes_sh = ["600", "601", "603", "605", "688", "689", "5"]
+        # 5x = 沪市 ETF/LOF/场内基金（510300/588000）
+        prefixes_sz = ["000", "001", "002", "003", "300", "301", "1"]
+        # 1x = 深市 ETF/LOF（159915/162411）
         prefixes_bj_new = ["920"]          # 北交所新号段 (920xxx)
         prefixes_bj_old = ["4", "8"]       # 北交所老号段 (43x/83x/87x)
 
-        if any(code.startswith(p) for p in prefixes_sh):
-            return f"sh{code}"
-        elif any(code.startswith(p) for p in prefixes_sz):
-            return f"sz{code}"
-        elif any(code.startswith(p) for p in prefixes_bj_new):
+        if any(code.startswith(p) for p in prefixes_bj_new):
             return f"bj{code}"
         elif any(code.startswith(p) for p in prefixes_bj_old):
             # 老号段已迁移至920 — 保留映射但标记可能返回僵尸报价
             return f"bj{code}"
+        elif code in SH_INDEX or any(code.startswith(p) for p in prefixes_sh):
+            return f"sh{code}"
+        elif any(code.startswith(p) for p in prefixes_sz):
+            return f"sz{code}"
         # Default: sz
         return f"sz{code}"
 

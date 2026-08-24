@@ -67,8 +67,8 @@ class SinaAdapter:
           bj: 8xx/4xx (北京证券交易所 — mapped to Sina as sh for API compatibility)
         """
         code = symbol.strip()
-        prefixes_sh = ["600", "601", "603", "605", "688"]
-        prefixes_sz = ["000", "001", "002", "003", "300", "301"]
+        prefixes_sh = ["600", "601", "603", "605", "688", "5"]   # 5x = 沪 ETF/LOF
+        prefixes_sz = ["000", "001", "002", "003", "300", "301", "1"]  # 1x = 深 ETF/LOF
         prefixes_bj_new = ["920"]          # 北交所新号段
         prefixes_bj_old = ["4", "8"]       # 北交所老号段
 

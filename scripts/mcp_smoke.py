@@ -26,6 +26,10 @@ DEFAULT_TOOLS = [
     ("get_data_source_health", {}),
     ("agent_two_stage_analysis", {"symbol": "000001", "stance": "均衡"}),
     ("get_kline_geometry", {"symbol": "000001", "detail_bars": 10}),
+    ("etf_market", {"limit": 5}),
+    ("scan_etf", {"top_n": 3}),
+    ("get_etf_quote", {"symbol": "510300"}),
+    ("analyze_stock", {"symbol": "510300"}),
 ]
 
 
