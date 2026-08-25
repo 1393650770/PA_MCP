@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -349,36 +350,42 @@ class DuckDBStore:
 
         self.db_path = str(db_path)
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
+        # DuckDB 连接非线程安全：MCP/UI 工具经 asyncio.to_thread 并发访问
+        # 同一实例时，C 层竞态会 segfault 直接杀死进程（表现为客户端
+        # "Connection closed"）。进程内锁串行化所有访问（毫秒级开销）。
+        self._lock = threading.RLock()
 
     def connect(self) -> duckdb.DuckDBPyConnection:
-        """Get or create a database connection."""
-        if self._conn is None:
-            # Ensure parent directory exists
-            db_dir = Path(self.db_path).parent
-            os.makedirs(db_dir, exist_ok=True)
+        """Get or create a database connection (线程安全)."""
+        with self._lock:
+            if self._conn is None:
+                # Ensure parent directory exists
+                db_dir = Path(self.db_path).parent
+                os.makedirs(db_dir, exist_ok=True)
 
-            try:
-                self._conn = duckdb.connect(self.db_path)
-            except Exception as e:
-                if "already open" in str(e) or "正在使用" in str(e):
-                    raise RuntimeError(
-                        f"数据库被其他进程占用（DuckDB 单文件排他锁）: "
-                        f"{self.db_path}\n"
-                        f"原因: UI / MCP Server / 数据调度器同时运行时会互锁。\n"
-                        f"解决: 同一时间只保留一个服务进程（关闭 UI 或调度器后"
-                        f"重试），或运行 taskkill /F /IM python.exe 清残留"
-                    ) from e
-                raise
-            logger.info("DuckDB connected", path=self.db_path)
-            self._init_tables()
-        return self._conn
+                try:
+                    self._conn = duckdb.connect(self.db_path)
+                except Exception as e:
+                    if "already open" in str(e) or "正在使用" in str(e):
+                        raise RuntimeError(
+                            f"数据库被其他进程占用（DuckDB 单文件排他锁）: "
+                            f"{self.db_path}\n"
+                            f"原因: UI / MCP Server / 数据调度器同时运行时会互锁。\n"
+                            f"解决: 同一时间只保留一个服务进程（关闭 UI 或调度器后"
+                            f"重试），或运行 taskkill /F /IM python.exe 清残留"
+                        ) from e
+                    raise
+                logger.info("DuckDB connected", path=self.db_path)
+                self._init_tables()
+            return self._conn
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-            logger.info("DuckDB connection closed")
+        """Close the database connection (线程安全)."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+                logger.info("DuckDB connection closed")
 
     def _init_tables(self) -> None:
         """Create all required tables if they don't exist."""
@@ -394,25 +401,27 @@ class DuckDBStore:
     # ---- CRUD Operations ----
 
     def execute(self, sql: str, params: Optional[list] = None) -> duckdb.DuckDBPyRelation:
-        """Execute a SQL query."""
-        conn = self.connect()
-        if params:
-            return conn.execute(sql, params)
-        return conn.execute(sql)
+        """Execute a SQL query (线程安全)."""
+        with self._lock:
+            conn = self.connect()
+            if params:
+                return conn.execute(sql, params)
+            return conn.execute(sql)
 
     def query_df(self, sql: str, params: Optional[list] = None) -> pd.DataFrame:
-        """Execute SQL and return results as DataFrame."""
+        """Execute SQL and return results as DataFrame (线程安全)."""
         return self.execute(sql, params).df()
 
     def _get_table_columns(self, table_name: str) -> list[str]:
-        """Get the column names of an existing table in DuckDB."""
-        conn = self.connect()
-        result = conn.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = ? ORDER BY ordinal_position",
-            [table_name],
-        ).fetchall()
-        return [row[0] for row in result]
+        """Get the column names of an existing table in DuckDB (线程安全)."""
+        with self._lock:
+            conn = self.connect()
+            result = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = ? ORDER BY ordinal_position",
+                [table_name],
+            ).fetchall()
+            return [row[0] for row in result]
 
     def _validate_and_align_df(
         self, table_name: str, df: pd.DataFrame, *,
@@ -472,101 +481,102 @@ class DuckDBStore:
             df: DataFrame to insert
             mode: 'append' (default) or 'replace'
         """
-        conn = self.connect()
+        with self._lock:
+            conn = self.connect()
 
-        if df.empty:
-            logger.debug("insert_df skipped: empty DataFrame", table=table_name)
-            return
+            if df.empty:
+                logger.debug("insert_df skipped: empty DataFrame", table=table_name)
+                return
 
-        # Validate table exists
-        if not self.table_exists(table_name):
-            raise ValueError(
-                f"Table '{table_name}' does not exist. Cannot insert into non-existent table."
-            )
+            # Validate table exists
+            if not self.table_exists(table_name):
+                raise ValueError(
+                    f"Table '{table_name}' does not exist. Cannot insert into non-existent table."
+                )
 
-        # Align DataFrame columns to target schema
-        df_aligned = self._validate_and_align_df(table_name, df)
+            # Align DataFrame columns to target schema
+            df_aligned = self._validate_and_align_df(table_name, df)
 
-        if mode == "replace":
-            conn.execute(f"DELETE FROM {table_name}")
+            if mode == "replace":
+                conn.execute(f"DELETE FROM {table_name}")
 
-        # Use explicit column list for safety
-        cols = df_aligned.columns.tolist()
-        col_list = ", ".join(cols)
-        placeholders = ", ".join(["?" for _ in cols])
+            # Use explicit column list for safety
+            cols = df_aligned.columns.tolist()
+            col_list = ", ".join(cols)
 
-        # Register temp table and insert with explicit columns
-        verb = "INSERT OR REPLACE" if mode != "insert" else "INSERT"
-        conn.register("__tmp_insert", df_aligned)
-        try:
-            conn.execute(
-                f"{verb} INTO {table_name} ({col_list}) "
-                f"SELECT {col_list} FROM __tmp_insert"
-            )
-        finally:
-            conn.unregister("__tmp_insert")
+            # Register temp table and insert with explicit columns
+            verb = "INSERT OR REPLACE" if mode != "insert" else "INSERT"
+            conn.register("__tmp_insert", df_aligned)
+            try:
+                conn.execute(
+                    f"{verb} INTO {table_name} ({col_list}) "
+                    f"SELECT {col_list} FROM __tmp_insert"
+                )
+            finally:
+                conn.unregister("__tmp_insert")
 
-        logger.debug("insert_df done", table=table_name, rows=len(df_aligned), mode=mode)
-
+        # (锁外读取路径已在 execute/query_df 加锁)
     def swap_table(self, table_name: str, df: pd.DataFrame) -> None:
         """Atomic table replacement using shadow table strategy.
 
         Creates _new table, inserts data with explicit column mapping,
         then renames for zero-downtime swap.
         """
-        conn = self.connect()
-        new_table = f"{table_name}_new"
-        shadow_table = f"{table_name}_old"
+        with self._lock:
+            conn = self.connect()
+            new_table = f"{table_name}_new"
+            shadow_table = f"{table_name}_old"
 
-        # Clean up any leftover shadow tables
-        try:
-            conn.execute(f"DROP TABLE IF EXISTS {new_table}")
-            conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
-        except Exception:
-            pass
+            # Clean up any leftover shadow tables
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {new_table}")
+                conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+            except Exception:
+                pass
 
-        # Get original DDL and create new table
-        ddl_key = table_name.split(".")[-1]
-        if ddl_key not in TABLE_DEFINITIONS:
-            raise ValueError(f"No DDL defined for table '{ddl_key}'")
-        ddl = TABLE_DEFINITIONS[ddl_key].replace(
-            f"CREATE TABLE IF NOT EXISTS {ddl_key}",
-            f"CREATE TABLE {new_table}",
-        )
-        conn.execute(ddl)
+            # Get original DDL and create new table
+            ddl_key = table_name.split(".")[-1]
+            if ddl_key not in TABLE_DEFINITIONS:
+                raise ValueError(f"No DDL defined for table '{ddl_key}'")
+            ddl = TABLE_DEFINITIONS[ddl_key].replace(
+                f"CREATE TABLE IF NOT EXISTS {ddl_key}",
+                f"CREATE TABLE {new_table}",
+            )
+            conn.execute(ddl)
 
-        if df.empty:
-            logger.warning("swap_table called with empty DataFrame", table=table_name)
-            # Still create the new table, then swap
+            if df.empty:
+                logger.warning("swap_table called with empty DataFrame", table=table_name)
+                # Still create the new table, then swap
+                conn.execute(f"ALTER TABLE IF EXISTS {table_name} RENAME TO {shadow_table}")
+                conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
+                conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+                return
+
+            # Align and insert with explicit columns
+            new_cols = self._get_table_columns(new_table)
+            df_aligned = self._validate_and_align_df(ddl_key, df, fill_defaults=True)
+            col_list = ", ".join(new_cols)
+
+            conn.register("__swap_data", df_aligned)
+            try:
+                conn.execute(
+                    f"INSERT INTO {new_table} ({col_list}) "
+                    f"SELECT {col_list} FROM __swap_data"
+                )
+            finally:
+                conn.unregister("__swap_data")
+
+            # Atomic swap
             conn.execute(f"ALTER TABLE IF EXISTS {table_name} RENAME TO {shadow_table}")
             conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
             conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
-            return
 
-        # Align and insert with explicit columns
-        new_cols = self._get_table_columns(new_table)
-        df_aligned = self._validate_and_align_df(ddl_key, df, fill_defaults=True)
-        col_list = ", ".join(new_cols)
-
-        conn.register("__swap_data", df_aligned)
-        try:
-            conn.execute(
-                f"INSERT INTO {new_table} ({col_list}) "
-                f"SELECT {col_list} FROM __swap_data"
-            )
-        finally:
-            conn.unregister("__swap_data")
-
-        # Atomic swap
-        conn.execute(f"ALTER TABLE IF EXISTS {table_name} RENAME TO {shadow_table}")
-        conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
-        conn.execute(f"DROP TABLE IF EXISTS {shadow_table}")
-
-        logger.info("Table swapped atomically", table=table_name, rows=len(df_aligned))
+            logger.info("Table swapped atomically", table=table_name, rows=len(df_aligned))
 
     def table_exists(self, table_name: str) -> bool:
         """Check if a table exists."""
-        conn = self.connect()
+        with self._lock:
+            conn = self.connect()
         result = conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
             [table_name],
@@ -575,13 +585,15 @@ class DuckDBStore:
 
     def row_count(self, table_name: str) -> int:
         """Get approximate row count for a table."""
-        conn = self.connect()
+        with self._lock:
+            conn = self.connect()
         result = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
         return result[0] if result else 0
 
     def get_latest_date(self, table_name: str, date_col: str = "date") -> Optional[str]:
         """Get the latest date in a table."""
-        conn = self.connect()
+        with self._lock:
+            conn = self.connect()
         if not self.table_exists(table_name):
             return None
         result = conn.execute(
