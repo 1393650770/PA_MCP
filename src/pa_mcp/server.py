@@ -2347,7 +2347,7 @@ async def evaluate_predictions() -> dict[str, Any]:
             except Exception:
                 return None
 
-        summary = svc.evaluate_predictions(kline_provider=_provider)
+        summary = await svc.evaluate_predictions(kline_provider=_provider)
         return _response(data=summary)
     except Exception as e:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
