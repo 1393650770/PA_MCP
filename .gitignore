@@ -111,3 +111,4 @@ scripts/backtest_limit_up*.py
 
 # ---- 本地计划文件 ----
 plans/
+scripts/daily_out.json
