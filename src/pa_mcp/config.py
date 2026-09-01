@@ -96,6 +96,19 @@ class ServerSettings(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 
+class QmtSettings(BaseModel):
+    """QMT 券商参数（默认关闭，显式配置才启用）。"""
+    user_data_path: str = ""
+    account_id: str = ""
+    enable_live_trading: bool = False
+
+
+class BrokerSettings(BaseModel):
+    """交易执行配置。mode: paper（默认）| qmt。"""
+    mode: str = "paper"
+    qmt: QmtSettings = Field(default_factory=QmtSettings)
+
+
 # ---- Root Settings: uses BaseSettings for env var support ----
 
 class Settings(BaseSettings):
@@ -113,6 +126,8 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
+    broker: BrokerSettings = Field(default_factory=BrokerSettings)
+    broker: BrokerSettings = Field(default_factory=BrokerSettings)
 
     @classmethod
     def from_yaml(cls, yaml_path: Optional[str] = None) -> "Settings":

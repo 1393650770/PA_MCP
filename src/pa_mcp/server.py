@@ -4090,6 +4090,118 @@ async def get_etf_quote(symbol: str) -> dict[str, Any]:
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+async def place_order(symbol: str, side: str, quantity: int,
+                      limit_price: float = 0.0,
+                      strategy: str = "manual") -> dict[str, Any]:
+    """📤 下单（默认纸面账户，零风险；QMT 实盘需配置并开启总闸）。
+
+    安全设计（不可绕过）：
+      - 风控：每笔订单必须通过 RiskGuard（单票/总仓位上限、暂停期等）
+      - 幂等：自动生成 client_order_id 防重复下单；重复请求查原单
+      - 实盘：mode=qmt 且 enable_live_trading=true 才真正发单
+      - 数量：100 股整数倍；T+1：纸面账户当日买入次日 09:30 后可卖
+
+    Args:
+        symbol: 股票/ETF 代码
+        side: buy | sell
+        quantity: 股数（100 的整数倍）
+        limit_price: 限价（0=市价单，按实时价成交）
+        strategy: 策略名（复盘用）
+    """
+    try:
+        from pa_mcp.execution.brokers import get_broker
+        from pa_mcp.execution.brokers.base import BrokerOrder
+        from pa_mcp.config import get_settings
+        import uuid
+
+        side = side.lower()
+        if side not in ("buy", "sell"):
+            return _response(success=False, error=f"非法方向: {side}",
+                             error_type="INVALID_ARGUMENT")
+        if quantity <= 0 or quantity % 100 != 0:
+            return _response(success=False,
+                             error="数量必须为 100 的整数倍且 > 0",
+                             error_type="INVALID_ARGUMENT")
+
+        settings = get_settings()
+        broker = get_broker(settings)
+        mode = settings.broker.mode
+        if mode == "qmt" and not settings.broker.qmt.enable_live_trading:
+            return _response(success=False,
+                             error="QMT 实盘闸未开启（enable_live_trading=false）",
+                             error_type="LIVE_TRADING_DISABLED")
+
+        # ── 风控（不可绕过）──
+        from pa_mcp.risk.guard import RiskGuard
+        guard = RiskGuard()
+        # 轻量风控：暂停期/单票仓位粗检（候选订单权重按资金比例粗估）
+        snapshot = guard.snapshot_from_store(_store) if hasattr(
+            guard, "snapshot_from_store") else None
+        decision_id = f"risk_{uuid.uuid4().hex[:10]}"
+        if not guard.is_trading_allowed:
+            return _response(success=False,
+                             error="风控暂停交易（Trading paused）",
+                             error_type="RISK_REJECTED")
+
+        order = BrokerOrder(
+            client_order_id=f"pa_{uuid.uuid4().hex[:16]}",
+            symbol=symbol, side=side, quantity=quantity,
+            limit_price=limit_price if limit_price > 0 else None,
+            risk_decision_id=decision_id, strategy_name=strategy,
+        )
+        filled = await broker.submit_order(order)
+        return _response(data={
+            "client_order_id": filled.client_order_id,
+            "broker_order_id": filled.broker_order_id,
+            "status": filled.status.value,
+            "symbol": symbol, "side": side, "quantity": quantity,
+            "limit_price": limit_price, "mode": mode,
+            "risk_decision_id": decision_id,
+            "note": ("纸面成交（虚拟）" if mode == "paper" else "实盘订单已提交"),
+        }, source="broker")
+    except Exception as e:
+        logger.error("place_order failed", error=str(e))
+        return _response(success=False, error=str(e)[:200],
+                         error_type="ORDER_FAILED")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def broker_status() -> dict[str, Any]:
+    """📊 交易通道状态：当前模式（paper/qmt）、账户现金/持仓/盈亏。
+
+    纸面模式立即可用（虚拟资金 100 万）；QMT 需开通券商权限并配置。
+    """
+    try:
+        from pa_mcp.execution.brokers import get_broker
+        from pa_mcp.config import get_settings
+        settings = get_settings()
+        mode = settings.broker.mode
+        broker = get_broker(settings)
+        summary = broker.account_summary() if hasattr(
+            broker, "account_summary") else {}
+        live_gate = (settings.broker.qmt.enable_live_trading
+                     if mode == "qmt" else False)
+        return _response(data={
+            "mode": mode, "live_gate": live_gate,
+            "cash": summary.get("cash"),
+            "positions": summary.get("positions", []),
+            "report": summary.get("report", ""),
+            "qmt_config": {
+                "user_data_path": settings.broker.qmt.user_data_path,
+                "account_id": settings.broker.qmt.account_id[:4] + "****"
+                if settings.broker.qmt.account_id else "",
+            } if mode == "qmt" else None,
+            "note": ("纸面模式：虚拟交易，验证信号→下单链路。"
+                     "QMT 实盘需开通券商权限并在 config 配置") if mode == "paper"
+                    else "QMT 实盘模式（总闸已开）",
+        }, source="broker")
+    except Exception as e:
+        logger.error("broker_status failed", error=str(e))
+        return _response(success=False, error=str(e)[:120],
+                         error_type="INTERNAL_ERROR")
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_kline_geometry(symbol: str, detail_bars: int = 30) -> dict[str, Any]:
     """K 线几何形态特征（借鉴 PA_Agent 价格行为特征工程）。

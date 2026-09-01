@@ -61,3 +61,10 @@ server:
   transport: stdio  # stdio | http
   http_port: 8080
   log_level: INFO
+
+broker:
+  mode: paper        # paper（纸面，默认）| qmt（券商实盘，需开通 QMT 权限）
+  qmt:
+    user_data_path: ""   # QMT 安装目录 userdata_mini 路径（如 D:/qmt/userdata_mini）
+    account_id: ""       # 证券资金账号
+    enable_live_trading: false  # 实盘总闸！确认策略/风控就绪后才可开启
