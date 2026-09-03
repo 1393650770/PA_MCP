@@ -328,16 +328,28 @@ class DataUpdateScheduler:
 
         today = datetime.now().strftime("%Y%m%d")
 
-        # Get list of all stocks
+        # 标的清单：
+        #   force_full=True  → stock_basic 全市场（~5500 只，全量重跑用 CLI）
+        #   增量（默认）     → 库内已有 symbol（种子池+扫描落库标的）。
+        #     原因：全市场 5544 只增量拉取 >9 分钟，MCP 工具/OpenClaw cron
+        #     必然超时中断（曾导致数据停在 08-24 而 cron 状态 ok 的静默失败）。
+        #     库内维护 + 扫描落库（scan_market/scan_etf 自动写回）足够研究使用。
         try:
-            basic_df = store.query_df("SELECT symbol FROM stock_basic LIMIT 5200")
+            if force_full:
+                basic_df = store.query_df(
+                    "SELECT symbol FROM stock_basic LIMIT 5200")
+            else:
+                basic_df = store.query_df(
+                    "SELECT DISTINCT symbol FROM kline_daily")
             symbols = basic_df["symbol"].tolist() if not basic_df.empty else []
         except Exception:
             symbols = []
 
         if not symbols:
-            logger.warning("No stocks in stock_basic, skipping kline update")
+            logger.warning("No symbols to update, skipping kline update")
             return 0
+        logger.info("Kline update targets", count=len(symbols),
+                    mode="full" if force_full else "incremental(db)")
 
         updated = 0
         batch_size = 50
@@ -506,7 +518,7 @@ class DataUpdateScheduler:
                         self._store.insert_df(
                             "kline_minute",
                             self._to_table_df(out, "kline_minute"),
-                            mode="insert",
+                            mode="append"  # 幂等 upsert（主键冲突自动覆盖）,
                         )
                         updated += len(out)
                     self._set_checkpoint("kline_minute", sym)
@@ -582,7 +594,7 @@ class DataUpdateScheduler:
                     self._store.insert_df(
                         "financials_income",
                         self._to_table_df(out, "financials_income"),
-                        mode="insert",
+                        mode="append"  # 幂等 upsert（主键冲突自动覆盖）,
                     )
                     updated += len(out)
             except Exception as e:
@@ -632,17 +644,21 @@ class DataUpdateScheduler:
         if self._router is None:
             raise RuntimeError("Router required for fund flow update")
 
-        # 取股票池（最多处理全部，东财限流下会慢 — 分批+断点）
+        # 取股票池：force_full → 全市场；增量 → 库内已有（东财限流 1.2s/只，
+        # 全市场 5554 只 ≈ 2 小时必然拖死 cron；库内 ~900 只 ≈ 18 分钟可完成）
         try:
-            basic_df = self._store.query_df(
-                "SELECT symbol FROM stock_basic ORDER BY symbol",
-            )
+            if force_full:
+                basic_df = self._store.query_df(
+                    "SELECT symbol FROM stock_basic ORDER BY symbol")
+            else:
+                basic_df = self._store.query_df(
+                    "SELECT DISTINCT symbol FROM kline_daily")
             symbols = basic_df["symbol"].tolist() if not basic_df.empty else []
         except Exception:
             symbols = []
 
         if not symbols:
-            logger.warning("No stocks in stock_basic, skipping fund flow")
+            logger.warning("No symbols to update, skipping fund flow")
             return 0
 
         done = self._get_checkpoint("fund_flow")
@@ -655,6 +671,7 @@ class DataUpdateScheduler:
         adapter = EastMoneyAdapter()
         updated = 0
         failed = 0
+        consecutive_failed = 0
         try:
             for i, sym in enumerate(pending):
                 try:
@@ -665,12 +682,23 @@ class DataUpdateScheduler:
                         self._store.insert_df(
                             "fund_flow_daily",
                             self._to_table_df(df, "fund_flow_daily"),
-                            mode="insert",
+                            mode="append"  # 幂等 upsert（主键冲突自动覆盖）,
                         )
                         updated += 1
+                    consecutive_failed = 0
                     self._set_checkpoint("fund_flow", sym)
                 except Exception:
                     failed += 1
+                    consecutive_failed += 1
+                    if consecutive_failed >= 15:
+                        # 东财断连熔断：连续 15 只失败即停（避免 5554 只
+                        # 空转 2 小时拖死 pipeline——之前静默失败的元凶）
+                        logger.warning(
+                            "Fund flow source down, aborting phase",
+                            consecutive_failed=consecutive_failed,
+                            processed=i + 1,
+                        )
+                        break
                 if (i + 1) % 50 == 0:
                     logger.info(
                         "Fund flow progress",
@@ -723,7 +751,7 @@ class DataUpdateScheduler:
             # 去重：同一 (trade_date, symbol, seat_name) 只保留一条（东财多原因上榜会重复）
             out = out.drop_duplicates(subset=["trade_date", "symbol", "seat_name"])
             self._store.insert_df("dragon_tiger", self._to_table_df(out, "dragon_tiger"),
-                                  mode="insert")
+                                  mode="append")  # 幂等 upsert（主键冲突自动覆盖）
             logger.info("Dragon-tiger updated", rows=len(out))
             return len(out)
         except Exception as e:

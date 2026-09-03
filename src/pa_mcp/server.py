@@ -3028,11 +3028,14 @@ async def run_daily_update(force_full: bool = False) -> dict[str, Any]:
     """每日数据自动更新：调度器 8-phase 全链路（日历/股票池/日线/
     分钟线/财务/资金流/龙虎榜/指标）。
 
-    收盘后运行保证研究数据当日新鲜。耗时约 2 分钟（种子池）至
-    数分钟（全市场）。
+    收盘后运行保证研究数据当日新鲜。
+    增量（默认）：维护库内已有标的（种子池+扫描落库，含 ETF），
+    约 1-8 分钟（视库内标的数）；force_full=True 全市场 ~5500 只
+    需 30+ 分钟——请用 CLI（python -m pa_mcp.data.scheduler --full），
+    不要在 MCP 工具里全量（客户端必然超时）。
 
     Args:
-        force_full: True = 强制全量（缺省增量）
+        force_full: True = 强制全量（仅建议 CLI 使用）
     """
     try:
         from pa_mcp.data.scheduler import DataUpdateScheduler
