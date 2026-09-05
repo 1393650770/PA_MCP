@@ -36,18 +36,21 @@ async def main():
     # 1) 市场温度
     try:
         out["sentiment"] = await S.get_market_sentiment()
-    except Exception as e:\n        out["sentiment"] = {"success": False, "error": str(e)}
+    except Exception as e:
+        out["sentiment"] = {"success": False, "error": str(e)}
 
     # 2) 观察池实时概况
     try:
         out["overview"] = await S.watchlist_overview()
-    except Exception as e:\n        out["overview"] = {"success": False, "error": str(e)}
+    except Exception as e:
+        out["overview"] = {"success": False, "error": str(e)}
 
     # 3) 多源综合信号
     try:
         out["consensus"] = await S.watchlist_consensus(
             "600096,600598,600426,601088,601225,000967,002573")
-    except Exception as e:\n        out["consensus"] = {"success": False, "error": str(e)}
+    except Exception as e:
+        out["consensus"] = {"success": False, "error": str(e)}
 
     if S._store:
         S._store.close()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,9 @@ import pandas as pd
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# DuckDB 排他锁重试间隔（秒）
+_RETRY_INTERVAL_SECONDS = 2.0
 
 
 # ---- SQL DDL Statements ----
@@ -343,41 +347,163 @@ class DuckDBStore:
     - Connection pooling for thread safety
     """
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        read_only: Optional[bool] = None,
+    ) -> None:
         if db_path is None:
             from pa_mcp.config import get_settings
             db_path = get_settings().database.path
 
         self.db_path = str(db_path)
+        if read_only is None:
+            try:
+                from pa_mcp.config import get_settings
+                read_only = bool(get_settings().database.read_only)
+            except Exception:  # pragma: no cover - 配置不可用时按读写处理
+                read_only = False
+
+        # 期望的打开模式（配置来源）
+        self._requested_read_only = bool(read_only)
+        # 实际生效的打开模式（connect() 成功之后才有意义）
+        self.read_only: bool = self._requested_read_only
+        # 连接重试预算（秒）：DuckDB 单文件排他锁，等一等通常就能拿到
+        try:
+            from pa_mcp.config import get_settings
+            self._connect_timeout = float(
+                get_settings().database.connect_timeout_seconds
+            )
+        except Exception:  # pragma: no cover - 配置不可用时用默认值
+            self._connect_timeout = 30.0
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
         # DuckDB 连接非线程安全：MCP/UI 工具经 asyncio.to_thread 并发访问
         # 同一实例时，C 层竞态会 segfault 直接杀死进程（表现为客户端
         # "Connection closed"）。进程内锁串行化所有访问（毫秒级开销）。
         self._lock = threading.RLock()
 
-    def connect(self) -> duckdb.DuckDBPyConnection:
-        """Get or create a database connection (线程安全)."""
-        with self._lock:
-            if self._conn is None:
-                # Ensure parent directory exists
-                db_dir = Path(self.db_path).parent
-                os.makedirs(db_dir, exist_ok=True)
+    def connect(self, timeout: Optional[float] = None) -> duckdb.DuckDBPyConnection:
+        """Get or create a database connection (线程安全).
 
-                try:
-                    self._conn = duckdb.connect(self.db_path)
-                except Exception as e:
-                    if "already open" in str(e) or "正在使用" in str(e):
-                        raise RuntimeError(
-                            f"数据库被其他进程占用（DuckDB 单文件排他锁）: "
-                            f"{self.db_path}\n"
-                            f"原因: UI / MCP Server / 数据调度器同时运行时会互锁。\n"
-                            f"解决: 同一时间只保留一个服务进程（关闭 UI 或调度器后"
-                            f"重试），或运行 taskkill /F /IM python.exe 清残留"
-                        ) from e
-                    raise
-                logger.info("DuckDB connected", path=self.db_path)
-                self._init_tables()
-            return self._conn
+        DuckDB 单文件是**进程级排他锁**：UI / MCP Server / 数据调度器（或
+        两个并发的 cron 会话）同时访问时，后到者会直接抛 IOException。
+        实测（Windows）：文件被占用时读写与只读**都**打不开，所以这里按
+        「排队重试 → 只读兜底」的顺序处理：
+
+        1. 读写模式重试，直到 `database.connect_timeout_seconds`（默认 30s）
+           —— 并发的 cron 会话大多只是几十秒的错峰问题，等一等就能拿到；
+        2. 仍然拿不到 → 尝试只读模式（权限受限场景下有效）；
+        3. 都失败 → 抛 RuntimeError，附可行动的排查建议。
+
+        调用方应当在**使用点**调用本方法而不是在进程启动时抢锁，这样数据库
+        暂时不可用时只影响单次调用，不会拖垮整个服务（MCP Server 启动失败
+        等于该会话所有工具消失）。
+        """
+        with self._lock:
+            if self._conn is not None:
+                return self._conn
+
+            # Ensure parent directory exists
+            db_dir = Path(self.db_path).parent
+            os.makedirs(db_dir, exist_ok=True)
+
+            budget = self._connect_timeout if timeout is None else float(timeout)
+            deadline = time.monotonic() + max(0.0, budget)
+            attempt = 0
+
+            while True:
+                attempt += 1
+                for read_only in self._open_modes():
+                    try:
+                        self._conn = duckdb.connect(
+                            self.db_path, read_only=read_only,
+                        )
+                    except Exception as e:
+                        if not self._is_lock_contention(e) and not read_only:
+                            # 首选（读写）模式遇到非锁冲突错误（如文件损坏、
+                            # 版本不兼容），重试没有意义，直接抛出原始错误
+                            raise
+                        logger.debug(
+                            "DuckDB open blocked by another process",
+                            path=self.db_path,
+                            read_only=read_only,
+                            attempt=attempt,
+                            error=str(e)[:200],
+                        )
+                        continue
+
+                    self.read_only = read_only
+                    if read_only:
+                        logger.warning(
+                            "DuckDB connected in READ-ONLY mode (writes disabled)",
+                            path=self.db_path,
+                        )
+                    else:
+                        if attempt > 1:
+                            logger.info(
+                                "DuckDB connected after waiting for lock",
+                                path=self.db_path, attempts=attempt,
+                            )
+                        else:
+                            logger.info("DuckDB connected", path=self.db_path)
+                        self._init_tables()
+                    return self._conn
+
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(min(_RETRY_INTERVAL_SECONDS, max(0.05, deadline - time.monotonic())))
+
+            raise RuntimeError(
+                f"无法打开 DuckDB 数据库（已被其他进程占用超过 "
+                f"{budget:.0f}s）: {self.db_path}\n"
+                f"原因: DuckDB 单文件排他锁，同一时间只允许一个进程访问"
+                f"（UI / MCP Server / 数据调度器会互锁）。\n"
+                f"解决: 1) 稍后重试；2) 关闭占用进程（UI、调度器或其他 "
+                f"MCP Server）；3) 把并发任务错峰调度。"
+            )
+
+    def _open_modes(self) -> list[bool]:
+        """Candidate open modes in priority order.
+
+        只读模式不再尝试读写（避免抢锁）；读写模式失败后把只读作为兜底。
+        """
+        modes: list[bool] = [self._requested_read_only]
+        if not self._requested_read_only:
+            modes.append(True)
+        return modes
+
+    @staticmethod
+    def _is_lock_contention(error: Exception) -> bool:
+        """Whether the error means 'someone else holds the DuckDB file'."""
+        msg = str(error)
+        markers = (
+            "另一个程序正在使用此文件",  # Windows 中文
+            "being used by another process",  # Windows 英文
+            "File is already open",
+            "already open",
+            "Could not set lock",
+            "lock on file",
+            "IO Error: Cannot open file",
+        )
+        return any(m in msg for m in markers)
+
+    def is_writable(self) -> bool:
+        """Whether this store can execute DDL/DML (线程安全)."""
+        with self._lock:
+            self.connect()
+            return not self.read_only
+
+    def _ensure_writable(self, action: str) -> None:
+        """写操作前置检查：只读降级模式下给出可行动的明确报错。"""
+        with self._lock:
+            self.connect()
+            if self.read_only:
+                raise RuntimeError(
+                    f"无法执行写操作（{action}）：当前为只读降级模式，"
+                    f"数据库文件被其他进程占用: {self.db_path}\n"
+                    f"原因: DuckDB 单文件排他锁，同一时间只允许一个写进程。\n"
+                    f"解决: 关闭占用进程（UI / 调度器 / 其他 MCP Server）后重试。"
+                )
 
     def close(self) -> None:
         """Close the database connection (线程安全)."""
@@ -488,6 +614,8 @@ class DuckDBStore:
                 logger.debug("insert_df skipped: empty DataFrame", table=table_name)
                 return
 
+            self._ensure_writable(f"insert_df → {table_name}")
+
             # Validate table exists
             if not self.table_exists(table_name):
                 raise ValueError(
@@ -524,6 +652,7 @@ class DuckDBStore:
         """
         with self._lock:
             conn = self.connect()
+            self._ensure_writable(f"swap_table → {table_name}")
             new_table = f"{table_name}_new"
             shadow_table = f"{table_name}_old"
 

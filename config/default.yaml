@@ -20,7 +20,7 @@ data_sources:
 
 database:
   path: data/pa_mcp.duckdb
-  read_only: false
+  read_only: false  # true=强制只读；false=读写优先，文件被占用时自动降级只读
   shadow_table_swap: true
 
 cache:

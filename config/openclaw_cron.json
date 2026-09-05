@@ -95,6 +95,17 @@
         "delivery": { "mode": "none" }
       },
       {
+        "name": "pamcp-watchlist-close",
+        "_description": "收盘观察池检查：市场温度 + 观察池概况 + 多源综合信号",
+        "_registered_as": "OpenClaw cron 中的任务名为「收盘观察池检查」",
+        "cron": "40 15 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "_cron_note": "原为 30 15，与 pamcp-weekly-research（周五 15:30）同时触发；两个 isolated 会话各起一个 MCP Server，后者因 DuckDB 单文件排他锁启动失败，导致该会话拿不到 pa-mcp__* 工具。已错峰到 15:40。",
+        "sessionTarget": "isolated",
+        "prompt": "使用 PA_MCP 的 MCP 工具做收盘观察池检查（研究参考，非投资建议）：1. 调 get_market_sentiment() 看今日市场温度（涨跌家数/涨停数/情绪分）2. 调 watchlist_overview() 看观察池 7 只实时概况 3. 调 watchlist_consensus(symbols='600096,600598,600426,601088,601225,000967,002573') 看多源综合信号 4. 有强信号（>=60%）或市场转暖时重点提示，否则简报即可。观察池：600096云天化/600598北大荒/600426华鲁恒升/601088中国神华/601225陕西煤业/000967盈峰环境/002573清新环境。输出：市场温度/各票信号/买点提示。标注研究参考非投资建议。\n5. 执行约束（重要）：若当前会话看不到 pa-mcp__* 开头的 MCP 工具，或工具调用返回「数据库被占用」类错误，直接输出「数据源暂不可用，本次跳过」并结束任务，不要尝试用 exec/write 写脚本直连数据库、不要另起服务进程、不要凭记忆编造行情数据。",
+        "delivery": { "mode": "none" }
+      },
+      {
         "name": "pamcp-sector-rotation",
         "_description": "每交易日盘前：板块轮动预测 + 强势板块领涨股",
         "cron": "23 8 * * 1-5",
@@ -107,5 +118,6 @@
   },
   "_cli_commands": "逐条添加示例（替代配置文件合并）：\nopenclaw cron add --name pamcp-morning-brief --cron '0 8 * * 1-5' --tz Asia/Shanghai --session isolated --message '使用 PA_MCP 生成盘前简报：调 agent_market_state()、scan_market()、get_market_sentiment()'",
   "_note": "依赖：OpenClaw 已配置 PA_MCP MCP server（venv\\Scripts\\python.exe -m pa_mcp.server）。",
-  "_timezone": "全部使用 Asia/Shanghai（A股交易时区）。A股交易时段 9:30-11:30, 13:00-15:00；复盘任务设在收盘后。"
+  "_timezone": "全部使用 Asia/Shanghai（A股交易时区）。A股交易时段 9:30-11:30, 13:00-15:00；复盘任务设在收盘后。",
+  "_scheduling_rule": "两个任务之间至少间隔 5 分钟，且要留出前一个任务的实测耗时余量（data-load 约 3.5 分钟、prediction-evaluate 约 5 分钟、close-review/weekly-research 约 1 分钟）。原因：每个 isolated 会话会各起一个 pa_mcp MCP Server 进程，而 DuckDB 单文件是进程级排他锁，并发启动会让后一个服务端的 81 个工具全部不可见。当前时间轴：14:45 持仓体检 → 15:05 数据更新 → 15:15 收盘复盘 → 15:23 预测验证 → 15:30 周研究(周五) → 15:40 观察池检查。"
 }

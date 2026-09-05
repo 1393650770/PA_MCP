@@ -45,8 +45,12 @@ async def server_lifespan(server: FastMCP):
     _settings = get_settings()
 
     # Initialize data layer
+    # 关键：这里**不**打开 DuckDB。
+    # DuckDB 单文件是进程级排他锁，两个并发 cron 会话各起一个 MCP Server 时，
+    # 后启动者会在打开数据库时直接崩溃 —— 后果是该会话的 81 个工具全部不注册，
+    # 模型看不到工具就会用 exec 写脚本兜底，把整轮任务搞成 error。
+    # 延迟到首次工具调用再连接（内部带排队重试），启动失败的风险就消失了。
     _store = DuckDBStore()
-    _store.connect()
     _cache = CacheManager()
     _akshare = AKShareAdapter()
     _sina = SinaAdapter()

@@ -52,6 +52,8 @@ class DatabaseSettings(BaseModel):
     path: str = "data/pa_mcp.duckdb"
     read_only: bool = False
     shadow_table_swap: bool = True
+    # 文件被其他进程占用时的排队等待上限（秒）；0 = 不等待，立即失败
+    connect_timeout_seconds: float = 30.0
 
 
 class SchedulerSettings(BaseModel):
