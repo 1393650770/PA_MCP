@@ -110,6 +110,52 @@ mcp = FastMCP(
 
 # ---- Helper: Standard Response Format ----
 
+# pandas/numpy 缺失值（NaN/NaT）无法被标准 JSON 序列化，会让 FastMCP 在
+# 序列化响应时抛错导致整个工具调用报 isError。做递归清理：所有缺失值→None，
+# Timestamp/date/datetime → ISO 字符串。所有工具都经 _response 返回，一处修复全局受益。
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    # 容器先递归，避免 pd.isna 对 dict/list 的逐元素返回干扰
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    # float nan
+    try:
+        import math
+        if isinstance(value, float) and math.isnan(value):
+            return None
+    except Exception:
+        pass
+    try:
+        import pandas as pd
+        import numpy as np
+        # Timestamp / datetime64 序列化为 ISO 字符串（客户端更好消费）
+        if isinstance(value, pd.Timestamp):
+            return None if pd.isna(value) else value.isoformat()
+        if isinstance(value, np.datetime64):
+            ts = pd.Timestamp(value)
+            return None if pd.isna(ts) else ts.isoformat()
+        # 其它 pandas 缺失（NaT/Na/NA）标量
+        if not isinstance(value, (str, bytes, int, bool)) and pd.isna(value):
+            return None
+    except Exception:
+        pass
+    # date/datetime → ISO 字符串
+    from datetime import date as _date, datetime as _datetime
+    if isinstance(value, (_date, _datetime)):
+        return value.isoformat()
+    # numpy 原生标量 → python 原生（json 友好）
+    try:
+        import numpy as _np
+        if isinstance(value, _np.generic):
+            return value.item()
+    except Exception:
+        pass
+    return value
+
+
 def _response(
     data: Any = None, success: bool = True,
     error: Optional[str] = None, error_type: Optional[str] = None,
@@ -123,7 +169,7 @@ def _response(
     """
     return {
         "success": success,
-        "data": data,
+        "data": _json_safe(data),
         "error": error,
         "error_type": error_type,
         "data_source": source,
