@@ -1,0 +1,38 @@
+# PA_MCP —— 通知 PA_DSH 跑插件桥接冒烟
+#
+# 作用：PA_MCP 每次 push main 后，向 PA_DSH 仓库发 repository_dispatch
+#   (event_type=pa-mcp-changed)，触发 PA_DSH 的 pa-dsh smoke workflow，
+#   验证最新 PA_MCP 仍能被 dsh 正式插件(pa-mcp-dsh-plugin)桥接。
+# 实现"改 PA_MCP → 自动验插件兼容"的联动。
+#
+# 前提：
+#   1) PA_MCP 仓需有对 PA_DSH 仓发 dispatch 的权限 —— 在 PA_MCP 仓 Settings→
+#      Secrets→Actions 配 PA_DSH_REPO(如 1393650770/PA_DSH) 与
+#      PA_DSH_REPO_TOKEN(一个有 PA_DSH 仓写权限的 GitHub PAT / 或同账号 fine-
+#      grained token, Actions: write)。
+#   2) 若 PA_DSH 为 private，PAT 需该仓权限；public 也建议用细粒度 token 限权。
+name: notify pa-dsh smoke
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 通知 PA_DSH 跑插件冒烟
+        env:
+          DISPATCH_TOKEN: ${{ secrets.PA_DSH_REPO_TOKEN }}
+          PLUGIN_REPO: ${{ secrets.PA_DSH_REPO || '1393650770/PA_DSH' }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "::warning::未配置 PA_DSH_REPO_TOKEN，跳过远程通知(可本地 node scripts/smoke.mjs 手动冒烟)"
+            exit 0
+          fi
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${PLUGIN_REPO}/dispatches" \
+            -d "{\"event_type\":\"pa-mcp-changed\",\"client_payload\":{\"ref\":\"${GITHUB_SHA}\",\"branch\":\"${GITHUB_REF_NAME}\"}}"
+          echo "已通知 ${PLUGIN_REPO} 跑插件冒烟"
