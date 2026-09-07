@@ -300,6 +300,8 @@ class DataUpdateScheduler:
             except Exception:
                 basic["sector"] = ""
 
+            basic = self._enrich_stock_basic(basic, df)
+
             self._store.insert_df("stock_basic", basic, mode="replace")
             logger.info("Stock basic updated", rows=len(basic), source=source_name)
             return len(basic)
@@ -320,6 +322,141 @@ class DataUpdateScheduler:
             logger.error("Stock basic update failed", error=str(e))
             raise  # Re-raise — this is a REQUIRED phase
 
+    # 快照源（新浪/腾讯等）通常只给 代码/名称/市值，不带行业、上市日期、
+    # ST 标记、停牌标记。而 insert_df(mode="replace") 会把未提供的列对齐成
+    # NULL —— 于是每次日更都会把 industry/market_cap/list_date/is_st/
+    # is_suspended 清空（生产库曾 5554 行 100% 为 NULL），直接导致：
+    #   · ST/退市股无法识别（下单无拦截）
+    #   · 停牌股无法识别
+    #   · 市值筛选（scan_volume_surge.market_cap_min）失效
+    #   · 行业敞口风控（max_sector_exposure）无法计算
+    # 这里做两件事：1) 从 名称/代码 派生可零成本得到的字段；
+    #             2) 源没给、但库里已有的值一律保留，不被日更抹掉。
+    _ST_MARKERS = ("ST", "退")
+
+    def _enrich_stock_basic(self, basic: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
+        """补齐/保留 stock_basic 的关键字段，避免每日 replace 造成的数据丢失。"""
+        if basic.empty:
+            return basic
+
+        sym = basic["symbol"].astype(str).str.strip()
+        name = basic.get("name", pd.Series([""] * len(basic))).astype(str).fillna("")
+
+        # ---- 1) 由代码/名称零成本派生 ----
+        # is_st：A 股 ST/*ST/退市整理 在股票简称里体现，可用于风控拦截
+        upper = name.str.upper()
+        basic["is_st"] = upper.str.contains("ST", regex=False) | upper.str.contains("退", regex=False)
+
+        # exchange / board：由代码前缀判定（6/9→SH，0/3→SZ，8/4→BJ）
+        def _exchange(s: str) -> str:
+            if s.startswith(("6", "9")):
+                return "SH"
+            if s.startswith(("0", "3")):
+                return "SZ"
+            if s.startswith(("8", "4")):
+                return "BJ"
+            return ""
+
+        def _board(s: str) -> str:
+            if s.startswith("688") or s.startswith("689"):
+                return "star"      # 科创板
+            if s.startswith("30"):
+                return "chinext"   # 创业板
+            if s.startswith(("8", "4")):
+                return "bse"       # 北交所
+            return "main"
+
+        basic["exchange"] = sym.map(_exchange)
+        basic["board"] = sym.map(_board)
+
+        # 停牌：快照无成交（volume=0 / 最新价为 0）通常意味着停牌
+        suspended = pd.Series(False, index=basic.index)
+        for col in ("成交量", "volume", "最新价", "trade"):
+            if raw is not None and col in getattr(raw, "columns", []):
+                vals = pd.to_numeric(raw[col], errors="coerce")
+                vals = vals.reindex(basic.index) if len(vals) == len(basic) else vals
+                suspended = suspended | (vals.fillna(0) == 0)
+                break
+        basic["is_suspended"] = suspended
+
+        # ---- 2) 源未提供但库里已有的字段：保留旧值，绝不抹成 NULL ----
+        preserve_cols = ("industry", "list_date", "market_cap", "delist_date")
+        need_preserve = [
+            c for c in preserve_cols
+            if c not in basic.columns or basic[c].isna().all()
+        ]
+        if need_preserve:
+            try:
+                cols_sql = ", ".join(["symbol"] + need_preserve)
+                old = self._store.query_df(
+                    f"SELECT {cols_sql} FROM stock_basic", [])
+                if not old.empty:
+                    for c in need_preserve:
+                        old_c = old[["symbol", c]].dropna()
+                        old_c = old_c[old_c[c].astype(str).str.strip() != ""]
+                        if old_c.empty:
+                            continue
+                        mapping = dict(zip(old_c["symbol"].astype(str), old_c[c]))
+                        cur = basic[c] if c in basic.columns else pd.Series(
+                            [None] * len(basic), index=basic.index)
+                        basic[c] = [
+                            (v if (v is not None and not pd.isna(v)) else mapping.get(s))
+                            for s, v in zip(sym, cur)
+                        ]
+            except Exception as e:
+                logger.debug("stock_basic preserve skipped", error=str(e))
+
+        return basic
+
+    def _incremental_universe(self, store, cap: int = 1200) -> list[str]:
+        """增量更新的标的池。
+
+        只取 kline_daily 已有标的会形成「鸡生蛋」：新加自选/持仓的标的、
+        以及全新安装的库，因为没有历史 K 线就永远不会被拉取。
+
+        因此取并集（并保持优先级顺序，保证限量时研究标的优先）：
+          1. 库内已有 K 线的标的（继续增量续拉）
+          2. 自选股 watchlist
+          3. 持仓 portfolio
+          4. stock_basic 中的研究标的（受 cap 限制，避免拖垮 cron）
+        """
+        symbols: list[str] = []
+        seen: set[str] = set()
+
+        def _add(rows) -> None:
+            for s in rows:
+                s = str(s).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    symbols.append(s)
+
+        queries = [
+            "SELECT DISTINCT symbol FROM kline_daily",
+            "SELECT DISTINCT symbol FROM watchlist",
+            "SELECT DISTINCT symbol FROM portfolio",
+        ]
+        for q in queries:
+            try:
+                df = store.query_df(q)
+                if not df.empty:
+                    _add(df["symbol"].tolist())
+            except Exception:
+                continue  # 表不存在时跳过
+
+        # stock_basic 兜底：仅在池子很小（如全新安装）时补充，避免全市场拖死
+        if len(symbols) < cap:
+            try:
+                df = store.query_df(
+                    f"SELECT symbol FROM stock_basic LIMIT {cap - len(symbols)}")
+                if not df.empty:
+                    _add(df["symbol"].tolist())
+            except Exception:
+                pass
+
+        if symbols:
+            logger.info("Incremental kline universe", count=len(symbols))
+        return symbols
+
     async def _update_daily_kline(self, force_full: bool) -> int:
         """Update daily kline for all stocks (incremental) — multi-source."""
         store = self._store
@@ -330,18 +467,19 @@ class DataUpdateScheduler:
 
         # 标的清单：
         #   force_full=True  → stock_basic 全市场（~5500 只，全量重跑用 CLI）
-        #   增量（默认）     → 库内已有 symbol（种子池+扫描落库标的）。
+        #   增量（默认）     → 见 _incremental_universe()：
+        #     kline 已有 ∪ 自选 ∪ 持仓 ∪ stock_basic 里的研究标的。
         #     原因：全市场 5544 只增量拉取 >9 分钟，MCP 工具/OpenClaw cron
         #     必然超时中断（曾导致数据停在 08-24 而 cron 状态 ok 的静默失败）。
-        #     库内维护 + 扫描落库（scan_market/scan_etf 自动写回）足够研究使用。
+        #     注意：早期实现只取 kline_daily 已有标的，形成鸡生蛋问题——
+        #     新加入自选/组合的标的、以及全新安装的库永远拿不到 K 线。
         try:
             if force_full:
                 basic_df = store.query_df(
                     "SELECT symbol FROM stock_basic LIMIT 5200")
+                symbols = basic_df["symbol"].tolist() if not basic_df.empty else []
             else:
-                basic_df = store.query_df(
-                    "SELECT DISTINCT symbol FROM kline_daily")
-            symbols = basic_df["symbol"].tolist() if not basic_df.empty else []
+                symbols = self._incremental_universe(store)
         except Exception:
             symbols = []
 
@@ -650,10 +788,9 @@ class DataUpdateScheduler:
             if force_full:
                 basic_df = self._store.query_df(
                     "SELECT symbol FROM stock_basic ORDER BY symbol")
+                symbols = basic_df["symbol"].tolist() if not basic_df.empty else []
             else:
-                basic_df = self._store.query_df(
-                    "SELECT DISTINCT symbol FROM kline_daily")
-            symbols = basic_df["symbol"].tolist() if not basic_df.empty else []
+                symbols = self._incremental_universe(self._store)
         except Exception:
             symbols = []
 

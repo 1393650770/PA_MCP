@@ -50,21 +50,85 @@ class DataQualityReport:
         try:
             tables = self._table_coverage(store)
             kline_issues = self._kline_checks(store, sample_limit)
+            freshness = self._freshness(store)
             issues = [i for t in tables.values() if t.get("issue")
                       for i in [t["issue"]]]
             issues += kline_issues["issues"]
 
-            score = self._score(tables, kline_issues)
+            score = self._score(tables, kline_issues, freshness)
             return {
                 "date": pd.Timestamp.now().strftime("%Y-%m-%d"),
                 "score": score,
                 "tables": tables,
                 "kline_checks": kline_issues,
-                "issues": issues,
-                "summary": self._summary(score, tables, kline_issues),
+                "freshness": freshness,
+                "issues": issues + [f["message"] for f in freshness.get("stale", [])],
+                "summary": self._summary(score, tables, kline_issues, freshness),
             }
         finally:
             store.close()
+
+    # ---- 数据新鲜度 ----
+    # 背景：管线曾出现「cron 状态 ok 但数据停在 08-24」的静默失败——
+    # 质量报告只查完整性（OHLC/缺口/覆盖），不查"是否停在旧日期"，
+    # 于是数据停更无人知晓。这里对比交易日历的最后一个交易日，
+    # 让停更变成显式告警。
+    def _freshness(self, store) -> dict[str, Any]:
+        stale: list[dict] = []
+        latest: dict[str, str] = {}
+        # 期望的最后一个交易日（<= 今天）
+        try:
+            cal = store.query_df(
+                "SELECT MAX(date) AS d FROM trade_calendar "
+                "WHERE is_trading_day = TRUE AND date <= CURRENT_DATE")
+            expected = str(cal.iloc[0]["d"])[:10] if not cal.empty and cal.iloc[0]["d"] is not None else ""
+        except Exception:
+            expected = ""
+
+        specs = [
+            ("kline_daily", "date", 1),
+            ("sector_daily", "date", 1),
+            ("dragon_tiger", "trade_date", 1),
+            ("sentiment_daily", "date", 3),
+        ]
+        for table, col, max_lag_days in specs:
+            try:
+                if not store.table_exists(table):
+                    continue
+                row = store.query_df(f"SELECT MAX({col}) AS d FROM {table}")
+                if row.empty or row.iloc[0]["d"] is None:
+                    stale.append({"table": table, "latest": None,
+                                   "message": f"{table} 无数据（表为空）"})
+                    continue
+                d = str(row.iloc[0]["d"])[:10]
+                latest[table] = d
+                if not expected:
+                    continue
+                # 落后交易日数：按日历计数
+                try:
+                    lag = store.query_df(
+                        "SELECT COUNT(*) AS c FROM trade_calendar "
+                        "WHERE is_trading_day = TRUE AND date > ? AND date <= ?",
+                        [d, expected])
+                    n = int(lag.iloc[0]["c"]) if not lag.empty else 0
+                except Exception:
+                    n = 0
+                if n > max_lag_days:
+                    stale.append({
+                        "table": table, "latest": d, "expected": expected,
+                        "lag_trading_days": n,
+                        "message": (f"{table} 数据陈旧：最新 {d}，"
+                                    f"应为 {expected}（落后 {n} 个交易日）"),
+                    })
+            except Exception:
+                continue
+
+        return {
+            "expected_last_trading_day": expected,
+            "latest": latest,
+            "stale": stale,
+            "is_stale": bool(stale),
+        }
 
     # ---- 表覆盖 ----
     def _table_coverage(self, store) -> dict[str, dict]:
@@ -161,7 +225,7 @@ class DataQualityReport:
 
     # ---- 评分 ----
     @staticmethod
-    def _score(tables: dict, kline: dict) -> int:
+    def _score(tables: dict, kline: dict, freshness: Optional[dict] = None) -> int:
         score = 100
         # 表缺失扣分
         missing = sum(1 for t in tables.values() if t.get("issue")
@@ -177,17 +241,26 @@ class DataQualityReport:
                 score -= min(15, kline["date_gaps"] * 2)
         else:
             score -= 30  # 无行情数据
+        # 数据陈旧扣分（每个陈旧表扣 15，这是最容易静默失败的一类）
+        if freshness and freshness.get("stale"):
+            score -= min(40, len(freshness["stale"]) * 15)
         return max(0, min(100, score))
 
     @staticmethod
-    def _summary(score: int, tables: dict, kline: dict) -> str:
+    def _summary(score: int, tables: dict, kline: dict,
+                 freshness: Optional[dict] = None) -> str:
         level = ("✅ 健康" if score >= 90 else "⚠️ 需关注" if score >= 70
                  else "❌ 严重问题")
-        return (f"健康评分 {score}/100（{level}）："
+        base = (f"健康评分 {score}/100（{level}）："
                 f"表缺失 {sum(1 for t in tables.values() if t.get('issue') and '不存在' in t['issue'])} 张，"
                 f"K线检查 {kline.get('sampled', 0)} 只股票，"
                 f"OHLC 异常 {kline.get('ohlc_bad_rows', 0)} 行，"
                 f"缺口 {kline.get('date_gaps', 0)} 处")
+        if freshness and freshness.get("stale"):
+            names = "、".join(f"{s['table']}({s.get('latest')})"
+                              for s in freshness["stale"])
+            base += f"；⚠️ 数据陈旧：{names}"
+        return base
 
 
 _generator: Optional[DataQualityReport] = None
@@ -230,6 +303,20 @@ def format_report(result: dict[str, Any]) -> str:
         f"- NaN：{k.get('nan_rows', 0)} 行",
         f"- 交易日缺口（>{GAP_THRESHOLD_DAYS} 天）：{k.get('date_gaps', 0)} 处",
     ])
+    f = result.get("freshness") or {}
+    lines.extend([
+        "",
+        "### 数据新鲜度",
+        f"- 应到交易日：{f.get('expected_last_trading_day') or '—'}",
+    ])
+    for t, d in (f.get("latest") or {}).items():
+        lines.append(f"- {t} 最新：{d}")
+    if f.get("stale"):
+        lines.append("- **⚠️ 陈旧表：**")
+        for s in f["stale"]:
+            lines.append(f"  - {s['message']}")
+    elif f:
+        lines.append("- 无陈旧数据 ✅")
     if result["issues"]:
         lines.append("\n### 问题清单")
         for i in result["issues"][:10]:

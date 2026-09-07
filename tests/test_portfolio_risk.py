@@ -121,13 +121,41 @@ def test_portfolio_plan_fields(tmp_path):
     assert "登记理由" in text
 
 
-def test_beginner_guide_md():
-    """新手引导横幅：三步走 + 数据状态。"""
-    from pa_mcp.ui.gradio_app import beginner_guide_md
-    text = beginner_guide_md()
-    assert "新手三步走" in text
-    assert "今日操作" in text
-    assert "数据状态" in text
+def test_beginner_guide_md(monkeypatch, tmp_path):
+    """新手引导横幅：三步走 + 数据状态。
+
+    原实现直接读共享生产库（get_settings().database.path），全量跑时若生产库
+    正被其它测试的写连接占用（DuckDB 单文件排他锁）会偶发失败（banner 为空 →
+    断言「数据状态」失败）。这里注入一个隔离库，消除对生产库的依赖与 flaky。
+    """
+    import pa_mcp.config as cfg
+    from pa_mcp.data.store import DuckDBStore
+
+    db_path = str(tmp_path / "guide_test.duckdb")
+    store = DuckDBStore(db_path)
+    store.connect()
+    # 塞一条 kline 使「数据状态」横幅能渲染出内容
+    store.insert_df("kline_daily", pd.DataFrame([{
+        "symbol": "600519", "date": pd.Timestamp("2026-09-04").date(),
+        "open": 1300.0, "high": 1320.0, "low": 1290.0, "close": 1307.88,
+        "volume": 1e6, "amount": 1e9, "pct_change": 1.0, "change": 10.0,
+    }]))
+    store.close()
+
+    # 指向隔离库的 settings（沿用当前配置，仅改 database.path）
+    settings = cfg.get_settings()
+    settings.database.path = db_path
+    monkeypatch.setattr(cfg, "_settings", settings)
+    try:
+        from pa_mcp.ui.gradio_app import beginner_guide_md
+        text = beginner_guide_md()
+        assert "新手三步走" in text
+        assert "今日操作" in text
+        assert "数据状态" in text
+        assert "行情更新至" in text
+    finally:
+        # 还原，避免影响同进程其它依赖默认库的测试
+        cfg._settings = None
 
 
 def test_market_bias_adjustment(tmp_path):

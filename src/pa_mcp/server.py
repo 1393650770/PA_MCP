@@ -18,7 +18,12 @@ from mcp.server.fastmcp import FastMCP, Context
 
 from pa_mcp.config import get_settings, Settings
 from pa_mcp.data import AKShareAdapter, CacheManager, DataValidator, DuckDBStore, SinaAdapter
-from pa_mcp.risk.guard import RiskGuard
+from pa_mcp.risk.guard import (
+    CandidateOrder,
+    PortfolioSnapshot,
+    RiskDecision,
+    RiskGuard,
+)
 from pa_mcp.tools.utils import format_error, not_found_error
 from pa_mcp.tools.prompts import PROMPTS
 
@@ -154,6 +159,116 @@ def _json_safe(value: Any) -> Any:
     except Exception:
         pass
     return value
+
+
+def _get_guard() -> RiskGuard:
+    """获取 lifespan 中创建的 RiskGuard 单例。
+
+    风控状态（暂停标记、连续亏损计数、日内亏损）必须跨调用持久，否则
+    「连续 N 次亏损停手」「日内亏损熔断」永远不会触发。
+    """
+    global _guard
+    if _guard is None:
+        _guard = RiskGuard()
+    return _guard
+
+
+def _check_tradability(symbol: str) -> Optional[str]:
+    """下单前硬拦截：ST / 退市 / 停牌。数据缺失时返回 None（不拦）。
+
+    stock_basic.is_st / is_suspended 由数据管线维护；若整列为 NULL
+    （老数据），则不拦截，避免误拒。
+    """
+    if _store is None:
+        return None
+    try:
+        df = _store.query_df(
+            "SELECT name, is_st, is_suspended FROM stock_basic WHERE symbol = ?",
+            [symbol])
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    row = df.iloc[0]
+    name = str(row.get("name") or "")
+    # 缺失值安全判断：is_st / is_suspended 可能为 NaN/None（老数据整列为空）
+    def _truthy(v) -> bool:
+        try:
+            import pandas as _pd
+            if _pd.isna(v):
+                return False
+        except Exception:
+            pass
+        return bool(v)
+
+    if _truthy(row.get("is_st")) or "ST" in name.upper() or "退" in name:
+        return f"禁止交易 ST/退市股：{symbol} {name}"
+    if _truthy(row.get("is_suspended")):
+        return f"禁止交易停牌股：{symbol} {name}"
+    return None
+
+
+def _last_price(symbol: str) -> float:
+    """取最近收盘价（用于估算订单权重）；取不到返回 0。"""
+    if _store is None:
+        return 0.0
+    try:
+        df = _store.query_df(
+            "SELECT close FROM kline_daily WHERE symbol = ? "
+            "ORDER BY date DESC LIMIT 1", [symbol])
+        if not df.empty:
+            return float(df.iloc[0]["close"])
+    except Exception:
+        pass
+    return 0.0
+
+
+def _sector_of(symbol: str) -> str:
+    """取行业/板块（用于行业敞口约束）；取不到返回空串。"""
+    if _store is None:
+        return ""
+    try:
+        df = _store.query_df(
+            "SELECT sector FROM stock_basic WHERE symbol = ?", [symbol])
+        if not df.empty:
+            return str(df.iloc[0].get("sector") or "")
+    except Exception:
+        pass
+    return ""
+
+
+async def _build_risk_snapshot(broker: Any) -> PortfolioSnapshot:
+    """由券商账户 + 行情构建风控快照（仓位权重 / NAV / 回撤）。"""
+    guard = _get_guard()
+    positions_value: dict[str, float] = {}
+    cash = 0.0
+    try:
+        acct = await broker.get_account()
+    except Exception:
+        acct = None
+
+    if acct is not None:
+        cash = float(getattr(acct, "cash", 0.0) or 0.0)
+        for p in getattr(acct, "positions", []) or []:
+            px = _last_price(p.symbol) or float(getattr(p, "avg_cost", 0.0) or 0.0)
+            positions_value[p.symbol] = p.quantity * px
+
+    market_value = sum(positions_value.values())
+    nav = market_value + cash
+    if nav <= 0:
+        nav = 100000.0  # 兜底：避免除零导致权重失真
+    weights = {k: (v / nav if nav else 0.0) for k, v in positions_value.items()}
+
+    peak = getattr(guard, "_peak_nav", 0.0) or 0.0
+    if nav > peak:
+        peak = nav
+        guard._peak_nav = peak
+    drawdown = ((nav - peak) / peak) if peak > 0 else 0.0
+
+    return PortfolioSnapshot(
+        cash=cash, positions=weights, nav=nav, peak_nav=peak or nav,
+        drawdown_pct=drawdown,
+    )
 
 
 def _response(
@@ -4186,16 +4301,48 @@ async def place_order(symbol: str, side: str, quantity: int,
                              error_type="LIVE_TRADING_DISABLED")
 
         # ── 风控（不可绕过）──
-        from pa_mcp.risk.guard import RiskGuard
-        guard = RiskGuard()
-        # 轻量风控：暂停期/单票仓位粗检（候选订单权重按资金比例粗估）
-        snapshot = guard.snapshot_from_store(_store) if hasattr(
-            guard, "snapshot_from_store") else None
+        # 注意：此前这里每次 new 一个 RiskGuard（状态不持久）且从未调用
+        # check_single_order，"不可绕过"名不副实 —— 单票上限/总仓位/回撤
+        # 硬止损/连续亏损停手全部形同虚设。现改为使用 lifespan 中的持久
+        # guard 实例，并真正执行约束校验。
+        guard = _get_guard()
         decision_id = f"risk_{uuid.uuid4().hex[:10]}"
         if not guard.is_trading_allowed:
             return _response(success=False,
                              error="风控暂停交易（Trading paused）",
                              error_type="RISK_REJECTED")
+
+        # 硬拦截：ST / 退市 / 停牌股（数据来自 stock_basic，缺失则不拦）
+        block = _check_tradability(symbol)
+        if block:
+            return _response(success=False, error=block,
+                             error_type="RISK_REJECTED")
+
+        # 组合快照 + 订单权重 → 真实约束校验
+        snapshot = await _build_risk_snapshot(broker)
+        est_value = quantity * (limit_price if limit_price > 0 else _last_price(symbol))
+        weight_pct = (est_value / snapshot.nav) if snapshot.nav > 0 else 0.0
+
+        verdict = guard.check_single_order(
+            snapshot,
+            CandidateOrder(symbol=symbol, side=side, quantity=quantity,
+                           price=limit_price, weight_pct=weight_pct,
+                           sector=_sector_of(symbol)),
+        )
+        if verdict.decision == RiskDecision.REJECT:
+            return _response(success=False,
+                             error=f"风控拒绝：{verdict.reason}",
+                             error_type="RISK_REJECTED")
+        if verdict.decision == RiskDecision.ADJUST and verdict.adjusted_quantity:
+            adjusted = int(verdict.adjusted_quantity // 100 * 100)
+            if adjusted <= 0:
+                return _response(success=False,
+                                 error=f"风控削减后数量为 0：{verdict.reason}",
+                                 error_type="RISK_REJECTED")
+            logger.warning("Order quantity reduced by risk guard",
+                           symbol=symbol, quantity=quantity,
+                           adjusted=adjusted, reason=verdict.reason)
+            quantity = adjusted
 
         order = BrokerOrder(
             client_order_id=f"pa_{uuid.uuid4().hex[:16]}",
@@ -4211,6 +4358,8 @@ async def place_order(symbol: str, side: str, quantity: int,
             "symbol": symbol, "side": side, "quantity": quantity,
             "limit_price": limit_price, "mode": mode,
             "risk_decision_id": decision_id,
+            "risk_verdict": verdict.decision.value,
+            "risk_reason": verdict.reason or "",
             "note": ("纸面成交（虚拟）" if mode == "paper" else "实盘订单已提交"),
         }, source="broker")
     except Exception as e:
