@@ -10,7 +10,7 @@ import asyncio
 import time
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 
@@ -134,6 +134,8 @@ class DataUpdateScheduler:
             ("6_capital_flow", self._update_capital_flow, True),
             ("7_dragon_tiger", self._update_dragon_tiger, True),
             ("8_indicators", self._update_indicators, True),
+            ("9_index_daily", self._update_index_daily, True),
+            ("10_sentiment", self._update_sentiment, True),
         ]
 
         for phase_name, phase_func, is_implemented in phases:
@@ -457,6 +459,31 @@ class DataUpdateScheduler:
             logger.info("Incremental kline universe", count=len(symbols))
         return symbols
 
+    def _kline_latest_dates(self, table: str = "kline_daily") -> dict[str, date]:
+        """{symbol: 库内最新交易日}。
+
+        用于动态计算增量起点：固定 30 天窗口只能补「近一个月内」的缺口，
+        一旦某只标的落后更久（源抖动/停牌/新加自选），就永远补不回来。
+        """
+        try:
+            df = self._store.query_df(
+                f"SELECT symbol, MAX(date) AS d FROM {table} GROUP BY symbol")
+            if df.empty:
+                return {}
+            return {str(s): self._as_date(d) for s, d in zip(df["symbol"], df["d"])}
+        except Exception:
+            return {}
+
+    @classmethod
+    def _df_max_date(cls, df: Optional[pd.DataFrame], col: str = "date") -> Optional[date]:
+        """取 DataFrame 某日期列的最大值（用于写 checkpoint 的 last_date）。"""
+        if df is None or df.empty or col not in getattr(df, "columns", []):
+            return None
+        try:
+            return cls._as_date(pd.to_datetime(df[col], errors="coerce").max())
+        except Exception:
+            return None
+
     async def _update_daily_kline(self, force_full: bool) -> int:
         """Update daily kline for all stocks (incremental) — multi-source."""
         store = self._store
@@ -489,27 +516,46 @@ class DataUpdateScheduler:
         logger.info("Kline update targets", count=len(symbols),
                     mode="full" if force_full else "incremental(db)")
 
+        # ---- 按 checkpoint(日期维度) 拆分待拉清单 ----
+        # 旧逻辑「跑过就跳过」导致一轮之后 pending 恒为空、增量形同虚设；
+        # 现在只有 last_date >= 目标交易日 才跳过。
+        target = self._target_trade_date()
+        latest = self._kline_latest_dates()
+        # 库内完全无 K 线的标的（新加自选/持仓、或曾拉空留下断点）强制重拉
+        always = {s for s in symbols if s not in latest}
+        pending, skipped = self._split_pending(
+            "kline_daily", symbols, target, always=always)
+        logger.info(
+            "Kline checkpoint",
+            target=target.isoformat(), pending=len(pending),
+            skipped=skipped, no_data_forced=len(always),
+        )
+
         updated = 0
+        empty = 0
         batch_size = 50
-        total_batches = (len(symbols) + batch_size - 1) // batch_size
+        total_batches = (len(pending) + batch_size - 1) // batch_size or 1
         source_stats: dict[str, int] = {}  # source -> rows served
-
-        # 断点续传：跳过已完成的 symbol
-        done = self._get_checkpoint("kline_daily")
-        pending = [s for s in symbols if s not in done]
-        if done:
-            logger.info(
-                "Checkpoint resume",
-                done=len(done), pending=len(pending), total=len(symbols),
-            )
-
-        skipped = 0
         failed: list[str] = []
+        consecutive_failed = 0
+
+        if not pending:
+            logger.info("Kline already up to date", target=target.isoformat())
+            return 0
+
         for batch_start in range(0, len(pending), batch_size):
             batch = pending[batch_start:batch_start + batch_size]
             for sym in batch:
                 try:
-                    start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+                    # 增量起点按库内最新日期动态计算：落后多久都能补回
+                    # （固定 30 天窗口曾让落后标的永远补不上）
+                    base = latest.get(sym)
+                    if base is None:
+                        start_date = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+                    else:
+                        # 回退 7 天做重叠：qfq 复权因子重算会改写近期行
+                        start_date = (base - timedelta(days=7)).strftime("%Y%m%d")
+
                     if self._router is not None:
                         df, source_name = await self._router.fetch_daily_kline(
                             symbol=sym, period="daily",
@@ -523,31 +569,51 @@ class DataUpdateScheduler:
                             start_date=start_date, end_date=today,
                             adjust="qfq",
                         )
-                    if not df.empty:
+
+                    max_d = self._df_max_date(df)
+                    if df is not None and not df.empty:
                         store.insert_df("kline_daily", self._to_table_df(df, "kline_daily"), mode="append")
                         updated += len(df)
-                    # 记录 checkpoint（成功即记，允许断点续传）
-                    self._set_checkpoint("kline_daily", sym)
+                        if max_d:
+                            latest[sym] = max(latest[sym], max_d) if latest.get(sym) else max_d
+                    else:
+                        # 拉空（停牌/退市/源无此标的）：记 last_date=目标日，
+                        # 当天不重试；次日目标日推进后会自然重试。
+                        empty += 1
+                    # 只有「没抛异常」才写点 —— 失败必须留待下次重试
+                    self._set_checkpoint("kline_daily", sym, max_d or target)
+                    consecutive_failed = 0
                 except Exception as e:
                     failed.append(sym)
+                    consecutive_failed += 1
                     logger.debug("Kline fetch failed for symbol", symbol=sym, error=str(e))
+                    if consecutive_failed >= self.MAX_CONSECUTIVE_FAILURES:
+                        logger.warning(
+                            "Kline source down, aborting phase",
+                            consecutive_failed=consecutive_failed,
+                            processed=batch_start + batch.index(sym) + 1,
+                        )
+                        break
+
+            if consecutive_failed >= self.MAX_CONSECUTIVE_FAILURES:
+                break
 
             batch_num = batch_start // batch_size + 1
-            done_now = len(done) + batch_start + len(batch)
-            pct = done_now / len(symbols) * 100 if symbols else 100
+            pct = (batch_start + len(batch)) / len(pending) * 100
             logger.info(
                 "Kline batch progress",
                 batch=f"{batch_num}/{total_batches}",
                 progress_pct=round(pct, 1),
-                updated_so_far=updated,
+                updated_so_far=updated, empty_so_far=empty,
                 failed_so_far=len(failed),
             )
             await asyncio.sleep(1)  # Rate limiting
 
-        coverage = round((len(symbols) - len(failed)) / len(symbols) * 100, 1) if symbols else 0
+        coverage = round((len(pending) - len(failed)) / len(pending) * 100, 1)
         logger.info(
             "Daily kline updated",
-            stocks_updated=updated, source_stats=source_stats,
+            target=target.isoformat(), pending=len(pending), skipped=skipped,
+            rows=updated, empty=empty, source_stats=source_stats,
             coverage_pct=coverage, failed=len(failed),
         )
         return updated
@@ -567,6 +633,29 @@ class DataUpdateScheduler:
         return df[keep]
 
     # ---- 断点续传 Checkpoint ----
+    #
+    # 语义（2026-09-08 修正）：checkpoint 记录「该 job 下每只标的已拉到哪个
+    # 交易日 (last_date)」，而不是「这只标的曾经成功过」。
+    #
+    # 旧实现只存 (job, symbol)，两个致命后果：
+    #   · 跑完一轮后 pending 永远为空 → 增量更新形同虚设，数据永久停更
+    #     （生产库曾出现：85 只权重股 K 线停在 08-19，而 checkpoint 显示
+    #       全部「09-03 已完成」）；
+    #   · fetch 返回空（源抖动/停牌）也照样写点 → 静默丢失且次日不重试。
+    #
+    # 新语义：
+    #   · 仅当 last_date >= 目标交易日 才跳过该标的；
+    #   · 拉空时写 last_date=目标日（当天不重试，次日目标日推进后自然重试）；
+    #   · 拉失败（抛异常）绝不写点 —— 下次必须重试。
+
+    # 连续失败熔断阈值（源整体挂掉时避免全池空转拖死 pipeline）
+    MAX_CONSECUTIVE_FAILURES = 20
+
+    # 东财资金流每次往回拉几个交易日（顺带回填近期缺口）
+    FUND_FLOW_LOOKBACK_DAYS = 5
+
+    # 指数日线：pipeline 会持续维护的主要指数
+    INDEX_SYMBOLS = ("sh000001", "sz399001", "sz399006")
 
     def _ensure_checkpoint_table(self) -> None:
         self._store.execute("""
@@ -574,30 +663,161 @@ class DataUpdateScheduler:
                 job VARCHAR(50) NOT NULL,
                 symbol VARCHAR(10) NOT NULL,
                 completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_date DATE,
                 PRIMARY KEY (job, symbol)
             )
         """)
+        # 老库迁移：补 last_date 列（DuckDB 支持 IF NOT EXISTS）
+        try:
+            self._store.execute(
+                "ALTER TABLE ingestion_checkpoint "
+                "ADD COLUMN IF NOT EXISTS last_date DATE"
+            )
+        except Exception:
+            pass
 
-    def _get_checkpoint(self, job: str) -> set[str]:
+    @staticmethod
+    def _as_date(value: Any) -> Optional[date]:
+        """把 DuckDB/ pandas 返回的日期值统一成 datetime.date。"""
+        if value is None:
+            return None
+        try:
+            # NaT / NaN 必须先判——pd.NaT 是 datetime 子类，先走 isinstance
+            # 会拿到一个非法 date
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return None
+
+    def _get_checkpoint(self, job: str) -> dict[str, Optional[date]]:
+        """返回 {symbol: 已拉到的最新交易日}（值为 None = 拉过但无数据）。"""
         try:
             self._ensure_checkpoint_table()
             df = self._store.query_df(
-                "SELECT symbol FROM ingestion_checkpoint WHERE job = ?",
+                "SELECT symbol, last_date FROM ingestion_checkpoint WHERE job = ?",
                 [job],
             )
-            return set(df["symbol"].tolist()) if not df.empty else set()
+            if df.empty:
+                return {}
+            return {
+                str(s): self._as_date(d)
+                for s, d in zip(df["symbol"], df["last_date"])
+            }
         except Exception:
-            return set()
+            return {}
 
-    def _set_checkpoint(self, job: str, symbol: str) -> None:
+    def _set_checkpoint(self, job: str, symbol: str,
+                        last_date: Optional[date] = None) -> None:
+        """记录某标的已拉到 last_date。失败路径请勿调用。"""
         try:
             self._ensure_checkpoint_table()
             self._store.execute(
-                "INSERT OR REPLACE INTO ingestion_checkpoint (job, symbol) VALUES (?, ?)",
-                [job, symbol],
+                "INSERT OR REPLACE INTO ingestion_checkpoint "
+                "(job, symbol, last_date) VALUES (?, ?, ?)",
+                [job, symbol, last_date],
             )
         except Exception:
-            pass  # checkpoint 失败不阻断主流程
+            pass  # checkpoint 失败不阻断主流程（退化为「无断点」，可重跑）
+
+    def _target_trade_date(self) -> date:
+        """本轮要拉到的目标交易日 = 最近一个「已收盘」的交易日。
+
+        收盘前（15:00 前）不把今天算作目标日——当日行情尚未定稿，
+        否则会把 last_date 记成今天而漏掉真正需要补的数据。
+        """
+        today = datetime.now().date()
+        target: Optional[date] = None
+        try:
+            df = self._store.query_df(
+                "SELECT MAX(date) FROM trade_calendar "
+                "WHERE is_trading_day AND date <= ?",
+                [today],
+            )
+            if not df.empty:
+                target = self._as_date(df.iloc[0, 0])
+        except Exception:
+            target = None
+        if target is None:
+            target = today
+
+        if target >= today and datetime.now().hour < 15:
+            try:
+                prev = self._store.query_df(
+                    "SELECT MAX(date) FROM trade_calendar "
+                    "WHERE is_trading_day AND date < ?",
+                    [today],
+                )
+                if not prev.empty:
+                    p = self._as_date(prev.iloc[0, 0])
+                    if p is not None:
+                        target = p
+            except Exception:
+                pass
+        return target
+
+    def _split_pending(self, job: str, symbols: list[str], target: date,
+                       always: Optional[set[str]] = None,
+                       ) -> tuple[list[str], int]:
+        """按 checkpoint 拆分待拉清单。
+
+        Args:
+            always: 无视 checkpoint 强制拉取的标的集（如库内完全无 K 线的
+                    自选/持仓股——它们的 checkpoint 可能是「拉空」留下的）。
+
+        Returns:
+            (待拉清单, 已跳过数量)
+        """
+        done = self._get_checkpoint(job)
+        always = always or set()
+        pending: list[str] = []
+        skipped = 0
+        for s in symbols:
+            last = done.get(s)
+            if s in always or last is None or last < target:
+                pending.append(s)
+            else:
+                skipped += 1
+        return pending, skipped
+
+    def sync_checkpoint_from_data(self, job: str, table: str,
+                                  date_col: str = "date") -> int:
+        """用目标表现有数据回填 checkpoint.last_date。
+
+        用途：升级到「日期维度 checkpoint」后的一次性迁移 —— 否则老库的
+        last_date 全为 NULL，会导致下一轮把全池重拉一遍（正确但极慢）。
+
+        返回被更新的行数。
+        """
+        try:
+            self._ensure_checkpoint_table()
+            self._store.execute(
+                f"UPDATE ingestion_checkpoint c SET last_date = "
+                f"(SELECT MAX(t.{date_col}) FROM {table} t WHERE t.symbol = c.symbol) "
+                f"WHERE c.job = ?",
+                [job],
+            )
+            # 有数据但没断点的标的（如新加的自选股）：补一条断点，避免首轮全拉
+            self._store.execute(
+                f"INSERT OR REPLACE INTO ingestion_checkpoint (job, symbol, last_date) "
+                f"SELECT ?, symbol, MAX({date_col}) FROM {table} GROUP BY symbol",
+                [job],
+            )
+            df = self._store.query_df(
+                "SELECT COUNT(*) FROM ingestion_checkpoint WHERE job = ? AND last_date IS NOT NULL",
+                [job],
+            )
+            return int(df.iloc[0, 0]) if not df.empty else 0
+        except Exception as e:
+            logger.warning("Checkpoint sync failed", job=job, error=str(e))
+            return 0
 
     def reset_checkpoint(self, job: str) -> int:
         """清空某任务的断点（全量重跑时调用）。返回删除行数。"""
@@ -633,11 +853,12 @@ class DataUpdateScheduler:
             logger.warning("No stocks in stock_basic, skipping minute kline")
             return 0
 
-        done = self._get_checkpoint("kline_minute")
-        pending = [s for s in symbols if s not in done]
+        # 分钟线是当日盘口数据：目标日就是今天，last_date < 今天即重拉
+        target = datetime.now().date()
+        pending, skipped = self._split_pending("kline_minute", symbols, target)
         logger.info(
             "Minute kline start", total=len(symbols),
-            done=len(done), pending=len(pending),
+            skipped=skipped, pending=len(pending),
         )
 
         adapter = TencentAdapter()
@@ -659,7 +880,7 @@ class DataUpdateScheduler:
                             mode="append"  # 幂等 upsert（主键冲突自动覆盖）,
                         )
                         updated += len(out)
-                    self._set_checkpoint("kline_minute", sym)
+                    self._set_checkpoint("kline_minute", sym, target)
                 except Exception as e:
                     logger.debug("Minute kline failed", symbol=sym, error=str(e)[:120])
                 if len(pending) > 10:
@@ -798,32 +1019,37 @@ class DataUpdateScheduler:
             logger.warning("No symbols to update, skipping fund flow")
             return 0
 
-        done = self._get_checkpoint("fund_flow")
-        pending = [s for s in symbols if s not in done]
+        target = self._target_trade_date()
+        pending, skipped = self._split_pending("fund_flow", symbols, target)
         logger.info(
-            "Fund flow start",
-            total=len(symbols), done=len(done), pending=len(pending),
+            "Fund flow start", target=target.isoformat(),
+            total=len(symbols), skipped=skipped, pending=len(pending),
         )
 
         adapter = EastMoneyAdapter()
         updated = 0
+        empty = 0
         failed = 0
         consecutive_failed = 0
         try:
             for i, sym in enumerate(pending):
                 try:
-                    df = await adapter.get_stock_fund_flow(sym, days=1)
+                    # 多取几天：既补当日，也顺带回填前几天可能的缺口
+                    df = await adapter.get_stock_fund_flow(sym, days=self.FUND_FLOW_LOOKBACK_DAYS)
+                    max_d = self._df_max_date(df, "trade_date")
                     if not df.empty:
-                        # 只保留最新一行入库
-                        df = df.tail(1)
                         self._store.insert_df(
                             "fund_flow_daily",
                             self._to_table_df(df, "fund_flow_daily"),
-                            mode="append"  # 幂等 upsert（主键冲突自动覆盖）,
+                            mode="append",  # 幂等 upsert（主键冲突自动覆盖）
                         )
-                        updated += 1
+                        updated += len(df)
+                    else:
+                        empty += 1
                     consecutive_failed = 0
-                    self._set_checkpoint("fund_flow", sym)
+                    # 与 kline 同款语义：只有没抛异常才写点；拉空记目标日，
+                    # 当日不重试、次日目标日推进后自然重试。
+                    self._set_checkpoint("fund_flow", sym, max_d or target)
                 except Exception:
                     failed += 1
                     consecutive_failed += 1
@@ -839,8 +1065,8 @@ class DataUpdateScheduler:
                 if (i + 1) % 50 == 0:
                     logger.info(
                         "Fund flow progress",
-                        done=len(done) + i + 1, total=len(symbols),
-                        updated=updated, failed=failed,
+                        done=i + 1, total=len(pending),
+                        updated=updated, empty=empty, failed=failed,
                     )
                 await asyncio.sleep(1.2)  # 东财限流
         finally:
@@ -848,7 +1074,7 @@ class DataUpdateScheduler:
 
         logger.info(
             "Fund flow updated",
-            stocks_updated=updated, failed=failed,
+            stocks_updated=updated, empty=empty, failed=failed,
         )
         return updated
 
@@ -928,6 +1154,86 @@ class DataUpdateScheduler:
         except Exception as e:
             logger.warning("Indicator pre-computation skipped", error=str(e))
             return 0
+
+    async def _update_index_daily(self, force_full: bool) -> int:
+        """维护主要指数日线（index_daily）。
+
+        此前 pipeline 根本没有这一 phase —— index_daily 只在 readiness
+        被研究工具触发时「缺数据才拉一次」，于是长期停在 08-14。
+        纳入日常调度后按库内最新日期增量续拉。
+        """
+        if self._router is None:
+            raise RuntimeError("Router required for index daily update")
+
+        target = self._target_trade_date()
+        latest: dict[str, Optional[date]] = {}
+        try:
+            df = self._store.query_df(
+                "SELECT symbol, MAX(date) AS d FROM index_daily GROUP BY symbol")
+            if not df.empty:
+                latest = {str(s): self._as_date(d)
+                          for s, d in zip(df["symbol"], df["d"])}
+        except Exception:
+            latest = {}
+
+        today = datetime.now().strftime("%Y%m%d")
+        updated = 0
+        for sym in self.INDEX_SYMBOLS:
+            base = latest.get(sym)
+            if base is not None and base >= target:
+                continue
+            start_date = (
+                (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+                if base is None
+                else (base - timedelta(days=7)).strftime("%Y%m%d")
+            )
+            try:
+                df, _src = await self._router.fetch_daily_kline(
+                    symbol=sym, period="daily",
+                    start_date=start_date, end_date=today, adjust="qfq",
+                )
+                if df is None or df.empty:
+                    continue
+                df = df.copy()
+                df["symbol"] = sym
+                self._store.insert_df(
+                    "index_daily",
+                    self._to_table_df(df, "index_daily"),
+                    mode="append",  # 幂等 upsert（主键 symbol+date）
+                )
+                updated += len(df)
+            except Exception as e:
+                logger.warning("Index daily failed", symbol=sym, error=str(e)[:120])
+            await asyncio.sleep(0.5)
+
+        logger.info("Index daily updated", rows=updated,
+                    target=target.isoformat(), symbols=len(self.INDEX_SYMBOLS))
+        return updated
+
+    async def _update_sentiment(self, force_full: bool) -> int:
+        """维护游资情绪日统计（sentiment_daily）。
+
+        此前同样没有调度入口，只有 readiness 临时算一次 —— 表停在 08-14。
+        注意：SentimentCycleAnalyzer.analyze() 的实时分支内部用 asyncio.run，
+        在本 pipeline 的事件循环里会抛 RuntimeError，故强制走库内计算分支
+        （use_realtime=False）。
+        """
+        from pa_mcp.research.sentiment_cycle import SentimentCycleAnalyzer
+
+        try:
+            result = await asyncio.to_thread(
+                SentimentCycleAnalyzer().analyze, None, 5, False)
+        except Exception as e:
+            logger.warning("Sentiment computation failed", error=str(e)[:200])
+            return 0
+
+        if not isinstance(result, dict) or "error" in result:
+            logger.warning("Sentiment unavailable", detail=str(result)[:200])
+            return 0
+
+        logger.info("Sentiment updated", date=result.get("date"),
+                    stage=result.get("stage"))
+        return 1
 
 
 # ---- Module Entry Point ----

@@ -37,8 +37,10 @@ class EastMoneyAdapter:
         "trade_calendar": "unavailable",
         "benchmark_total_return": "unavailable",
         "events": "unavailable",
-        "fund_flow": "unavailable",
-        "dragon_tiger": "unavailable",
+        # 已实现 get_stock_fund_flow / get_dragon_tiger；此前误标 unavailable，
+        # 导致 router 永远不会把资金流/龙虎榜请求路由到东财。
+        "fund_flow": "available",
+        "dragon_tiger": "available",
     }
 
     volume_unit = "shares"  # 东财 volume 单位就是股
@@ -46,6 +48,7 @@ class EastMoneyAdapter:
     def __init__(self, timeout: int = 15) -> None:
         self.timeout = timeout
         self._client: Any = None
+        self._host: Optional[str] = None  # 最近一次成功的接入域名（粘滞复用）
 
     @classmethod
     def supports(cls, capability: str) -> bool:
@@ -57,7 +60,12 @@ class EastMoneyAdapter:
             import httpx
             self._client = httpx.AsyncClient(
                 timeout=self.timeout,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                # 东财对无 Referer 的请求直接断开连接（不返回 HTTP 错误，
+                # 而是 Server disconnected），曾导致资金流/龙虎榜长期静默全空。
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": "https://data.eastmoney.com/",
+                },
             )
         return self._client
 
@@ -65,6 +73,43 @@ class EastMoneyAdapter:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    # 东财有多个接入域名。实测同一网络环境下部分域名会对 httpx 直接断开连接
+    # （RemoteProtocolError: Server disconnected），且不返回 HTTP 错误 ——
+    # 曾让资金流/龙虎榜长期静默全空。逐个 fallback 才能保证稳定。
+    _HOSTS = ("push2his.eastmoney.com", "push2.eastmoney.com",
+              "push2delay.eastmoney.com")
+
+    async def _get_json(self, path: str, params: dict) -> dict:
+        """GET 东财 JSON 接口，按域名顺序 fallback。全部失败才抛出。
+
+        命中过的域名会被「粘住」优先复用：每只标的都从第一个域名重试一遍
+        会白白多花 2~3 秒（1096 只 ≈ 多跑 40 分钟）。
+        """
+        from urllib.parse import urlencode
+
+        client = await self._get_client()
+        query = urlencode(params)
+        ordered = ([self._host] if self._host else []) + [
+            h for h in self._HOSTS if h != self._host]
+
+        last_error: Optional[Exception] = None
+        for host in ordered:
+            try:
+                response = await client.get(f"https://{host}{path}?{query}")
+                response.raise_for_status()
+                data = response.json()
+                self._host = host  # 粘住可用域名
+                return data
+            except Exception as e:  # noqa: BLE001 - 逐域名降级
+                last_error = e
+                if self._host == host:
+                    self._host = None  # 粘住的域名失效 → 重新探测
+                logger.debug("EastMoney host failed", host=host,
+                             error=str(e)[:120])
+                continue
+        raise RuntimeError(
+            f"EastMoney unreachable on all hosts ({self._HOSTS}): {last_error}")
 
     @staticmethod
     def _to_secid(symbol: str) -> str:
@@ -121,23 +166,18 @@ class EastMoneyAdapter:
         beg = start_date or "20230101"
         end = end_date or "20500101"
 
-        url = (
-            f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            f"?secid={secid}"
-            f"&fields1=f1,f2,f3,f4,f5,f6"
-            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58"
-            f"&klt={klt}&fqt={fqt}"
-            f"&beg={beg}&end={end}"
+        data = await self._get_json(
+            "/api/qt/stock/kline/get",
+            {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "klt": str(klt),
+                "fqt": str(fqt),
+                "beg": beg,
+                "end": end,
+            },
         )
-
-        client = await self._get_client()
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            logger.error("EastMoney kline failed", symbol=symbol, error=str(e))
-            raise
 
         rows = self._parse_klines(data)
         if not rows:
@@ -262,22 +302,16 @@ class EastMoneyAdapter:
             days: Number of days (lmt param)
         """
         secid = self._to_secid(symbol)
-        url = (
-            "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
-            f"?secid={secid}"
-            "&fields1=f1,f2,f3,f7"
-            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
-            f"&klt=101&lmt={days}"
+        data = await self._get_json(
+            "/api/qt/stock/fflow/kline/get",
+            {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "klt": "101",
+                "lmt": str(days),
+            },
         )
-
-        client = await self._get_client()
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            logger.error("EastMoney fund flow failed", symbol=symbol, error=str(e))
-            raise
 
         klines = data.get("data", {}).get("klines") or []
         if not klines:
@@ -286,7 +320,10 @@ class EastMoneyAdapter:
         rows = []
         for line in klines:
             parts = str(line).split(",")
-            if len(parts) < 7:
+            # 实测东财只返回 6 段（date,main,small,mid,large,super_large），
+            # 第 7 段 main_net_pct 常缺失；旧代码要求 >=7 段 → 每行都被丢弃，
+            # 于是 fund_flow_daily 长期 0 行且无任何报错。
+            if len(parts) < 6:
                 continue
             try:
                 rows.append({
@@ -359,22 +396,15 @@ class EastMoneyAdapter:
         """
         if not sector_code.upper().startswith("BK"):
             raise ValueError(f"板块代码须为 BK 前缀：{sector_code}")
-        url = (
-            "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            f"?secid=90.{sector_code.upper()}"
-            "&fields1=f1,f2,f3,f4,f5,f6"
-            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-            f"&klt=101&fqt=1&lmt={days}"
+        data = await self._get_json(
+            "/api/qt/stock/kline/get",
+            {
+                "secid": f"90.{sector_code.upper()}",
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "klt": "101", "fqt": "1", "lmt": str(days),
+            },
         )
-        client = await self._get_client()
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            logger.error("EastMoney sector kline failed",
-                         sector=sector_code, error=str(e))
-            raise
 
         klines = data.get("data", {}).get("klines") or []
         rows = []
@@ -406,28 +436,21 @@ class EastMoneyAdapter:
 
         字段：trade_date, main_net_inflow, small/mid/large/super_large, main_net_pct
         """
-        url = (
-            "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
-            f"?secid=90.{sector_code.upper()}"
-            "&fields1=f1,f2,f3,f7"
-            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
-            f"&klt=101&lmt={days}"
+        data = await self._get_json(
+            "/api/qt/stock/fflow/kline/get",
+            {
+                "secid": f"90.{sector_code.upper()}",
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "klt": "101", "lmt": str(days),
+            },
         )
-        client = await self._get_client()
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            logger.error("EastMoney sector fund flow failed",
-                         sector=sector_code, error=str(e))
-            raise
 
         klines = data.get("data", {}).get("klines") or []
         rows = []
         for line in klines:
             parts = str(line).split(",")
-            if len(parts) < 7:
+            if len(parts) < 6:  # 第 7 段 main_net_pct 常缺失（同个股资金流）
                 continue
             try:
                 rows.append({
