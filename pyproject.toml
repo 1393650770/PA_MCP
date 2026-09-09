@@ -22,6 +22,11 @@ dependencies = [
     "croniter>=2.0.0",
     "structlog>=24.0.0",
     "anthropic>=0.40.0",
+    # 可视化图表（chart_kline / chart_fund_flow / chart_compare /
+    # chart_sector_rotation / chart_sentiment）需要 plotly + kaleido 导出 PNG
+    # 以供 OpenClaw qqbot-media 通道推送 QQBot。
+    "plotly>=5.22.0",
+    "kaleido>=0.2.1",
 ]
 
 [project.optional-dependencies]

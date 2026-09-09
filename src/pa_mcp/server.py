@@ -26,6 +26,7 @@ from pa_mcp.risk.guard import (
 )
 from pa_mcp.tools.utils import format_error, not_found_error
 from pa_mcp.tools.prompts import PROMPTS
+from pa_mcp.charts import render as chart_render
 
 logger = structlog.get_logger(__name__)
 
@@ -2320,6 +2321,294 @@ async def predict_future_chart(symbol: str, horizon: int = 20) -> dict[str, Any]
         return _response(data=result)
     except Exception as e:
         logger.error("predict_future_chart failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+# ---- MCP Tools: Visualization Charts (PNG → OpenClaw → QQBot) ----
+#
+# 设计目标：把 PNG 落到 OpenClaw qqbot-media 白名单目录
+# （`~/.openclaw/media/qqbot/pamcp/charts/`），返回的 data.qqmedia 字段
+# 已是 `<qqmedia>绝对路径</qqmedia>` 标签，cron prompt 把它原样转发即可。
+# OpenClaw 0 自动识别 .png 扩展名为图片并上传到 QQ Bot；无需再读文件。
+#
+# 复用 `pa_mcp.charts.figures` 的纯函数式 figure builders（同套配色/语义，
+# 跟 Gradio UI 完全一致），由 `pa_mcp.charts.render` 负责 PNG 导出 + 目录
+# 选择 + 旧文件清理。
+
+from pa_mcp.charts import figures as chart_figs
+
+
+async def _query_kline(symbol: str, days: int = 120) -> pd.DataFrame:
+    """本地 DB 取 K 线；不足再走 router 补齐，最后一段必走网络（最新几天）。"""
+    if _store is None:
+        return pd.DataFrame()
+    try:
+        end = datetime.now().date()
+        start = end - timedelta(days=days * 2)
+        df = _store.query_df(
+            "SELECT date, open, high, low, close, volume FROM kline_daily "
+            "WHERE symbol = ? AND date >= ? AND date <= ? ORDER BY date ASC",
+            [symbol, start.isoformat(), end.isoformat()],
+        )
+        if df is None or df.empty:
+            df, _ = await _get_kline_fallback(symbol, days=days)
+        else:
+            # DB 最新一日若不是今天/昨天 → 增量补齐
+            latest = pd.to_datetime(df["date"]).max().date() if len(df) else None
+            if latest is None or (end - latest).days > 1:
+                fresh, _ = await _get_kline_fallback(symbol, days=8)
+                if fresh is not None and not fresh.empty:
+                    fresh = fresh[["date", "open", "high", "low", "close", "volume"]]
+                    df = pd.concat([df, fresh]).drop_duplicates(
+                        subset="date", keep="last").sort_values("date").reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+async def _query_fund_flow(symbol: str, days: int = 30) -> pd.DataFrame:
+    """本地 DB 取资金流；缺失走 router。"""
+    if _store is None:
+        return pd.DataFrame()
+    try:
+        end = datetime.now().date()
+        start = end - timedelta(days=days * 2 + 5)
+        df = _store.query_df(
+            "SELECT trade_date, main_net_inflow, super_large_net_inflow, "
+            "large_net_inflow, mid_net_inflow, small_net_inflow "
+            "FROM fund_flow_daily WHERE symbol = ? AND trade_date >= ? "
+            "AND trade_date <= ? ORDER BY trade_date ASC",
+            [symbol, start.isoformat(), end.isoformat()],
+        )
+        if df is None or df.empty:
+            try:
+                from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
+                df = await EastMoneyAdapter().get_stock_fund_flow(
+                    symbol, days=max(days, 5))
+            except Exception:
+                pass
+        return df if df is not None else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+async def _stock_name(symbol: str) -> str:
+    try:
+        from pa_mcp.data.symbols import get_stock_name
+        return get_stock_name(symbol)
+    except Exception:
+        return ""
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_kline(symbol: str, days: int = 120,
+                      ma: str = "5,10,20,60",
+                      with_prediction: bool = False,
+                      width: int = 1280, height: int = 720) -> dict[str, Any]:
+    """K线图（蜡烛 + 均线 + 成交量副图），输出 PNG 供 OpenClaw 推送 QQBot。
+
+    Args:
+        symbol: 股票代码（如 '600196'）
+        days: K 线天数（默认 120 个交易日）
+        ma: 叠加均线窗口，逗号分隔（默认 5,10,20,60）
+        with_prediction: 是否叠加 predict_future_chart 的三情景预测路径
+        width, height: 像素（导出时 ×2 高清；上限约 1600×900）
+
+    Returns:
+        data.path    PNG 绝对路径
+        data.qqmedia 已包装好的 `<qqmedia>path</qqmedia>`，直接发给 QQBot
+        data.{bytes,width,height} 元信息
+    """
+    try:
+        df = await _query_kline(symbol, days=days)
+        if df.empty:
+            return _response(success=False,
+                             error=f"无 {symbol} K线数据",
+                             error_type="NOT_FOUND")
+
+        try:
+            ma_list = [int(x) for x in ma.split(",") if x.strip().isdigit()]
+        except Exception:
+            ma_list = [5, 10, 20, 60]
+
+        pred = None
+        if with_prediction:
+            try:
+                p = await predict_future_chart(symbol, horizon=20)
+                if p.get("success"):
+                    pred = p["data"].get("scenarios")
+            except Exception:
+                pred = None
+
+        name = await _stock_name(symbol)
+        fig = chart_figs.kline_figure(df, symbol, name,
+                                      ma_list=ma_list,
+                                      with_prediction=pred)
+        out = chart_render.render(
+            fig, prefix=f"{symbol}_kline",
+            title=f"{name or symbol} 日K线",
+            width=width, height=height,
+        )
+        return _response(success=True, data=out)
+    except Exception as e:
+        logger.error("chart_kline failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_fund_flow(symbol: str, days: int = 30,
+                          width: int = 1280, height: int = 480) -> dict[str, Any]:
+    """个股资金流图（主力/超大/大/中/小 单柱状，亿元），输出 PNG。
+
+    Args:
+        symbol: 股票代码
+        days: 历史天数（默认 30）
+        width, height: 像素
+    """
+    try:
+        df = await _query_fund_flow(symbol, days=days)
+        if df.empty:
+            return _response(success=False,
+                             error=f"无 {symbol} 资金流数据",
+                             error_type="NOT_FOUND")
+
+        name = await _stock_name(symbol)
+        fig = chart_figs.fund_flow_figure(df, symbol, name)
+        out = chart_render.render(
+            fig, prefix=f"{symbol}_fundflow",
+            title=f"{name or symbol} 资金流", width=width, height=height,
+        )
+        return _response(success=True, data=out)
+    except Exception as e:
+        logger.error("chart_fund_flow failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_compare(symbols: str, days: int = 120,
+                        width: int = 1280, height: int = 720) -> dict[str, Any]:
+    """多股归一化对比（首日=100），PNG。
+
+    Args:
+        symbols: 逗号分隔，最多 5 个（如 '000001,600036,300750'）
+        days: 各股回看天数（默认 120）
+        width, height: 像素
+    """
+    try:
+        syms = [s.strip() for s in symbols.split(",") if s.strip()]
+        if len(syms) < 2:
+            return _response(success=False,
+                             error="symbols 至少 2 个（逗号分隔）",
+                             error_type="BAD_REQUEST")
+        if len(syms) > 5:
+            return _response(success=False,
+                             error="最多对比 5 只", error_type="BAD_REQUEST")
+
+        series: dict[str, pd.DataFrame] = {}
+        name_map: dict[str, str] = {}
+        for s in syms:
+            name_map[s] = await _stock_name(s)
+            try:
+                df = await _query_kline(s, days=days)
+                if df is not None and not df.empty:
+                    series[s] = df
+            except Exception:
+                continue
+        if not series:
+            return _response(success=False,
+                             error="全部标的均无数据", error_type="NOT_FOUND")
+
+        fig = chart_figs.compare_figure(series, name_map, days=days)
+        out = chart_render.render(
+            fig, prefix="cmp",
+            title="多股归一化对比",
+            width=width, height=height,
+        )
+        out["symbols"] = list(series.keys())
+        return _response(success=True, data=out)
+    except Exception as e:
+        logger.error("chart_compare failed", symbols=symbols, error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_sector_rotation(top_n: int = 20,
+                                width: int = 1280, height: int = 560) -> dict[str, Any]:
+    """板块强度图（按当日涨幅 / 资金流排序），PNG。
+
+    依赖 sector_daily 表；若表为空会回退到 readiness._load_sectors 即时合成。
+    """
+    try:
+        df = pd.DataFrame()
+        if _store is not None:
+            try:
+                df = _store.query_df(
+                    "SELECT sector_code, name, pct_change, main_net_inflow "
+                    "FROM sector_daily WHERE date = (SELECT MAX(date) FROM sector_daily) "
+                    "ORDER BY main_net_inflow DESC LIMIT 200")
+            except Exception:
+                pass
+        if df is None or df.empty:
+            try:
+                from pa_mcp.research.sector_rotation import SectorRotationAnalyzer
+                info = await SectorRotationAnalyzer().load_sector_data(
+                    top_n=top_n, days=60)
+                # 转成近似 schema
+                rows = info.get("rows") or []
+                if rows:
+                    df = pd.DataFrame(rows)
+            except Exception:
+                pass
+
+        if df is None or df.empty:
+            return _response(success=False,
+                             error="无板块数据（请先确保 sector_daily 或 readiness 装载）",
+                             error_type="NOT_FOUND")
+
+        fig = chart_figs.sector_figure(df, top_n=top_n)
+        out = chart_render.render(
+            fig, prefix="sector", title="板块强度", width=width, height=height)
+        return _response(success=True, data=out)
+    except Exception as e:
+        logger.error("chart_sector_rotation failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_sentiment(days: int = 30,
+                          width: int = 1280, height: int = 480) -> dict[str, Any]:
+    """游资情绪周期图（涨停/跌停家数 + 连板高度 + 情绪评分），PNG。
+
+    依赖 sentiment_daily 表（日常调度会持续维护）。
+    """
+    try:
+        if _store is None:
+            return _response(success=False, error="store 未初始化",
+                             error_type="INTERNAL")
+        end = datetime.now().date()
+        start = end - timedelta(days=days * 2 + 5)
+        df = _store.query_df(
+            "SELECT date, limit_up_count, limit_down_count, max_board_height, "
+            "sentiment_score, stage FROM sentiment_daily "
+            "WHERE date >= ? AND date <= ? ORDER BY date ASC",
+            [start.isoformat(), end.isoformat()],
+        )
+        if df is None or df.empty:
+            return _response(success=False,
+                             error="无情绪数据",
+                             error_type="NOT_FOUND")
+        fig = chart_figs.sentiment_figure(df)
+        out = chart_render.render(
+            fig, prefix="sentiment", title="游资情绪周期",
+            width=width, height=height)
+        return _response(success=True, data=out)
+    except Exception as e:
+        logger.error("chart_sentiment failed", error=str(e))
         return _response(success=False, error=str(e),
                          error_type="INTERNAL_ERROR")
 
