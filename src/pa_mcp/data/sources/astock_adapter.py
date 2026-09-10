@@ -155,6 +155,18 @@ class AstockAdapter:
         if period != "daily":
             raise NotImplementedError(
                 f"astock adapter only supports daily bars, got {period!r}")
+
+        # 指数必须显式拒绝：百度这个接口只有 isStock=true 的个股通道，
+        # 若把 sh000001 剥成 000001 去请求，会返回「平安银行」的 K 线并用
+        # 上证指数的 symbol 落库 —— 静默数据污染（2026-08 起 index_daily
+        # 的 sh000001 就是这样被写坏成 11.8 元的）。抛 NotImplementedError
+        # 让路由继续交给能正确处理指数的源（如 tencent）。
+        from pa_mcp.data.symbols import is_index_symbol
+        if is_index_symbol(symbol):
+            raise NotImplementedError(
+                f"astock/baidu 不支持指数 K 线（{symbol}），"
+                f"避免把指数误当成同号个股")
+
         code = symbol[-6:]
         url = ("https://finance.pae.baidu.com/selfselect/getstockquotation"
                "?all=1&isIndex=false&isBk=false&isBlock=false"

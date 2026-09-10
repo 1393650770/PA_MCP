@@ -69,6 +69,49 @@ COMMON_NAMES: dict[str, str] = {
 
 _cache: Optional[dict] = None
 
+# 指数名称（键带交易所前缀，避免与个股裸码撞车 —— 裸 000001 是平安银行，
+# sh000001 才是上证指数）。
+INDEX_NAME_MAP: dict[str, str] = {
+    "sh000001": "上证指数", "sh000300": "沪深300", "sh000905": "中证500",
+    "sh000016": "上证50", "sh000688": "科创50", "sh000852": "中证1000",
+    "sh000010": "上证180", "sh000015": "上证红利", "sh000009": "上证380",
+    "sz399001": "深证成指", "sz399006": "创业板指", "sz399005": "中小100",
+    "sz399300": "沪深300(深)", "sz399905": "中证500(深)",
+    "bj899050": "北证50",
+}
+
+# 各交易所的指数号段前缀（这些组合在 A 股个股号段中不存在）
+_SH_INDEX_PREFIXES = ("000", "950", "880", "999")   # 沪市指数 / 中证系列
+_SZ_INDEX_PREFIXES = ("399",)                        # 深市指数
+_BJ_INDEX_PREFIXES = ("899",)                        # 北交所指数
+
+
+def is_index_symbol(symbol: str) -> bool:
+    """判断是否为指数代码。
+
+    **必须带交易所前缀**才会判定为指数：裸 000001 是平安银行，而
+    sh000001 是上证指数 —— 早先多个数据源把前缀剥掉后按个股去请求，
+    结果拿平安银行的价格冒充上证指数（静默数据污染）。所以这里只在
+    前缀 + 指数号段同时成立时才认定为指数。
+
+    Examples:
+        >>> is_index_symbol("sh000001"), is_index_symbol("sz399001")
+        (True, True)
+        >>> is_index_symbol("sh600196"), is_index_symbol("000001")
+        (False, False)
+    """
+    s = str(symbol or "").strip().lower()
+    if len(s) < 8:
+        return False
+    ex, code = s[:2], s[2:]
+    if ex not in ("sh", "sz", "bj") or len(code) != 6 or not code.isdigit():
+        return False
+    if ex == "sh":
+        return code.startswith(_SH_INDEX_PREFIXES)
+    if ex == "sz":
+        return code.startswith(_SZ_INDEX_PREFIXES)
+    return code.startswith(_BJ_INDEX_PREFIXES)
+
 
 def _load_from_db(symbol: str) -> Optional[str]:
     """从 stock_basic 表查名称。"""
@@ -91,8 +134,18 @@ def _load_from_db(symbol: str) -> Optional[str]:
 
 
 def get_stock_name(symbol: str) -> str:
-    """获取股票名称：DB → 内置字典 → '未知'。"""
+    """获取证券名称：指数表 → stock_basic → 内置字典 → '未知'。
+
+    指数先判、且带前缀判（sh000001=上证指数），避免剥前缀后落到
+    个股字典把上证指数显示成"平安银行"。
+    """
     symbol = symbol.strip()
+    low = symbol.lower()
+    if is_index_symbol(low):
+        return (INDEX_NAME_MAP.get(low)
+                or INDEX_NAME_MAP.get(low[2:])
+                or f"{low}(指数)")
+
     # 去掉前缀（sh/sz/bj）
     if symbol[:2].lower() in ("sh", "sz", "bj"):
         symbol = symbol[2:]

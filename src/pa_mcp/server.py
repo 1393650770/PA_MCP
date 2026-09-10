@@ -2340,14 +2340,21 @@ from pa_mcp.charts import figures as chart_figs
 
 
 async def _query_kline(symbol: str, days: int = 120) -> pd.DataFrame:
-    """本地 DB 取 K 线；不足再走 router 补齐，最后一段必走网络（最新几天）。"""
+    """本地 DB 取 K 线；不足再走 router 补齐，最后一段必走网络（最新几天）。
+
+    指数与个股分表：指数在 index_daily（symbol 形如 sh000001），个股在
+    kline_daily（symbol 形如 000001）。**绝不能混着查** —— 否则 sh000001
+    会撞上 kline_daily 里的平安银行，画出一张冒充上证指数的图。
+    """
     if _store is None:
         return pd.DataFrame()
     try:
+        from pa_mcp.data.symbols import is_index_symbol
         end = datetime.now().date()
         start = end - timedelta(days=days * 2)
+        table = "index_daily" if is_index_symbol(symbol) else "kline_daily"
         df = _store.query_df(
-            "SELECT date, open, high, low, close, volume FROM kline_daily "
+            f"SELECT date, open, high, low, close, volume FROM {table} "
             "WHERE symbol = ? AND date >= ? AND date <= ? ORDER BY date ASC",
             [symbol, start.isoformat(), end.isoformat()],
         )
@@ -2538,40 +2545,89 @@ async def chart_compare(symbols: str, days: int = 120,
 @mcp.tool(annotations={"readOnlyHint": True})
 async def chart_sector_rotation(top_n: int = 20,
                                 width: int = 1280, height: int = 560) -> dict[str, Any]:
-    """板块强度图（按当日涨幅 / 资金流排序），PNG。
+    """板块强度图（当日涨幅横向柱状，按成交额预筛最活跃板块），PNG。
 
-    依赖 sector_daily 表；若表为空会回退到 readiness._load_sectors 即时合成。
+    数据来自 sector_daily 表。该表**只有** OHLC + volume/amount/pct_change/
+    turnover 列 —— 没有资金流列，所以这里用 amount 做活跃度预筛，最终排序
+    与展示由 sector_figure 按 pct_change 完成。
+
+    日期选择：优先最新交易日，但若其板块数过少（sector_daily 由 readiness/
+    轮动模块零散装载，当日可能只落进零星几个板块），则回退到最近一个
+    足够完整的交易日 —— 避免推出一张只剩几根柱子的误导图。返回的
+    data.as_of 即实际使用的日期。
     """
+    # 装载完整度阈值：当日板块数需达到近期峰值的一定比例，否则视为
+    # "当日只落进零星几个板块"，出图前回退到上一个完整交易日
+    SECTOR_COMPLETENESS = 0.6
+    SECTOR_LOOKBACK_DAYS = 60
     try:
         df = pd.DataFrame()
+        q_err = ""
+        as_of = None
         if _store is not None:
+            # 1) 选日期：近 N 个交易日里，板块数达峰值的 60% 以上的最近一天；
+            #    sector_daily 由 readiness/轮动模块零散装载，当日可能只写进
+            #    几个板块，直接出图会得到一张只剩几根柱子的误导图。
             try:
-                df = _store.query_df(
-                    "SELECT sector_code, name, pct_change, main_net_inflow "
-                    "FROM sector_daily WHERE date = (SELECT MAX(date) FROM sector_daily) "
-                    "ORDER BY main_net_inflow DESC LIMIT 200")
-            except Exception:
-                pass
-        if df is None or df.empty:
-            try:
-                from pa_mcp.research.sector_rotation import SectorRotationAnalyzer
-                info = await SectorRotationAnalyzer().load_sector_data(
-                    top_n=top_n, days=60)
-                # 转成近似 schema
-                rows = info.get("rows") or []
-                if rows:
-                    df = pd.DataFrame(rows)
-            except Exception:
-                pass
+                daily = _store.query_df(
+                    "SELECT date, COUNT(*) AS n FROM sector_daily "
+                    "GROUP BY date ORDER BY date DESC LIMIT ?",
+                    [SECTOR_LOOKBACK_DAYS])
+                if daily is not None and not daily.empty:
+                    peak = int(daily["n"].max())
+                    ok = daily[daily["n"] >= max(1, int(peak * SECTOR_COMPLETENESS))]
+                    if not ok.empty:
+                        as_of = ok.iloc[0]["date"]
+            except Exception as e:
+                q_err = str(e)[:200]
+                logger.warning("sector_daily 日期选择失败", error=q_err)
+            if as_of is None:
+                try:
+                    best = _store.query_df("SELECT MAX(date) AS d FROM sector_daily")
+                    if best is not None and not best.empty:
+                        as_of = best.iloc[0]["d"]
+                except Exception as e:
+                    q_err = str(e)[:200]
+                    logger.warning("sector_daily MAX(date) 失败", error=q_err)
+
+            # 2) 按成交额取最活跃的 200 个板块，避免板块太多把图挤爆
+            if as_of is not None:
+                try:
+                    df = _store.query_df(
+                        "SELECT sector_code, name, pct_change, amount "
+                        "FROM sector_daily WHERE date = ? "
+                        "ORDER BY amount DESC LIMIT 200", [as_of])
+                except Exception as e:
+                    q_err = str(e)[:200]
+                    logger.warning("sector_daily 主查询失败，尝试无排序回退",
+                                   error=q_err)
+                # 回退：列名/排序键不匹配时不排序再试一次
+                if df is None or df.empty:
+                    try:
+                        df = _store.query_df(
+                            "SELECT sector_code, name, pct_change "
+                            "FROM sector_daily WHERE date = ?", [as_of])
+                    except Exception as e:
+                        q_err = str(e)[:200]
+                        logger.warning("sector_daily 回退查询失败", error=q_err)
 
         if df is None or df.empty:
-            return _response(success=False,
-                             error="无板块数据（请先确保 sector_daily 或 readiness 装载）",
-                             error_type="NOT_FOUND")
+            hint = f"（查询错误：{q_err}）" if q_err else ""
+            return _response(
+                success=False,
+                error=f"无板块数据，sector_daily 无可用记录{hint}",
+                error_type="NOT_FOUND")
 
-        fig = chart_figs.sector_figure(df, top_n=top_n)
+        as_of_str = None
+        if as_of is not None:
+            try:
+                as_of_str = pd.to_datetime(as_of).strftime("%Y-%m-%d")
+            except Exception:
+                as_of_str = str(as_of)[:10]
+        fig = chart_figs.sector_figure(df, top_n=top_n, as_of=as_of_str)
         out = chart_render.render(
             fig, prefix="sector", title="板块强度", width=width, height=height)
+        out["as_of"] = as_of_str
         return _response(success=True, data=out)
     except Exception as e:
         logger.error("chart_sector_rotation failed", error=str(e))

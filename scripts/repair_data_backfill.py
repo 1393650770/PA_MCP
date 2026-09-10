@@ -103,6 +103,13 @@ async def main() -> int:
         n = sched.reset_checkpoint("fund_flow")
         print(f"[迁移] 清除 fund_flow 脏断点：{n} 条")
 
+    # 指数脏行清理：历史上 astock/百度源把 sh000001 剥成 000001，返回
+    # 平安银行 K 线并以指数 symbol 落库（点位 10~12 元）。先清再回填，
+    # 否则增量逻辑会认为「已有数据」而跳过补齐。
+    if "index" in wanted:
+        n = sched.purge_corrupt_index_rows()
+        print(f"[迁移] 清除 index_daily 脏行（点位像个股）：{n} 行")
+
     plan = [
         ("calendar", "1_calendar", lambda: sched._update_calendar(False)),
         ("kline", "3_daily_kline", lambda: sched._update_daily_kline(False)),

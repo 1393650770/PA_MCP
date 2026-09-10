@@ -12,16 +12,45 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import plotly.graph_objects as go
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 MAX_BYTES = 30 * 1024 * 1024     # 30MB，QQBot 图片上限
 DEFAULT_RETENTION = 30           # 保留最近 N 张
 WIDTH, HEIGHT, SCALE = 1280, 720, 2  # 默认 ~1600x900 高清
+
+# 进程内常驻的 chrome 导出服务。plotly 6 + kaleido 1.x 的默认导出路径
+# 每次 to_image 都会重新起停一个 chromium —— 实测单图 60~380s（并发抢
+# 资源时更糟），足以拖垮定时任务。kaleido.start_sync_server() 起的是
+# 单例服务，启动一次后后续出图回落到 0.1s 量级。
+_ENGINE_LOCK = threading.Lock()
+_ENGINE_READY = False
+
+
+def _ensure_engine() -> None:
+    """惰性启动 kaleido 常驻导出服务（幂等、线程安全）。"""
+    global _ENGINE_READY
+    if _ENGINE_READY:
+        return
+    with _ENGINE_LOCK:
+        if _ENGINE_READY:
+            return
+        try:
+            import kaleido
+            kaleido.start_sync_server(silence_warnings=True)
+            _ENGINE_READY = True
+        except Exception as e:  # noqa: BLE001 - 起不来就退回默认逐次导出
+            logger.warning("kaleido 常驻服务启动失败，回退默认导出",
+                           error=str(e)[:200])
+            _ENGINE_READY = True
 
 
 def _candidate_dirs() -> list[Path]:
@@ -77,7 +106,8 @@ def _cleanup(dir_: Path, retain: int = DEFAULT_RETENTION) -> int:
 def _export_png(fig: go.Figure, target: Path,
                 width: int = WIDTH, height: int = HEIGHT,
                 scale: int = SCALE) -> int:
-    """调 kaleido 导出 PNG，返回字节数。"""
+    """调 kaleido 导出 PNG，返回字节数（复用常驻 chrome）。"""
+    _ensure_engine()
     png = fig.to_image(format="png", width=width, height=height, scale=scale)
     if len(png) > MAX_BYTES:
         raise ValueError(

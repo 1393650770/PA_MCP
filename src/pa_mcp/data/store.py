@@ -493,6 +493,42 @@ class DuckDBStore:
             self.connect()
             return not self.read_only
 
+    def ensure_writable(self, wait_seconds: float = 0.0) -> bool:
+        """拿到写锁才返回 True；只读降级时关掉重开重试，直到预算用完。
+
+        DuckDB 单文件排他锁：并发 cron 会话各起一个 MCP Server 时，后到者
+        会被降级成只读。此时**所有**写操作都抛「只读降级模式」——调用方若
+        不检查，就会把上千只标的逐个 no-op 一遍然后报「成功 0 行」，
+        表现为「cron 状态 ok、数据却一天没动」的静默失败。
+        """
+        budget = max(0.0, float(wait_seconds))
+        deadline = time.monotonic() + budget
+        attempt = 0
+        while True:
+            attempt += 1
+            with self._lock:
+                try:
+                    self.connect()
+                    if not self.read_only:
+                        return True
+                except Exception:  # noqa: BLE001 - 打不开则重开重试
+                    pass
+                # 只读降级或打不开 → 关掉重开，重新抢写锁
+                if self._conn is not None:
+                    try:
+                        self._conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._conn = None
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "DuckDB write lock unavailable",
+                    path=self.db_path, attempts=attempt,
+                    waited_seconds=round(budget, 1),
+                )
+                return False
+            time.sleep(min(5.0, max(0.5, deadline - time.monotonic())))
+
     def _ensure_writable(self, action: str) -> None:
         """写操作前置检查：只读降级模式下给出可行动的明确报错。"""
         with self._lock:

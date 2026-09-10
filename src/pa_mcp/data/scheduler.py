@@ -490,6 +490,18 @@ class DataUpdateScheduler:
         if self._router is None and self._akshare is None:
             raise RuntimeError("No data source available — required for kline updates")
 
+        # 写锁预检：拿不到写锁就明确失败，绝不静默空跑整个标的池。
+        # 机器休眠后 OpenClaw 会把错过的任务一次性补跑，多个 isolated 会话
+        # 各起一个 MCP Server 抢同一把 DuckDB 排他锁，后到者降级只读 ——
+        # 于是 1096 只标的被逐个 no-op 一遍，phase 报 success/0 行，
+        # 表现为「cron 状态 ok，数据却一天没动」。
+        if not store.ensure_writable(self.WRITE_LOCK_WAIT_SECONDS):
+            raise RuntimeError(
+                f"DuckDB 写锁被其他进程占用超过 "
+                f"{self.WRITE_LOCK_WAIT_SECONDS:.0f}s，本次放弃（数据未更新，"
+                f"请关闭占用进程或错峰重试）"
+            )
+
         today = datetime.now().strftime("%Y%m%d")
 
         # 标的清单：
@@ -538,6 +550,7 @@ class DataUpdateScheduler:
         source_stats: dict[str, int] = {}  # source -> rows served
         failed: list[str] = []
         consecutive_failed = 0
+        read_only_abort = False
 
         if not pending:
             logger.info("Kline already up to date", target=target.isoformat())
@@ -586,7 +599,17 @@ class DataUpdateScheduler:
                 except Exception as e:
                     failed.append(sym)
                     consecutive_failed += 1
-                    logger.debug("Kline fetch failed for symbol", symbol=sym, error=str(e))
+                    err = str(e)
+                    if "只读降级" in err or "READ-ONLY" in err.upper():
+                        # 运行中掉回只读：再跑下去全是 no-op，直接停
+                        logger.error(
+                            "Kline aborted: store degraded to read-only",
+                            symbol=sym, err=err[:160],
+                        )
+                        read_only_abort = True
+                        break
+                    logger.debug("Kline fetch failed for symbol",
+                                 symbol=sym, error=str(e))
                     if consecutive_failed >= self.MAX_CONSECUTIVE_FAILURES:
                         logger.warning(
                             "Kline source down, aborting phase",
@@ -594,6 +617,9 @@ class DataUpdateScheduler:
                             processed=batch_start + batch.index(sym) + 1,
                         )
                         break
+
+            if read_only_abort:
+                break
 
             if consecutive_failed >= self.MAX_CONSECUTIVE_FAILURES:
                 break
@@ -651,11 +677,21 @@ class DataUpdateScheduler:
     # 连续失败熔断阈值（源整体挂掉时避免全池空转拖死 pipeline）
     MAX_CONSECUTIVE_FAILURES = 20
 
+    # 写锁等待预算（秒）。DuckDB 单文件排他锁：多个 cron 会话（尤其是
+    # 机器休眠后所有错过任务被同时补跑）各起一个 MCP Server 时，后到者会
+    # 降级成只读 —— 此时继续跑只会把上千只标的逐个空跑。宁可等，拿不到
+    # 就明确失败并让调用方错峰重试。
+    WRITE_LOCK_WAIT_SECONDS = 300.0
+
     # 东财资金流每次往回拉几个交易日（顺带回填近期缺口）
     FUND_FLOW_LOOKBACK_DAYS = 5
 
     # 指数日线：pipeline 会持续维护的主要指数
     INDEX_SYMBOLS = ("sh000001", "sz399001", "sz399006")
+
+    # 指数最低合理点位：低于此值视为「个股价格冒充指数」（如 sh000001
+    # 被写成平安银行的 11.8 元），写入前丢弃。
+    INDEX_MIN_CLOSE = 100.0
 
     def _ensure_checkpoint_table(self) -> None:
         self._store.execute("""
@@ -828,6 +864,31 @@ class DataUpdateScheduler:
             )
             return result.fetchone()[0] if result else 0
         except Exception:
+            return 0
+
+    def purge_corrupt_index_rows(
+        self, min_close: Optional[float] = None,
+    ) -> int:
+        """清理 index_daily 里「点位像个股价格」的脏行，返回删除行数。
+
+        历史污染：astock/百度源把 sh000001 剥前缀成 000001，返回平安银行
+        K 线并以 sh000001 落库（2026-08 起）。这些行的 close 只有 10~12 元，
+        与真实指数（3000+）差两个数量级，用点位下限即可安全识别。
+        """
+        floor = self.INDEX_MIN_CLOSE if min_close is None else float(min_close)
+        try:
+            before = self._store.execute(
+                "SELECT COUNT(*) FROM index_daily WHERE close < ?", [floor],
+            ).fetchone()[0]
+            if not before:
+                return 0
+            self._store.execute(
+                "DELETE FROM index_daily WHERE close < ?", [floor])
+            logger.warning("Purged corrupt index rows",
+                           rows=int(before), min_close=floor)
+            return int(before)
+        except Exception as e:
+            logger.warning("purge_corrupt_index_rows failed", error=str(e)[:160])
             return 0
 
     async def _update_minute_kline(self, force_full: bool) -> int:
@@ -1195,6 +1256,20 @@ class DataUpdateScheduler:
                 if df is None or df.empty:
                     continue
                 df = df.copy()
+                # 护栏：A 股指数点位不可能低于 100。历史上 astock/百度源把
+                # sh000001 剥成 000001 去请求，返回平安银行 K 线并以指数
+                # 的 symbol 落库，把 index_daily 悄悄写坏成 11.8 元。这里
+                # 对明显像个股价格的“指数”数据直接丢弃，宁可缺也不写错。
+                if "close" in df.columns:
+                    close_num = pd.to_numeric(df["close"], errors="coerce")
+                    bad = close_num < self.INDEX_MIN_CLOSE
+                    if bool(bad.any()):
+                        logger.warning(
+                            "Index data rejected (price looks like a stock)",
+                            symbol=sym, rows_dropped=int(bad.sum()))
+                        df = df[~bad]
+                    if df.empty:
+                        continue
                 df["symbol"] = sym
                 self._store.insert_df(
                     "index_daily",

@@ -179,23 +179,39 @@ def compare_figure(
     return fig
 
 
-def sector_figure(df: pd.DataFrame, top_n: int = 20) -> go.Figure:
+def sector_figure(df: pd.DataFrame, top_n: int = 20,
+                  as_of: str | None = None) -> go.Figure:
     """板块强度图：当日涨幅/资金流横向柱状。
 
     df 必含 sector_code/name + 至少一个排序指标（pct_change / main_net_inflow）。
+
+    去重：sector_daily 里合成兜底板块（sector_code 以 SYN_ 开头）会与真实
+    行业板块同名，直接出图会出现重复类目、柱子叠在一起并错位 —— 因此按
+    name 去重，优先保留真实代码（非 SYN_）那一行。
     """
     if df.empty:
         return _empty("板块数据为空")
     metric = "pct_change" if "pct_change" in df.columns else "main_net_inflow"
-    df = df.dropna(subset=[metric]).sort_values(metric).tail(top_n)
+    df = df.dropna(subset=[metric]).copy()
+
+    if "name" in df.columns:
+        if "sector_code" in df.columns:
+            df["_syn"] = df["sector_code"].astype(str).str.startswith("SYN_")
+            df = df.sort_values(["_syn", "sector_code"]).drop_duplicates(
+                subset=["name"], keep="first").drop(columns=["_syn"])
+        else:
+            df = df.drop_duplicates(subset=["name"], keep="first")
+
+    df = df.sort_values(metric).tail(top_n)
     colors = [RED if v >= 0 else GREEN for v in df[metric]]
     fig = go.Figure(go.Bar(
         x=df[metric], y=df.get("name", df.get("sector_code", df.index)).astype(str),
         orientation="h", marker_color=colors,
         text=[f"{v:+.2f}" for v in df[metric]], textposition="outside",
     ))
+    head = f"板块强度（{as_of}，" if as_of else "板块强度（"
     fig.update_layout(
-        title=f"板块强度（Top {min(top_n, len(df))}，按 {metric}）",
+        title=f"{head}Top {min(top_n, len(df))}，按 {metric}）",
         template="plotly_white", height=420,
         margin=dict(l=10, r=10, t=60, b=10),
     )

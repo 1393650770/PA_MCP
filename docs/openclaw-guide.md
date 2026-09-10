@@ -91,7 +91,44 @@ OpenClaw 引导你时遵循的顺序（与 UI「新手决策地图」同一套�
 
 ---
 
-## 五、常见问题
+## 五、可视化图表（生成 PNG → 推送 QQ Bot）
+
+PA_MCP 提供 5 个出图工具。它们把 PNG 落到 OpenClaw 的 qqbot-media 白名单目录，
+返回的 `data.qqmedia` 字段就是可直接发送的 `<qqmedia>路径</qqmedia>` 标签。
+
+| 工具 | 出图内容 |
+|---|---|
+| `chart_kline(symbol, days=120, ma="5,10,20,60", with_prediction=False)` | 蜡烛图 + 均线 + 成交量副图，可叠加三情景预测路径 |
+| `chart_fund_flow(symbol, days=30)` | 主力/超大/大/中/小单净流入（亿元） |
+| `chart_compare(symbols, days=120)` | 多股归一化对比（首日=100），最多 5 只 |
+| `chart_sector_rotation(top_n=20)` | 板块强度横向柱状 |
+| `chart_sentiment(days=30)` | 涨停/跌停家数 + 连板高度 + 情绪评分 |
+
+**对话里直接说**：「画一下 600196 的 K 线图发给我」即可。
+
+**指数要带 sh/sz 前缀**：画上证指数必须写 `chart_kline(symbol="sh000001")`。
+裸 `000001` 是**平安银行**，不是指数。PA_MCP 内部按「前缀 + 指数号段」
+区分指数与个股（指数读 `index_daily`，个股读 `kline_daily`），所以
+`sh000001`/`sz399001`/`sz399006` 会正确画成上证指数/深证成指/创业板指。
+
+**写进定时任务 prompt 时的两条硬性要求**：
+
+1. 调用 `chart_*` 工具拿到结果
+2. 把返回的 `data.qqmedia` **原样**贴进回复正文 —— 不要自己拼路径。
+   平台安全策略只允许从 `~/.openclaw/media/` 等受信根目录上传，
+   拼错目录会被拦截且提示"发送失败"
+
+> 图片默认落在 `~/.openclaw/media/qqbot/pamcp/charts/`，自动保留最近 30 张。
+> 用环境变量 `PA_MCP_CHART_DIR` 可覆盖输出目录。
+> 单图上限 30MB（QQ Bot 限制），超出时工具直接报错而不是静默失败。
+> 首次部署需 `pip install plotly kaleido`（已固化进 `pyproject.toml`）。
+> 出图速度：进程内复用同一个 chromium（kaleido 常驻服务），首图约 10 秒
+> 预热、后续每张约 1 秒。**不要**改成逐次启动导出服务，单图会退化到
+> 几十秒甚至数分钟。
+
+---
+
+## 六、常见问题
 
 **Q：AI 分析工具（预测/深度分析）不可用？**
 A：需要配置 LLM（`config/llm_config.json` 填 API key）。未配置时**不影响**前面三步（环境/选股/验证全是免费确定性工具），OpenClaw 会提示"第 ④ 步可跳过"。
@@ -107,8 +144,10 @@ A：确认 MCP server 配置路径正确且 `python -m pa_mcp.server` 能独立�
 
 ---
 
-## 六、给管理员的说明
+## 七、给管理员的说明
 
 - 全部工具为**只读研究**（LLM 不持有下单能力，见 `docs/methodology-guide.md` 第八节）
-- 定时任务模板维护在 `config/openclaw_cron.json`（修改后需重新导入）
+- 定时任务模板维护在 `config/openclaw_cron.json`。注意 OpenClaw 的 cron 实际
+  存储在 SQLite（`~/.openclaw/state/openclaw.sqlite`），**不在** `openclaw.json`
+  里；用 `openclaw cron list / add / edit / rm` 管理（需 Node ≥24 才能运行 CLI）
 - 工具能力与状态以 `docs/capability-matrix.md` 为准

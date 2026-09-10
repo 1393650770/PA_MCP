@@ -1,7 +1,7 @@
 {
   "_comment": "OpenClaw 定时任务配置（适配 PA_MCP MCP 工具）",
   "_usage": "1) 将 scheduler 段合并到 openclaw 配置文件；或 2) 用下方 CLI 命令逐条添加",
-  "_task_list": "9 任务：pamcp-data-load(15:05 数据更新) / pamcp-prediction-evaluate(15:23 验证回填) / pamcp-portfolio-check(14:45 持仓体检) / pamcp-morning-brief(8:17 盘前研报) / pamcp-prediction-brief(8:17 预测简报) / pamcp-sector-rotation(8:23 板块晨报) / pamcp-close-review(15:15 收盘复盘) / pamcp-prediction-review(周五15:45 预测复盘) / pamcp-weekly-research(周五15:30 周研究) / pamcp-sunday-report(周日16:07 综合周报)",
+  "_task_list": "10 任务：pamcp-data-load(15:05 数据更新) / pamcp-prediction-evaluate(15:23 验证回填) / pamcp-portfolio-check(14:45 持仓体检) / pamcp-morning-brief(8:17 盘前研报) / pamcp-prediction-brief(8:17 预测简报) / pamcp-sector-rotation(8:23 板块晨报) / pamcp-close-review(15:15 收盘复盘) / pamcp-prediction-review(周五15:45 预测复盘) / pamcp-weekly-research(周五15:30 周研究) / pamcp-chart-brief(15:50 图表简报) / pamcp-sunday-report(周日16:07 综合周报)",
   "scheduler": {
     "tasks": [
       {
@@ -113,11 +113,23 @@
         "sessionTarget": "isolated",
         "prompt": "使用 PA_MCP 工具生成板块轮动晨报：\n1. 调 predict_sector_rotation() 获取板块轮动预测（强势板块候选/轮动逻辑/回避板块）\n2. 调 sector_rotation_status() 确认轮动速度与新进/退出板块\n3. 对 top 2-3 强势板块调 sector_leaders(sector) 挖掘板块内领涨股\n4. 对领涨股调 predict_market(symbol, horizon='5d') 做个股预测（含板块上下文）\n输出：强势板块/轮动逻辑/领涨股清单/个股预测要点/风险提示。标注研究参考非投资建议。",
         "delivery": { "mode": "none" }
+      },
+      {
+        "name": "pamcp-chart-brief",
+        "_description": "收盘后图表简报：大盘 K 线 + 板块强度 + 情绪周期（PNG 推送 QQ Bot）",
+        "cron": "50 15 * * 1-5",
+        "tz": "Asia/Shanghai",
+        "sessionTarget": "isolated",
+        "_cron_note": "排在 15:40 观察池检查之后，避开 DuckDB 排他锁；出图约 10-20 秒/张。",
+        "prompt": "使用 PA_MCP 工具生成今日图表简报（研究参考，非投资建议）：\n1. 调 chart_sentiment(days=30) 拿情绪周期图\n2. 调 chart_sector_rotation(top_n=15) 拿板块强度图\n3. 调 chart_kline(symbol='sh000001', days=90) 拿上证指数 K 线图（指数必须带 sh/sz 前缀；裸 000001 是平安银行，不是指数）\n4. 用一句话总结今日情绪阶段与最强板块\n5. 【关键】把每个工具返回的 data.qqmedia 字段原样粘贴到回复正文中发送——不要自己拼路径，不要只描述图的内容。平台只接受来自 ~/.openclaw/media/ 的绝对路径，拼错会被拦截。\n输出：一句总结 + 三个 qqmedia 标签。标注研究参考非投资建议。",
+        "delivery": { "mode": "none" }
       }
     ]
   },
   "_cli_commands": "逐条添加示例（替代配置文件合并）：\nopenclaw cron add --name pamcp-morning-brief --cron '0 8 * * 1-5' --tz Asia/Shanghai --session isolated --message '使用 PA_MCP 生成盘前简报：调 agent_market_state()、scan_market()、get_market_sentiment()'",
   "_note": "依赖：OpenClaw 已配置 PA_MCP MCP server（venv\\Scripts\\python.exe -m pa_mcp.server）。",
   "_timezone": "全部使用 Asia/Shanghai（A股交易时区）。A股交易时段 9:30-11:30, 13:00-15:00；复盘任务设在收盘后。",
-  "_scheduling_rule": "两个任务之间至少间隔 5 分钟，且要留出前一个任务的实测耗时余量（data-load 约 3.5 分钟、prediction-evaluate 约 5 分钟、close-review/weekly-research 约 1 分钟）。原因：每个 isolated 会话会各起一个 pa_mcp MCP Server 进程，而 DuckDB 单文件是进程级排他锁，并发启动会让后一个服务端的 81 个工具全部不可见。当前时间轴：14:45 持仓体检 → 15:05 数据更新 → 15:15 收盘复盘 → 15:23 预测验证 → 15:30 周研究(周五) → 15:40 观察池检查。"
+  "_scheduling_rule": "两个任务之间至少间隔 5 分钟，且要留出前一个任务的实测耗时余量（data-load 约 3.5 分钟、prediction-evaluate 约 5 分钟、close-review/weekly-research 约 1 分钟）。原因：每个 isolated 会话会各起一个 pa_mcp MCP Server 进程，而 DuckDB 单文件是进程级排他锁，并发启动会让后一个服务端的 81 个工具全部不可见。当前时间轴：14:45 持仓体检 → 15:05 数据更新 → 15:15 收盘复盘 → 15:23 预测验证 → 15:30 周研究(周五) → 15:40 观察池检查 → 15:50 图表简报。",
+  "_cron_storage": "OpenClaw 的 cron 实际存在 SQLite（~/.openclaw/state/openclaw.sqlite），不在 openclaw.json 里。用 `openclaw cron list/add/edit/rm` 管理；CLI 需要 Node >=24（本机系统 node 在 C:\\Program Files\\nodejs，需先 export PATH）。",
+  "_chart_note": "chart_* 工具返回 data.qqmedia（形如 <qqmedia>绝对路径</qqmedia>），需要原样写进 OpenClaw 的回复正文才会被 qqbot-media 通道上传；PNG 落在 ~/.openclaw/media/qqbot/pamcp/charts/（白名单内）。"
 }
