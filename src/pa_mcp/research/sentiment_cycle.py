@@ -47,25 +47,35 @@ class SentimentCycleAnalyzer:
 
     # ---- 连板计算（历史逐日） ----
     def _compute_streaks(self, store) -> pd.DataFrame:
-        """全市场逐日连板高度：返回 date/board_height 明细。"""
+        """全市场逐日连板高度：返回 date/symbol/board_height/is_limit_up/pct_change。
+
+        向量化实现：原先对 40 万行 `iterrows()` 逐行累计，单次要数分钟，
+        把整个 pipeline 拖住。改为按 symbol 分段累计「连续涨停」长度。
+
+        依赖 kline_daily.pct_change —— 该列由
+        `DataUpdateScheduler.recompute_kline_derived()` 用窗口函数补算。
+        若为 NULL（历史上从未写入过），则没有任何标的会被判定为涨停，
+        情绪统计会**恒为 0**（这就是"情绪图全平"的根因）。
+        """
         df = store.query_df(
             "SELECT symbol, date, pct_change FROM kline_daily "
             "ORDER BY symbol, date", [])
         if df.empty:
             return pd.DataFrame()
+
         df["pct_change"] = pd.to_numeric(df["pct_change"], errors="coerce")
-        rows = []
-        prev: dict[str, int] = {}  # symbol → 昨日连板高度
-        for _, r in df.iterrows():
-            sym = r["symbol"]
-            is_up = pd.notna(r["pct_change"]) and r["pct_change"] >= LIMIT_UP_PCT
-            height = (prev.get(sym, 0) + 1) if is_up else 0
-            prev[sym] = height
-            rows.append({"date": str(r["date"])[:10], "symbol": sym,
-                         "board_height": height, "is_limit_up": is_up,
-                         "pct_change": float(r["pct_change"])
-                         if pd.notna(r["pct_change"]) else 0.0})
-        return pd.DataFrame(rows)
+        is_up = (df["pct_change"] >= LIMIT_UP_PCT).fillna(False)
+        df["is_limit_up"] = is_up
+
+        # 连续 True 的长度：每当 is_limit_up 发生变化就开启新段
+        changed = is_up.ne(is_up.groupby(df["symbol"]).shift()).astype(int)
+        seg = changed.groupby(df["symbol"]).cumsum()
+        rank = df.groupby([df["symbol"], seg]).cumcount() + 1
+        df["board_height"] = rank.where(is_up, 0)
+
+        df["date"] = df["date"].astype(str).str.slice(0, 10)
+        return df[["date", "symbol", "board_height", "is_limit_up",
+                   "pct_change"]].reset_index(drop=True)
 
     # ---- 单日情绪统计 ----
     def _day_stats(self, streaks: pd.DataFrame, day: str,
@@ -222,6 +232,102 @@ class SentimentCycleAnalyzer:
             "note": "实时快照口径（连板/晋级需库内全市场日线，暂缺）",
         }
 
+    # ---- 东财涨停/跌停池（全市场口径，支持历史日期） ----
+
+    # 游资情绪的权威口径。相比之下：
+    #   · kline_daily 池内近似：样本仅库内 ~1100 只（全市场 ~5400），
+    #     涨停家数被低估约 5 倍，而 _stage() 的阈值（≥40 发酵 / ≥80 高潮）
+    #     是按全市场标定的 —— 用池内值会一路误判成"冰点"；
+    #   · 新浪实时快照：家数够准，但只能取"今天"，无法回溯历史，
+    #     与历史行混在一条曲线上会出现假跳变。
+    # 东财涨停池按 date 参数可回溯任意历史日，且带 lbc（连板数），
+    # 正是这套指标需要的数据。
+    _POOL_UT = "7eea3edcaed734bea9cbfc24409ed989"
+    _ZT_POOL_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
+    _DT_POOL_URL = "https://push2ex.eastmoney.com/getTopicDTPool"
+
+    @classmethod
+    async def _fetch_pool(cls, url: str, day8: str, sort: str) -> list:
+        """拉取涨停/跌停池（day8 形如 '20260910'），失败返回空列表。"""
+        try:
+            import httpx
+        except Exception:
+            return []
+        try:
+            async with httpx.AsyncClient(
+                timeout=15,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": "https://quote.eastmoney.com/ztb/detail",
+                },
+            ) as client:
+                resp = await client.get(url, params={
+                    "ut": cls._POOL_UT, "dpt": "wz.ztzt", "Pageindex": 0,
+                    "pagesize": 1000, "sort": sort, "date": day8,
+                })
+                resp.raise_for_status()
+                data = (resp.json() or {}).get("data") or {}
+                return data.get("pool") or []
+        except Exception as e:  # noqa: BLE001
+            logger.debug("limit pool fetch failed", url=url, date=day8,
+                         error=str(e)[:140])
+            return []
+
+    async def fetch_day_from_pools(
+        self, day: str, prev_limit_up: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """用东财涨停/跌停池计算某日情绪统计（全市场口径，可回溯）。
+
+        Args:
+            day: 'YYYY-MM-DD'
+            prev_limit_up: 上一交易日涨停家数（算晋级率用；缺省则 promotion_rate=None）
+
+        Returns:
+            _save_day 兼容的 stats；涨停池拉不到返回 None。
+        """
+        day8 = str(day).replace("-", "")
+        zt = await self._fetch_pool(self._ZT_POOL_URL, day8, "fbt:asc")
+        if not zt:
+            return None
+        dt = await self._fetch_pool(self._DT_POOL_URL, day8, "fund:asc")
+
+        def _lbc(item: dict) -> int:
+            try:
+                return int(item.get("lbc") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        boards = [_lbc(x) for x in zt]
+        total = len(boards)
+        max_h = max(boards) if boards else 0
+        n1 = sum(1 for b in boards if b == 1)
+        n2 = sum(1 for b in boards if b == 2)
+        n3 = sum(1 for b in boards if b == 3)
+        n4p = sum(1 for b in boards if b >= HIGH_BOARD)
+
+        promotion_rate = None
+        if prev_limit_up:
+            promotion_rate = round((n2 + n3 + n4p) / prev_limit_up, 3)
+
+        # 与 _day_stats 同一套评分口径，保证跨来源可比
+        score = 0.0
+        score += min(40, total / 2.0)
+        score += min(40, max_h * 8)
+        if promotion_rate is not None:
+            score += min(20, promotion_rate * 40)
+
+        return {
+            "date": day,
+            "limit_up_count": total,
+            "limit_down_count": len(dt),
+            "max_board_height": max_h,
+            "board2_count": n2, "board3_count": n3, "board4p_count": n4p,
+            "first_board_count": n1,
+            "promotion_rate": promotion_rate,
+            "sentiment_score": round(min(100, score), 1),
+            "note": "东财涨停/跌停池（全市场口径）",
+        }
+
     # ---- 阶段判定（游资四阶段 + 冰点） ----
     @staticmethod
     def _stage(stats: dict[str, Any],
@@ -299,13 +405,25 @@ class SentimentCycleAnalyzer:
                 latest = days[-1]
             idx = days.index(latest)
 
-            # 回溯填充缓存：lookback 窗口内所有日子确保有 sentiment_daily
+            # 回溯填充缓存：lookback 窗口内所有日子确保有 sentiment_daily。
+            # 已存在但「三个核心计数全 0」视为脏缓存（历史遗留：pct_change
+            # 全为 NULL 时算出来的），需要重算 —— 否则"有行就跳过"会让
+            # 恒 0 的错误结果永久固化，情绪图一直是一条平线。
             window_days = days[max(0, idx - lookback + 1): idx + 1]
             for wd in window_days:
                 c = store.query_df(
-                    "SELECT 1 AS x FROM sentiment_daily WHERE date = ?", [wd])
+                    "SELECT limit_up_count, limit_down_count, "
+                    "max_board_height FROM sentiment_daily WHERE date = ?", [wd])
                 if not c.empty:
-                    continue
+                    row = c.iloc[0]
+                    try:
+                        stale = (int(row["limit_up_count"]) == 0
+                                 and int(row["limit_down_count"]) == 0
+                                 and int(row["max_board_height"]) == 0)
+                    except (TypeError, ValueError):
+                        stale = True
+                    if not stale:
+                        continue
                 w_idx = days.index(wd)
                 w_prev = days[w_idx - 1] if w_idx > 0 else None
                 self._save_day(store, self._day_stats(streaks, wd, w_prev))
@@ -396,6 +514,14 @@ class SentimentCycleAnalyzer:
 
     def _save_day(self, store, stats: dict[str, Any]) -> None:
         """当日情绪统计落库（幂等：已有则更新）。"""
+        # stage 此前恒写空串 —— 表里有列却永远为空，消费方（UI/报告）
+        # 拿到的是空阶段。这里在缺省时按同一套 _stage() 规则补算。
+        stage = stats.get("stage") or ""
+        if not stage:
+            try:
+                stage = self._stage(stats, None)[0]
+            except Exception:
+                stage = ""
         store.insert_df("sentiment_daily", pd.DataFrame([{
             "date": stats["date"],
             "limit_up_count": stats["limit_up_count"],
@@ -407,7 +533,7 @@ class SentimentCycleAnalyzer:
             "first_board_count": stats["first_board_count"],
             "promotion_rate": stats["promotion_rate"],
             "sentiment_score": stats["sentiment_score"],
-            "stage": "",
+            "stage": stage,
         }]))
 
 

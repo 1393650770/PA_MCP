@@ -77,21 +77,51 @@ class EastMoneyAdapter:
     # 东财有多个接入域名。实测同一网络环境下部分域名会对 httpx 直接断开连接
     # （RemoteProtocolError: Server disconnected），且不返回 HTTP 错误 ——
     # 曾让资金流/龙虎榜长期静默全空。逐个 fallback 才能保证稳定。
-    _HOSTS = ("push2his.eastmoney.com", "push2.eastmoney.com",
-              "push2delay.eastmoney.com")
+    #
+    # 编号镜像（N.push2his）是**历史行情**端点的关键：裸 push2his 与部分
+    # 镜像会 RemoteDisconnected，而 push2/push2delay 是实时快照域，对
+    # fflow/kline（历史资金流）只返回**当日 1 天**，lmt 参数被忽略 —— 这
+    # 正是 fund_flow_daily 长期只有一个截面的原因。多挂几个镜像能显著
+    # 提高命中「真·历史端点」的概率。
+    _HOSTS = (
+        "push2his.eastmoney.com",
+        "push2.eastmoney.com",
+        "push2delay.eastmoney.com",
+        "1.push2his.eastmoney.com",
+        "7.push2his.eastmoney.com",
+        "17.push2his.eastmoney.com",
+        "82.push2his.eastmoney.com",
+    )
 
-    async def _get_json(self, path: str, params: dict) -> dict:
+    # 仅历史行情端点（fflow/kline、stock/kline、板块日线）可用的域名。
+    # push2/push2delay 是实时快照域，对历史端点只返当日 1 天且**不报错**
+    # （lmt 被忽略），所以历史类请求必须优先走这份名单，否则「成功拿到
+    # 1 天」会让 fallback 提前结束，永远够不到真正的历史数据。
+    _HISTORY_HOSTS = (
+        "push2his.eastmoney.com",
+        "1.push2his.eastmoney.com",
+        "7.push2his.eastmoney.com",
+        "17.push2his.eastmoney.com",
+        "82.push2his.eastmoney.com",
+    )
+
+    async def _get_json(self, path: str, params: dict,
+                        hosts: Optional[tuple] = None) -> dict:
         """GET 东财 JSON 接口，按域名顺序 fallback。全部失败才抛出。
 
         命中过的域名会被「粘住」优先复用：每只标的都从第一个域名重试一遍
         会白白多花 2~3 秒（1096 只 ≈ 多跑 40 分钟）。
+
+        Args:
+            hosts: 可选域名池覆盖（历史类端点用 _HISTORY_HOSTS）。
         """
         from urllib.parse import urlencode
 
         client = await self._get_client()
         query = urlencode(params)
-        ordered = ([self._host] if self._host else []) + [
-            h for h in self._HOSTS if h != self._host]
+        pool = tuple(hosts) if hosts else self._HOSTS
+        ordered = ([self._host] if self._host in pool else []) + [
+            h for h in pool if h != self._host]
 
         last_error: Optional[Exception] = None
         for host in ordered:
@@ -109,7 +139,7 @@ class EastMoneyAdapter:
                              error=str(e)[:120])
                 continue
         raise RuntimeError(
-            f"EastMoney unreachable on all hosts ({self._HOSTS}): {last_error}")
+            f"EastMoney unreachable on all hosts ({pool}): {last_error}")
 
     @staticmethod
     def _to_secid(symbol: str) -> str:
@@ -302,16 +332,23 @@ class EastMoneyAdapter:
             days: Number of days (lmt param)
         """
         secid = self._to_secid(symbol)
-        data = await self._get_json(
-            "/api/qt/stock/fflow/kline/get",
-            {
-                "secid": secid,
-                "fields1": "f1,f2,f3,f7",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-                "klt": "101",
-                "lmt": str(days),
-            },
-        )
+        params = {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f7",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+            "klt": "101",
+            "lmt": str(days),
+        }
+        try:
+            data = await self._get_json(
+                "/api/qt/stock/fflow/kline/get", params,
+                hosts=self._HISTORY_HOSTS)
+        except Exception:
+            # 历史节点（push2his + 编号镜像）全不可用时的降级：退回实时域。
+            # push2/push2delay 忽略 lmt、只返**当日 1 天**，但至少让当日
+            # 截面持续落库 —— 每天 1 天，三十来个交易日后库里自然积累出
+            # 完整窗口，不至于整段断档。
+            data = await self._get_json("/api/qt/stock/fflow/kline/get", params)
 
         klines = data.get("data", {}).get("klines") or []
         if not klines:

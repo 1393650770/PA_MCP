@@ -134,6 +134,9 @@ def fund_flow_figure(df: pd.DataFrame, symbol: str, name: Optional[str] = None) 
         legend=dict(orientation="h", y=1.1),
         margin=dict(l=10, r=10, t=60, b=10),
     )
+    # 必须锁定类目轴：'MM-DD' 字符串会被 plotly 自动识别成日期并按
+    # 「月-年」解析（'03-08' → 2008年3月），x 轴会跳到 2008 年且顺序错乱。
+    fig.update_xaxes(type="category", nticks=10)
     return fig
 
 
@@ -258,6 +261,8 @@ def sentiment_figure(df: pd.DataFrame) -> go.Figure:
     )
     fig.update_yaxes(title_text="家数", secondary_y=False)
     fig.update_yaxes(title_text="高度/评分", secondary_y=True)
+    # 同 fund_flow_figure：'MM-DD' 会被 plotly 当日期按「月-年」解析
+    fig.update_xaxes(type="category", nticks=12)
     return fig
 
 

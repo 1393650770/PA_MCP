@@ -642,7 +642,68 @@ class DataUpdateScheduler:
             rows=updated, empty=empty, source_stats=source_stats,
             coverage_pct=coverage, failed=len(failed),
         )
+        # 派生列补算：源只给 OHLCV，pct_change/change/amplitude 一直是 NULL，
+        # 导致涨停统计（情绪周期）恒为 0、涨跌幅相关因子全部失效。
+        try:
+            self.recompute_kline_derived()
+        except Exception as e:
+            logger.warning("Kline derived recompute failed",
+                           error=str(e)[:160])
         return updated
+
+    def recompute_kline_derived(self, recent_days: Optional[int] = None) -> int:
+        """用窗口函数补算 kline_daily 的 pct_change / change / amplitude。
+
+        数据源只提供 OHLCV，这三列从未被写入（全表 40 万行里非空仅个位数），
+        连带影响：
+          · SentimentCycleAnalyzer 的涨停/连板统计恒为 0（情绪图全平）；
+          · 依赖 pct_change 的因子/指标全部失效。
+
+        口径：以上一根 K 线 close 为基准（前复权序列下等价于真实收益率），
+        amplitude = (high-low)/prev_close*100。每只标的的首行没有前收，
+        保持 NULL 而不是填 0（0 会被误读成"平盘"）。
+
+        Args:
+            recent_days: 只补最近 N 个自然日内的行（None = 全表，约 0.1~1s）。
+        """
+        scope = ""
+        if recent_days:
+            scope = (f"AND k.date >= (SELECT MAX(date) FROM kline_daily) "
+                     f"- INTERVAL '{int(recent_days)} days'")
+        sql = f"""
+        WITH calc AS (
+            SELECT symbol, date,
+                   close - LAG(close) OVER w AS chg,
+                   CASE WHEN LAG(close) OVER w > 0
+                        THEN (close / LAG(close) OVER w - 1) * 100 END AS pct,
+                   CASE WHEN LAG(close) OVER w > 0
+                        THEN (high - low) / LAG(close) OVER w * 100 END AS amp
+            FROM kline_daily
+            WINDOW w AS (PARTITION BY symbol ORDER BY date)
+        )
+        UPDATE kline_daily AS k
+        SET change = c.chg, pct_change = c.pct, amplitude = c.amp
+        FROM calc c
+        WHERE k.symbol = c.symbol AND k.date = c.date
+          AND c.chg IS NOT NULL
+          AND (k.pct_change IS NULL OR k.change IS NULL OR k.amplitude IS NULL)
+          {scope}
+        """
+        try:
+            before = self._store.execute(
+                "SELECT COUNT(*) FROM kline_daily WHERE pct_change IS NOT NULL"
+            ).fetchone()[0]
+            self._store.execute(sql)
+            after = self._store.execute(
+                "SELECT COUNT(*) FROM kline_daily WHERE pct_change IS NOT NULL"
+            ).fetchone()[0]
+            n = int(after) - int(before)
+        except Exception as e:
+            logger.warning("recompute_kline_derived failed", error=str(e)[:200])
+            return 0
+        logger.info("Kline derived columns recomputed", rows=n,
+                    scope=f"recent {recent_days}d" if recent_days else "full")
+        return n
 
     def _to_table_df(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
         """Strip adapter metadata columns (source, price_adjust_mode, etc.)
@@ -1285,30 +1346,148 @@ class DataUpdateScheduler:
                     target=target.isoformat(), symbols=len(self.INDEX_SYMBOLS))
         return updated
 
+    # 情绪回溯天数：一次补齐近 N 个交易日（东财涨停池按日期可回溯）
+    SENTIMENT_BACKFILL_DAYS = 20
+
     async def _update_sentiment(self, force_full: bool) -> int:
         """维护游资情绪日统计（sentiment_daily）。
 
-        此前同样没有调度入口，只有 readiness 临时算一次 —— 表停在 08-14。
-        注意：SentimentCycleAnalyzer.analyze() 的实时分支内部用 asyncio.run，
-        在本 pipeline 的事件循环里会抛 RuntimeError，故强制走库内计算分支
-        （use_realtime=False）。
+        来源优先级（前两者是全市场口径，最后一个是兜底）：
+
+        1. **东财涨停/跌停池**（getTopicZTPool / getTopicDTPool）：全市场、
+           带连板数、可按 date 回溯历史 —— 游资情绪指标的权威口径；
+        2. 新浪全市场实时快照：家数够准，但只能取"今天"，无法回溯；
+        3. 库内池内近似（analyze(use_realtime=False)）：样本仅库内 ~1100 只
+           （全市场 ~5400），涨停家数低估约 5 倍，而 _stage() 的阈值
+           （≥40 发酵 / ≥80 高潮）是按全市场标定的 —— 用池内值会一路误判
+           成"冰点"。仅在 1、2 都拿不到时才用，避免整表空跑。
         """
         from pa_mcp.research.sentiment_cycle import SentimentCycleAnalyzer
 
+        analyzer = SentimentCycleAnalyzer()
+
+        # 候选交易日：近 N 个交易日，升序处理以便传递上一日涨停数
+        days: list[str] = []
         try:
-            result = await asyncio.to_thread(
-                SentimentCycleAnalyzer().analyze, None, 5, False)
-        except Exception as e:
-            logger.warning("Sentiment computation failed", error=str(e)[:200])
+            cal = self._store.query_df(
+                "SELECT date FROM trade_calendar WHERE is_trading_day = TRUE "
+                "ORDER BY date DESC LIMIT ?", [self.SENTIMENT_BACKFILL_DAYS])
+            if not cal.empty:
+                days = [str(x)[:10] for x in cal["date"]]
+        except Exception:
+            days = []
+        if not days:
+            try:
+                kd = self._store.query_df(
+                    "SELECT DISTINCT date FROM kline_daily ORDER BY date DESC "
+                    "LIMIT ?", [self.SENTIMENT_BACKFILL_DAYS])
+                if not kd.empty:
+                    days = [str(x)[:10] for x in kd["date"]]
+            except Exception:
+                days = []
+        if not days:
+            logger.warning("Sentiment skipped: no trading calendar")
             return 0
+        days = sorted(days)
 
-        if not isinstance(result, dict) or "error" in result:
-            logger.warning("Sentiment unavailable", detail=str(result)[:200])
-            return 0
+        # 已有行的状态：缺失 / 三计数全 0 / stage 为空 → 需要刷新
+        # （stage 为空是旧版 _save_day 恒写空串留下的，一并自愈）
+        existing: dict[str, tuple[int, int, int, str]] = {}
+        try:
+            cur = self._store.query_df(
+                "SELECT date, limit_up_count, limit_down_count, "
+                "max_board_height, stage FROM sentiment_daily WHERE date >= ?",
+                [days[0]])
+            for _, r in cur.iterrows():
+                existing[str(r["date"])[:10]] = (
+                    int(r["limit_up_count"] or 0),
+                    int(r["limit_down_count"] or 0),
+                    int(r["max_board_height"] or 0),
+                    str(r["stage"] or ""),
+                )
+        except Exception:
+            pass
 
-        logger.info("Sentiment updated", date=result.get("date"),
-                    stage=result.get("stage"))
-        return 1
+        def _stale(d: str) -> bool:
+            row = existing.get(d)
+            if row is None:
+                return True
+            up, down, mh, stage = row
+            return (up == 0 and down == 0 and mh == 0) or not stage
+
+        # ---- 1) 涨停池回溯补齐（含晋级率所需的上一日家数） ----
+        saved = 0
+        prev_up: Optional[int] = None
+        for d in days:
+            if _stale(d):
+                stats = None
+                try:
+                    stats = await analyzer.fetch_day_from_pools(
+                        d, prev_limit_up=prev_up)
+                except Exception as e:
+                    logger.debug("Sentiment pool day failed", date=d,
+                                 error=str(e)[:140])
+                if stats is not None:
+                    try:
+                        analyzer._save_day(self._store, stats)
+                        saved += 1
+                        existing[d] = (stats["limit_up_count"],
+                                       stats["limit_down_count"],
+                                       stats["max_board_height"], "fetched")
+                    except Exception as e:
+                        logger.warning("Sentiment save failed", date=d,
+                                       error=str(e)[:140])
+                await asyncio.sleep(0.25)
+            row = existing.get(d)
+            if row is not None:
+                prev_up = row[0]
+
+        # ---- 2) 今日兜底：涨停池不可用时用新浪全市场实时快照 ----
+        today = days[-1]
+        if _stale(today):
+            rt = None
+            try:
+                rt = await analyzer._fetch_realtime_stats()
+            except Exception as e:
+                logger.debug("Sentiment realtime unavailable",
+                             error=str(e)[:140])
+            if rt is not None:
+                merged = analyzer._realtime_stats_to_day(rt)
+                for k in ("max_board_height", "board2_count", "board3_count",
+                          "board4p_count"):
+                    if existing.get(today) and existing[today][2]:
+                        merged[k] = existing[today][2]
+                boards = sum(int(merged.get(k) or 0) for k in
+                             ("board2_count", "board3_count", "board4p_count"))
+                if merged["limit_up_count"] >= boards:
+                    merged["first_board_count"] = (
+                        merged["limit_up_count"] - boards)
+                try:
+                    analyzer._save_day(self._store, merged)
+                    saved += 1
+                    logger.info("Sentiment updated (realtime fallback)",
+                                date=merged.get("date"),
+                                limit_up=merged.get("limit_up_count"))
+                except Exception as e:
+                    logger.warning("Sentiment realtime save failed",
+                                   error=str(e)[:140])
+
+        # ---- 3) 最后兜底：库内池内近似（口径失真，但保证有数据） ----
+        if saved == 0:
+            try:
+                r = await asyncio.to_thread(analyzer.analyze, None, 5, False)
+                if isinstance(r, dict) and "error" not in r:
+                    saved = 1
+                    logger.warning(
+                        "Sentiment updated (pool-approx; 家数按库内样本低估)",
+                        date=r.get("date"), limit_up=r.get("limit_up_count"))
+            except Exception as e:
+                logger.warning("Sentiment pool fallback failed",
+                               error=str(e)[:160])
+
+        if saved == 0:
+            logger.warning("Sentiment unavailable (all sources failed)")
+        return saved
 
 
 # ---- Module Entry Point ----

@@ -67,6 +67,11 @@ class SinaAdapter:
           bj: 8xx/4xx (北京证券交易所 — mapped to Sina as sh for API compatibility)
         """
         code = symbol.strip()
+        # 已带交易所前缀的直接透传：否则 sh600196 会被当成裸码再拼一次前缀
+        # 变成 shsh600196，请求必然返回空（指数 sh000001 同理）。
+        if code[:2].lower() in ("sh", "sz", "bj"):
+            return code.lower()
+
         prefixes_sh = ["600", "601", "603", "605", "688", "5"]   # 5x = 沪 ETF/LOF
         prefixes_sz = ["000", "001", "002", "003", "300", "301", "1"]  # 1x = 深 ETF/LOF
         prefixes_bj_new = ["920"]          # 北交所新号段
@@ -180,6 +185,85 @@ class SinaAdapter:
 
         return df.sort_values("date").reset_index(drop=True)
 
+    # ---- 个股资金流历史 ----
+
+    # 新浪资金流历史端点的字段口径（与东财**不同**，不要混用两者的数值）：
+    #   netamount = 主力净流入（超大单 + 大单）
+    #   r0_net    = 超大单净额
+    # 因此 large = netamount - r0_net 可推导；中/小单新浪不提供（留空）。
+    _MONEYFLOW_URL = (
+        "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        "MoneyFlow.ssl_qsfx_zjlrqs"
+    )
+
+    async def get_stock_fund_flow(
+        self, symbol: str, days: int = 20,
+    ) -> pd.DataFrame:
+        """个股资金流历史（新浪 MoneyFlow，支持多日）。
+
+        东财的 push2his 历史端点对 httpx 长期 RemoteDisconnected（只有
+        push2delay 兜底且只返当日 1 天），导致 fund_flow_daily 长期只有
+        一个截面、资金流图只剩 1 根柱子。新浪这个端点稳定且返回完整历史，
+        用作多日兜底。
+
+        Returns:
+            DataFrame[symbol, trade_date, main_net_inflow,
+                      super_large_net_inflow, large_net_inflow, source]
+            （main/super_large/large 单位：元；中/小单列不提供，不写入）
+        """
+        import json as _json
+
+        code = self._to_sina_code(symbol)
+        # 指数没有资金流概念，避免把指数当股票查
+        try:
+            from pa_mcp.data.symbols import is_index_symbol
+            if is_index_symbol(code):
+                return pd.DataFrame()
+        except Exception:
+            pass
+
+        num = max(1, min(int(days), 250))
+        client = await self._get_client()
+        try:
+            resp = await client.get(
+                self._MONEYFLOW_URL,
+                params={"page": 1, "num": num, "sort": "opendate",
+                        "asc": 0, "daima": code},
+                headers={"Referer": "https://finance.sina.com.cn/"},
+            )
+            resp.raise_for_status()
+            payload = _json.loads(resp.text or "[]")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Sina fund flow failed", symbol=symbol,
+                         error=str(e)[:140])
+            return pd.DataFrame()
+
+        if not isinstance(payload, list) or not payload:
+            return pd.DataFrame()
+
+        rows = []
+        for r in payload:
+            try:
+                net = float(r.get("netamount"))
+                r0 = float(r.get("r0_net"))
+                rows.append({
+                    "symbol": symbol,
+                    "trade_date": str(r.get("opendate")),
+                    "main_net_inflow": net,
+                    "super_large_net_inflow": r0,
+                    # 大单 = 主力 - 超大单（新浪口径下成立）
+                    "large_net_inflow": net - r0,
+                    "source": "sina",
+                })
+            except (TypeError, ValueError):
+                continue
+
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        return df.sort_values("trade_date").reset_index(drop=True)
+
     # ---- Capability Declaration ----
 
     CAPABILITIES = {
@@ -192,7 +276,7 @@ class SinaAdapter:
         "trade_calendar": "unavailable",
         "benchmark_total_return": "unavailable",
         "events": "unavailable",
-        "fund_flow": "unavailable",
+        "fund_flow": "available",            # MoneyFlow 历史（主力/超大/大单）
         "dragon_tiger": "unavailable",
         "realtime_quote": "available",       # 实时快照（免费，延迟3-15s）
         "spot_all": "available",             # 全市场快照（分页，~5500 只）

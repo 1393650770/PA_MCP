@@ -110,6 +110,27 @@ async def main() -> int:
         n = sched.purge_corrupt_index_rows()
         print(f"[迁移] 清除 index_daily 脏行（点位像个股）：{n} 行")
 
+    # 情绪脏行清理：pct_change 为 NULL 时期算出的「三计数全 0」缓存，
+    # 不清掉会被「有行就跳过」的逻辑永久固化（情绪图恒为平线）。
+    if "sentiment" in wanted:
+        try:
+            cur = store.execute(
+                "SELECT COUNT(*) FROM sentiment_daily WHERE limit_up_count = 0 "
+                "AND limit_down_count = 0 AND max_board_height = 0").fetchone()[0]
+            if cur:
+                store.execute(
+                    "DELETE FROM sentiment_daily WHERE limit_up_count = 0 "
+                    "AND limit_down_count = 0 AND max_board_height = 0")
+            print(f"[迁移] 清除 sentiment_daily 全 0 脏行：{int(cur)} 行")
+        except Exception as e:
+            print(f"[迁移] sentiment 脏行清理失败：{str(e)[:160]}")
+
+    # 派生列补算：源只给 OHLCV，pct_change/change/amplitude 从未写入，
+    # 是涨停统计恒为 0、涨跌幅因子失效的根因。必须先补，再算情绪。
+    if "kline" in wanted or "sentiment" in wanted:
+        n = sched.recompute_kline_derived()
+        print(f"[迁移] 补算 kline 派生列（pct_change/change/amplitude）：{n} 行")
+
     plan = [
         ("calendar", "1_calendar", lambda: sched._update_calendar(False)),
         ("kline", "3_daily_kline", lambda: sched._update_daily_kline(False)),

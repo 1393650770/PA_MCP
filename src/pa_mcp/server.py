@@ -2375,29 +2375,80 @@ async def _query_kline(symbol: str, days: int = 120) -> pd.DataFrame:
 
 
 async def _query_fund_flow(symbol: str, days: int = 30) -> pd.DataFrame:
-    """本地 DB 取资金流；缺失走 router。"""
+    """取个股资金流，按「库内 → 东财历史 → 新浪」补足，返回单一来源序列。
+
+    返回的 df.attrs["source"] 标明实际来源（fund_flow_daily / eastmoney /
+    sina），供调用方透出——**不要**把两个源的数值混在一条序列里：
+    东财与新浪对「主力/超大单」的口径不同（同一天 main 差 ~1%、超大单
+    差 ~20%），混用会出现无意义的跳变。
+
+    背景：东财历史端点 push2his 长期不可用，其兜底域 push2delay 对
+    fflow/kline 只返回**当日 1 天**（lmt 被忽略且不报错），于是
+    fund_flow_daily 长期只有一个截面、资金流图只剩 1 根柱子。新浪
+    MoneyFlow 稳定且给完整历史，作为多日兜底。
+    """
     if _store is None:
         return pd.DataFrame()
+
+    MIN_DAYS = 5   # 少于这个天数就认为"没有可用历史"，继续换源
+    end = datetime.now().date()
+    start = end - timedelta(days=days * 2 + 5)
+
+    def _tag(frame: pd.DataFrame, source: str) -> pd.DataFrame:
+        if frame is not None and not frame.empty:
+            frame = frame.copy()
+            frame.attrs["source"] = source
+        return frame
+
+    # 1) 库内
+    db = None
     try:
-        end = datetime.now().date()
-        start = end - timedelta(days=days * 2 + 5)
-        df = _store.query_df(
+        db = _store.query_df(
             "SELECT trade_date, main_net_inflow, super_large_net_inflow, "
             "large_net_inflow, mid_net_inflow, small_net_inflow "
             "FROM fund_flow_daily WHERE symbol = ? AND trade_date >= ? "
-            "AND trade_date <= ? ORDER BY trade_date ASC",
+            "AND trade_date <= ? ORDER BY trade_date ASC ",
             [symbol, start.isoformat(), end.isoformat()],
         )
-        if df is None or df.empty:
-            try:
-                from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
-                df = await EastMoneyAdapter().get_stock_fund_flow(
-                    symbol, days=max(days, 5))
-            except Exception:
-                pass
-        return df if df is not None else pd.DataFrame()
     except Exception:
+        db = None
+    if db is not None and len(db) >= MIN_DAYS:
+        return _tag(db, "fund_flow_daily")
+
+    # 2) 东财历史（与库内口径一致，优先）
+    em = None
+    try:
+        from pa_mcp.data.sources.eastmoney_adapter import EastMoneyAdapter
+        em = await EastMoneyAdapter().get_stock_fund_flow(symbol,
+                                                          days=max(days, 30))
+    except Exception:
+        em = None
+    if em is not None and len(em) >= MIN_DAYS:
+        return _tag(em, "eastmoney")
+
+    # 3) 新浪历史（口径不同，但比"只有 1 根柱子"强）
+    sina = None
+    try:
+        from pa_mcp.data.sources.sina_adapter import SinaAdapter
+        if _sina is not None:
+            sina = await _sina.get_stock_fund_flow(symbol, days=max(days, 30))
+        else:
+            adapter = SinaAdapter()
+            try:
+                sina = await adapter.get_stock_fund_flow(
+                    symbol, days=max(days, 30))
+            finally:
+                await adapter.close()
+    except Exception:
+        sina = None
+
+    best = max((x for x in (db, em, sina) if x is not None and not x.empty),
+               key=len, default=None)
+    if best is None:
         return pd.DataFrame()
+    src = ("fund_flow_daily" if best is db
+           else "eastmoney" if best is em else "sina")
+    return _tag(best, src)
 
 
 async def _stock_name(symbol: str) -> str:
@@ -2477,16 +2528,26 @@ async def chart_fund_flow(symbol: str, days: int = 30,
     try:
         df = await _query_fund_flow(symbol, days=days)
         if df.empty:
-            return _response(success=False,
-                             error=f"无 {symbol} 资金流数据",
-                             error_type="NOT_FOUND")
+            return _response(
+                success=False,
+                error=f"无 {symbol} 资金流数据（库内无记录，东财历史端点与"
+                      f"新浪 MoneyFlow 均未返回）",
+                error_type="NOT_FOUND")
 
         name = await _stock_name(symbol)
         fig = chart_figs.fund_flow_figure(df, symbol, name)
+        src = df.attrs.get("source")
+        # 非库内来源时在标题里标注，避免读者误以为与库内同口径
+        if src and src != "fund_flow_daily":
+            fig.update_layout(
+                title=f"{name or symbol} 资金流（{len(df)}日 · {src}）")
         out = chart_render.render(
             fig, prefix=f"{symbol}_fundflow",
             title=f"{name or symbol} 资金流", width=width, height=height,
         )
+        # 数据来源与覆盖天数透出：东财与新浪口径不同，混用会出现跳变
+        out["source"] = df.attrs.get("source")
+        out["days_covered"] = int(len(df))
         return _response(success=True, data=out)
     except Exception as e:
         logger.error("chart_fund_flow failed", symbol=symbol, error=str(e))
