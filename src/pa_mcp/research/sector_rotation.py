@@ -215,8 +215,19 @@ class SectorRotationAnalyzer:
                 boards = await adapter.get_sector_boards(
                     board_type=self.board_type, top_n=top_n)
                 if not boards.empty:
-                    return await self._load_boards(boards, days=days)
-                last_err = "板块列表为空"
+                    info = await self._load_boards(boards, days=days)
+                    # 关键：列表拿到 ≠ 日线拿到。东财历史端点被限流时列表
+                    # 仍可用，但 60 个板块的日线会全部失败（loaded=0）。
+                    # 早期实现直接 return，等于吞掉降级链，当日板块全空。
+                    if info.get("loaded", 0) > 0:
+                        if info["loaded"] < len(boards) * 0.5:
+                            logger.warning(
+                                "板块日线仅部分装载，当日覆盖可能不足",
+                                loaded=info["loaded"], total=len(boards))
+                        return info
+                    last_err = (f"板块列表 {len(boards)} 个但日线全部失败")
+                else:
+                    last_err = "板块列表为空"
             except Exception as e:  # noqa: BLE001
                 last_err = str(e)[:80]
                 logger.warning("东财板块装载失败（第 %s 次）: %s",

@@ -112,6 +112,10 @@ class EastMoneyAdapter:
         命中过的域名会被「粘住」优先复用：每只标的都从第一个域名重试一遍
         会白白多花 2~3 秒（1096 只 ≈ 多跑 40 分钟）。
 
+        **只有 `rc == 0` 且载荷非 null 才算成功**；东财常以 HTTP 200 返回
+        错误载荷（如 rc=102 + data:null），不校验就会粘住废域名并让调用方
+        在 `data["data"]` 上 AttributeError。
+
         Args:
             hosts: 可选域名池覆盖（历史类端点用 _HISTORY_HOSTS）。
         """
@@ -129,6 +133,19 @@ class EastMoneyAdapter:
                 response = await client.get(f"https://{host}{path}?{query}")
                 response.raise_for_status()
                 data = response.json()
+                # 东财会在 HTTP 200 下返回错误载荷（典型 rc=102 + data:null），
+                # 例如 push2delay 域对历史 kline 请求就是如此。若把它当成成功：
+                # ① 会「粘住」这个没用的域名，毒化后续所有请求；
+                # ② 调用方拿到 data=null 后在 data["data"] 上 AttributeError。
+                # 所以这里必须把 rc != 0 / null 载荷判为失败，继续换域名。
+                if data is None:
+                    raise ValueError(f"null 载荷：{host}{path}")
+                if isinstance(data, dict):
+                    rc = data.get("rc")
+                    if rc is not None and str(rc).strip() not in ("0", ""):
+                        raise ValueError(
+                            f"rc={rc}：{str(data.get('message') or '')[:60]}"
+                            f"（{host}{path}）")
                 self._host = host  # 粘住可用域名
                 return data
             except Exception as e:  # noqa: BLE001 - 逐域名降级
@@ -230,7 +247,7 @@ class EastMoneyAdapter:
         kline string: date,open,close,high,low,volume,amount,amplitude,pct_change,change,turnover
         """
         rows: list[dict] = []
-        klines = data.get("data", {}).get("klines") or []
+        klines = (data.get("data") or {}).get("klines") or []
         if not klines:
             return rows
 
@@ -350,7 +367,7 @@ class EastMoneyAdapter:
             # 完整窗口，不至于整段断档。
             data = await self._get_json("/api/qt/stock/fflow/kline/get", params)
 
-        klines = data.get("data", {}).get("klines") or []
+        klines = (data.get("data") or {}).get("klines") or []
         if not klines:
             return pd.DataFrame()
 
@@ -406,7 +423,7 @@ class EastMoneyAdapter:
             logger.error("EastMoney sector boards failed", error=str(e))
             raise
 
-        rows = data.get("data", {}).get("diff") or []
+        rows = (data.get("data") or {}).get("diff") or []
         out = []
         for r in rows:
             try:
@@ -441,9 +458,12 @@ class EastMoneyAdapter:
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
                 "klt": "101", "fqt": "1", "lmt": str(days),
             },
+            # 历史类端点：实时域(push2/push2delay)对板块日线返回 rc=102，
+            # 混在里面只会白跑一轮。
+            hosts=self._HISTORY_HOSTS,
         )
 
-        klines = data.get("data", {}).get("klines") or []
+        klines = (data.get("data") or {}).get("klines") or []
         rows = []
         for line in klines:
             parts = str(line).split(",")
@@ -452,7 +472,7 @@ class EastMoneyAdapter:
             try:
                 rows.append({
                     "sector_code": sector_code.upper(),
-                    "name": str(data.get("data", {}).get("name", "")),
+                    "name": str((data.get("data") or {}).get("name", "")),
                     "date": parts[0],
                     "open": float(parts[1]), "close": float(parts[2]),
                     "high": float(parts[3]), "low": float(parts[4]),
@@ -469,7 +489,7 @@ class EastMoneyAdapter:
 
     async def get_sector_fund_flow(self, sector_code: str,
                                    days: int = 20) -> pd.DataFrame:
-        """板块主力资金流（push2 fflow，secid=90.BKxxxx）。
+        """板块主力资金流（fflow，secid=90.BKxxxx）。
 
         字段：trade_date, main_net_inflow, small/mid/large/super_large, main_net_pct
         """
@@ -481,9 +501,10 @@ class EastMoneyAdapter:
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
                 "klt": "101", "lmt": str(days),
             },
+            hosts=self._HISTORY_HOSTS,
         )
 
-        klines = data.get("data", {}).get("klines") or []
+        klines = (data.get("data") or {}).get("klines") or []
         rows = []
         for line in klines:
             parts = str(line).split(",")

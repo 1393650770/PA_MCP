@@ -1,7 +1,8 @@
 # [AI:BEGIN]
 # PA_MCP - Data Layer: Daily Update Scheduler Pipeline
-# 8-phase pipeline: calendar → basic info → daily kline → minute kline →
-# financials → capital flow → dragon tiger → technical indicators
+# 11-phase pipeline: calendar → basic info → daily kline → minute kline →
+# financials → capital flow → dragon tiger → technical indicators →
+# index daily → sentiment → sector rotation
 # [AI:END]
 
 from __future__ import annotations
@@ -136,6 +137,7 @@ class DataUpdateScheduler:
             ("8_indicators", self._update_indicators, True),
             ("9_index_daily", self._update_index_daily, True),
             ("10_sentiment", self._update_sentiment, True),
+            ("11_sector", self._update_sector, True),
         ]
 
         for phase_name, phase_func, is_implemented in phases:
@@ -1349,6 +1351,10 @@ class DataUpdateScheduler:
     # 情绪回溯天数：一次补齐近 N 个交易日（东财涨停池按日期可回溯）
     SENTIMENT_BACKFILL_DAYS = 20
 
+    # 板块装载规模：与 predict_sector_rotation 保持一致（60 板块 / 120 日）
+    SECTOR_TOP_N = 60
+    SECTOR_DAYS = 120
+
     async def _update_sentiment(self, force_full: bool) -> int:
         """维护游资情绪日统计（sentiment_daily）。
 
@@ -1488,6 +1494,32 @@ class DataUpdateScheduler:
         if saved == 0:
             logger.warning("Sentiment unavailable (all sources failed)")
         return saved
+
+    async def _update_sector(self, force_full: bool) -> int:
+        """维护板块日线（sector_daily）。
+
+        为什么必须在收盘后跑：板块表的唯一历史装载入口曾是
+        `predict_sector_rotation(load_data=True)`，挂在 08:23 的盘前晨报上
+        —— 盘前只能拿到**上一交易日**的板块行情，于是板块图永远滞后一天。
+        这里把它并入收盘管线，让 15:05 的数据装载顺便刷新板块。
+
+        降级链见 SectorRotationAnalyzer.load_sector_data：
+        东财板块 → 10jqka 行业板块（真实分类）→ 合成板块。
+        返回本次写入的板块数；非必需 phase，失败不阻塞管线。
+        """
+        from pa_mcp.research.sector_rotation import get_sector_rotation_analyzer
+
+        analyzer = get_sector_rotation_analyzer()
+        info = await analyzer.load_sector_data(top_n=self.SECTOR_TOP_N,
+                                               days=self.SECTOR_DAYS)
+        loaded = int(info.get("loaded", 0) or 0)
+        if loaded == 0:
+            logger.warning("Sector load failed", detail=str(info.get("message"))[:160])
+        else:
+            logger.info("Sector loaded", loaded=loaded,
+                        total=info.get("boards_total"), src=info.get("source", "eastmoney"),
+                        detail=str(info.get("message"))[:100])
+        return loaded
 
 
 # ---- Module Entry Point ----
