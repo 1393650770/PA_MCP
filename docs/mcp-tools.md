@@ -1,8 +1,8 @@
 # PA_MCP MCP 工具全览
 
-> 自动盘点：共 **97** 个 MCP 工具（与 UI 功能对等，新增工具自动入 pa_help）。研究参考，非投资建议。
+> 自动盘点：共 **116** 个 MCP 工具（与 UI 功能对等，新增工具自动入 pa_help）。研究参考，非投资建议。
 
-## 数据（16）
+## 数据（19）
 | 工具 | 说明 |
 |---|---|
 | `analyze_stock` | 个股综合分析（数据看板对等）：K线+实时估值+资金流+策略信号+缠论。 |
@@ -23,6 +23,7 @@
 | `scan_limit_up` | Scan limit-up stocks with chain ladder analysis (连板梯队) and seal qualit |
 | `scan_volume_surge` | Scan stocks with abnormal volume surge. |
 | `search_stock` | Search stocks by name or code. |
+| `get_kline_geometry` | K 线几何形态特征（价格行为特征工程：影线/实体比、连续形态等）。 |
 
 ## 预测（9）
 | 工具 | 说明 |
@@ -37,7 +38,7 @@
 | `sector_leaders` | 板块领涨股挖掘（板块轮动 → 个股闭环）。 |
 | `sector_rotation_status` | 板块轮动当前状态：RS 排名 / 轮入轮出 / 轮动速度（只读分析，不预测）。 |
 
-## Agent/LLM（13）
+## Agent/LLM（18）
 | 工具 | 说明 |
 |---|---|
 | `agent_analyze_stock` | AI-powered multi-dimensional stock analysis. |
@@ -53,6 +54,11 @@
 | `agent_scan_market` | AI-powered full market scan — run all strategies, rank by strength sco |
 | `agent_sector_analysis` | Sector/industry rotation analysis — identify leading and lagging secto |
 | `portfolio_ai_analysis` | 持仓股 AI 综合分析：真实数据 + 策略信号 + LLM 解读。 |
+| `agent_two_stage_analysis` | 两阶段研究分析（诊断→路由→决策，决策纪律链）。 |
+| `agent_plan` | Agent 自主规划：把研究目标拆解为可执行的工具调用计划。 |
+| `agent_plan_update` | Agent 计划动态重规划：反馈已执行步骤的结果，调整剩余步骤。 |
+| `agent_lessons` | 检索历史教训（Reflexion 沉淀：决策未兑现 → 教训 → 后续参考）。 |
+| `agent_self_improve` | 递归自我改进评估：聚合系统运行证据 → 下一轮改进建议。 |
 
 ## 选股/研究（25）
 | 工具 | 说明 |
@@ -120,11 +126,36 @@
 | `watchlist_consensus` | 自选股综合信号扫描：批量 5 源加权投票 → 强看涨/看跌/分歧清单。 |
 | `watchlist_resonance` | 自选股共振扫描：批量三周期共振 → 强共振看涨/看跌/分歧清单。 |
 
-## 系统（3）
+## 可视化图表（5）
+
+生成 PNG 图片，落盘在 OpenClaw media 白名单目录内，返回的 `data.qqmedia` 已包成
+`<qqmedia>绝对路径</qqmedia>` 标签，**原样粘贴到回复正文**即可推给 QQ Bot。
+
+| 工具 | 说明 |
+|---|---|
+| `chart_kline` | K线图（蜡烛 + MA5/10/20/60 + 成交量副图）。指数必须带前缀（如 `sh000001`），裸 `000001` 是平安银行。 |
+| `chart_compare` | 多股归一化对比（首日=100），PNG。 |
+| `chart_fund_flow` | 个股资金流图（主力/超大/大/中/小单柱状，亿元）。东财历史被限流时自动降级新浪口径，`data.source` 会标明来源。 |
+| `chart_sentiment` | 游资情绪周期图（涨停/跌停家数 + 连板高度 + 情绪评分）。 |
+| `chart_sector_rotation` | 板块强度图（当日涨幅横向柱状）。当日板块装载不完整时回退到最近一个完整交易日，并返回 `data.as_of`——**简报里必须写明"数据截至 <as_of>"**。 |
+
+## ETF（4）
+| 工具 | 说明 |
+|---|---|
+| `etf_market` | ETF 市场全景：沪深 ETF 列表 + 实时行情 + IOPV 折溢价。 |
+| `get_etf_quote` | 单只 ETF 行情详情（含 IOPV 参考净值与折溢价）。 |
+| `scan_etf` | ETF 策略信号扫描（池 = 沪深 ETF 列表，与股票同等信号逻辑）。 |
+| `etf_backfill` | 批量回填 ETF K 线到本地库（扫描提速治本）。 |
+
+## 系统（7）
 | 工具 | 说明 |
 |---|---|
 | `data_quality_report` | 数据质量体检：表覆盖 + K 线完整性（OHLC 一致性/非正/NaN/缺口）。 |
 | `pa_help` | Get a complete guide to PA_MCP — all tools, common workflows, and data |
-| `run_daily_update` | 每日数据自动更新：调度器 8-phase 全链路（日历/股票池/日线/ |
+| `run_daily_update` | 每日数据自动更新：调度器 11-phase 全链路（日历/股票池/日线/分钟线/财务/资金流/龙虎榜/指标/指数日线/游资情绪/板块日线）。 |
+| `compress_context` | 上下文压缩：长文本 LLM 精炼（保留关键数字/结论/风险，≤max_chars）。 |
+| `compress_kline_data` | K 线上下文压缩：近期明细 + 早期周聚合 + 整体统计。 |
+| `broker_status` | 📊 交易通道状态：当前模式（paper/qmt）、账户现金/持仓/盈亏。 |
+| `place_order` | 📤 下单（默认纸面账户，零风险；QMT 实盘需配置并开启总闸）。 | |
 
 *分类共 95 个；其余工具见 `pa_help` 动态清单。*
