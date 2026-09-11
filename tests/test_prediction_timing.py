@@ -200,15 +200,66 @@ def test_freshness_text_in_payload():
     assert "滞后" not in r.to_dict()["freshness"]
 
 
-def test_stale_days_fallback_weekday_count():
-    """日历不可用时的降级估算：只数工作日。"""
+def test_stale_days_fallback_weekday_count(monkeypatch):
+    """日历不可用时的降级估算：只数工作日。
+
+    强制让 _store() 抛错，保证走降级分支（否则依赖真实库里的日历，
+    全量跑套件时若被换库/日历未覆盖，结果会随环境漂移）。
+    """
     svc = _svc()
+
+    def _boom():
+        raise RuntimeError("no db")
+
+    monkeypatch.setattr(svc, "_store", _boom)
     # 2026-09-04(周五) → 2026-09-07(周一) 跨周末，应计 1 个工作日
-    assert svc._stale_trading_days("2026-09-04", "2026-09-07") >= 1
+    assert svc._stale_trading_days("2026-09-04", "2026-09-07") == 1
     # 同日不滞后
     assert svc._stale_trading_days("2026-09-10", "2026-09-10") == 0
     # as_of 晚于 predict_date 视为不滞后
     assert svc._stale_trading_days("2026-09-11", "2026-09-10") == 0
+    # 整周：09-07(周一) → 09-14(周一) 共 5 个工作日
+    assert svc._stale_trading_days("2026-09-07", "2026-09-14") == 5
+
+
+def test_stale_days_zero_when_calendar_covers_but_no_trading_day(monkeypatch):
+    """日历覆盖该区间但区间内无交易日（假期周）→ 可信地返回 0。"""
+    svc = _svc()
+
+    class _FakeStore:
+        def __init__(self):
+            self.calls = 0
+
+        def query_df(self, sql, params=None):
+            self.calls += 1
+            import pandas as pd
+            # 第一次查询（区间内交易日数）= 0；第二次（覆盖范围检查）> 0
+            return pd.DataFrame({"c": [0 if self.calls == 1 else 5]})
+
+        def close(self):
+            pass
+
+    fake = _FakeStore()
+    monkeypatch.setattr(svc, "_store", lambda: fake)
+    assert svc._stale_trading_days("2026-09-04", "2026-09-07") == 0
+    assert fake.calls == 2
+
+
+def test_stale_days_falls_back_when_calendar_not_covering(monkeypatch):
+    """日历表存在但没覆盖该区间（换库/新装）→ 必须退化估算，不能乐观返回 0。"""
+    svc = _svc()
+
+    class _EmptyStore:
+        def query_df(self, sql, params=None):
+            import pandas as pd
+            return pd.DataFrame({"c": [0]})   # 区间内 0，覆盖范围也 0
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(svc, "_store", lambda: _EmptyStore())
+    # 日历不可信 → 走工作日估算：09-04(周五) → 09-07(周一) = 1
+    assert svc._stale_trading_days("2026-09-04", "2026-09-07") >= 1
 
 
 # ---- 端到端：确定性预测路径 ----

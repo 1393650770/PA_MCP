@@ -605,7 +605,19 @@ class PredictionService:
                     "WHERE is_trading_day = TRUE AND CAST(date AS VARCHAR) > ? "
                     "AND CAST(date AS VARCHAR) <= ?", [as_of, predict_date])
                 if df is not None and not df.empty:
-                    return int(df["c"].iloc[0])
+                    n = int(df["c"].iloc[0])
+                    if n > 0:
+                        return n
+                    # n == 0 有两种可能：区间内确实没有交易日（假期周，可信），
+                    # 或日历根本没覆盖这段（换库/新装，此时必须退化估算而不是
+                    # 乐观地当成"没滞后"——全量测试里就踩过这个坑）。
+                    cov = store.query_df(
+                        "SELECT COUNT(*) AS c FROM trade_calendar "
+                        "WHERE CAST(date AS VARCHAR) > ?", [as_of])
+                    covered = (cov is not None and not cov.empty
+                               and int(cov["c"].iloc[0]) > 0)
+                    if covered:
+                        return 0
             finally:
                 store.close()
         except Exception as e:  # noqa: BLE001
