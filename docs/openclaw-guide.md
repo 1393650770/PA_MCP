@@ -93,7 +93,7 @@ OpenClaw 引导你时遵循的顺序（与 UI「新手决策地图」同一套�
 
 ## 五、可视化图表（生成 PNG → 推送 QQ Bot）
 
-PA_MCP 提供 5 个出图工具。它们把 PNG 落到 OpenClaw 的 qqbot-media 白名单目录，
+PA_MCP 提供 7 个出图工具。它们把 PNG 落到 OpenClaw 的 qqbot-media 白名单目录，
 返回的 `data.qqmedia` 字段就是可直接发送的 `<qqmedia>路径</qqmedia>` 标签。
 
 | 工具 | 出图内容 |
@@ -103,6 +103,8 @@ PA_MCP 提供 5 个出图工具。它们把 PNG 落到 OpenClaw 的 qqbot-media 
 | `chart_compare(symbols, days=120)` | 多股归一化对比（首日=100），最多 5 只 |
 | `chart_sector_rotation(top_n=20)` | 板块强度横向柱状 |
 | `chart_sentiment(days=30)` | 涨停/跌停家数 + 连板高度 + 情绪评分 |
+| `chart_limit_up_ladder(days=30)` | 连板梯队堆叠图（首板/2板/3板/4板+），断板一眼可见 |
+| `chart_prediction_review(symbol="", days=365)` | 预测验证（按方向命中/未中 + 概率 vs 实际收益散点） |
 
 **对话里直接说**：「画一下 600196 的 K 线图发给我」即可。
 

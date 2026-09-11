@@ -126,7 +126,7 @@
 | `watchlist_consensus` | 自选股综合信号扫描：批量 5 源加权投票 → 强看涨/看跌/分歧清单。 |
 | `watchlist_resonance` | 自选股共振扫描：批量三周期共振 → 强共振看涨/看跌/分歧清单。 |
 
-## 可视化图表（5）
+## 可视化图表（7）
 
 生成 PNG 图片，落盘在 OpenClaw media 白名单目录内，返回的 `data.qqmedia` 已包成
 `<qqmedia>绝对路径</qqmedia>` 标签，**原样粘贴到回复正文**即可推给 QQ Bot。
@@ -137,6 +137,8 @@
 | `chart_compare` | 多股归一化对比（首日=100），PNG。 |
 | `chart_fund_flow` | 个股资金流图（主力/超大/大/中/小单柱状，亿元）。东财历史被限流时自动降级新浪口径，`data.source` 会标明来源。 |
 | `chart_sentiment` | 游资情绪周期图（涨停/跌停家数 + 连板高度 + 情绪评分）。 |
+| `chart_limit_up_ladder` | 连板梯队堆叠图（首板/2板/3板/4板+）。梯队是否「断板」一眼可见。 |
+| `chart_prediction_review` | 预测验证图（按方向命中/未中 + 预测概率 vs 实际收益散点）。只统计已到期预测，`data.samples` 为样本数。 |
 | `chart_sector_rotation` | 板块强度图（当日涨幅横向柱状）。当日板块装载不完整时回退到最近一个完整交易日，并返回 `data.as_of`——**简报里必须写明"数据截至 <as_of>"**。 |
 
 ## ETF（4）

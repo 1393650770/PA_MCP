@@ -275,3 +275,115 @@ def _empty(title: str) -> go.Figure:
                          font=dict(size=16, color="#888"))],
     )
     return fig
+
+
+# 连板梯队配色：首板最浅 → 高板最深，一眼看出"高度")
+LADDER_COLORS = {
+    "first_board_count": "#ffcdd2",   # 首板
+    "board2_count": "#ef5350",        # 2 板
+    "board3_count": "#c62828",        # 3 板
+    "board4p_count": "#7f0000",       # 4 板及以上
+}
+
+
+def limit_up_ladder_figure(df: pd.DataFrame) -> go.Figure:
+    """连板梯队堆叠图：首板 / 2 板 / 3 板 / 4 板+ 每日家数。
+
+    df 必含 date + first_board_count + board2_count + board3_count +
+    board4p_count（可选 limit_up_count 作总量参考线）。
+    游资视角核心图：梯队是否"断板"（2 板以上数量骤降）即情绪接力是否顺畅。
+    """
+    need = ["date", "first_board_count", "board2_count",
+            "board3_count", "board4p_count"]
+    if df.empty or any(c not in df.columns for c in need):
+        return _empty("连板梯队数据为空")
+    df = df.sort_values("date").reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%m-%d")
+
+    fig = make_subplots(rows=1, cols=1, specs=[[{"secondary_y": True}]])
+    for col, color in LADDER_COLORS.items():
+        fig.add_trace(go.Bar(
+            x=df["date"], y=df[col].fillna(0),
+            name={"first_board_count": "首板", "board2_count": "2 板",
+                  "board3_count": "3 板", "board4p_count": "4 板+"}[col],
+            marker_color=color,
+        ), secondary_y=False)
+    if "limit_up_count" in df.columns:
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=df["limit_up_count"].fillna(0),
+            name="涨停总数", mode="lines+markers",
+            line=dict(color=GRAY, width=1.5, dash="dot"),
+        ), secondary_y=True)
+
+    fig.update_layout(
+        title="连板梯队（首板/2板/3板/4板+）", template="plotly_white",
+        barmode="stack", height=380,
+        legend=dict(orientation="h", y=-0.14),
+        margin=dict(l=10, r=10, t=50, b=60),
+    )
+    fig.update_yaxes(title_text="家数", secondary_y=False)
+    fig.update_yaxes(title_text="涨停总数", secondary_y=True)
+    # 'MM-DD' 字符串会被 plotly 当日期按「月-年」解析 → 必须 category
+    fig.update_xaxes(type="category", nticks=12)
+    return fig
+
+
+def prediction_review_figure(df: pd.DataFrame) -> go.Figure:
+    """预测验证图：左=按方向命中/未命中堆叠柱，右=预测概率 vs 实际收益散点。
+
+    df 必含 direction + status；可选 probability + actual_return_pct。
+    """
+    need = ["direction", "status"]
+    if df.empty or any(c not in df.columns for c in need):
+        return _empty("预测验证数据为空")
+    d = df.copy()
+    for col in need:
+        d[col] = d[col].astype(str)
+
+    dir_order = ["up", "sideways", "down"]
+    dir_label = {"up": "看涨", "sideways": "震荡", "down": "看跌"}
+    fig = make_subplots(
+        rows=1, cols=2, subplot_titles=("按方向的命中情况", "预测概率 vs 实际收益"),
+        specs=[[{"type": "xy"}, {"type": "xy"}]],
+    )
+
+    # 左：direction × status 堆叠柱
+    status_color = {"hit": RED, "miss": GREEN, "ambiguous": GRAY}
+    for st, color in status_color.items():
+        ys = []
+        for dr in dir_order:
+            sub = d[(d["direction"] == dr) & (d["status"] == st)]
+            ys.append(int(len(sub)))
+        if sum(ys) > 0:
+            fig.add_trace(go.Bar(
+                x=[dir_label.get(x, x) for x in dir_order], y=ys,
+                name={"hit": "命中", "miss": "未中", "ambiguous": "模糊"}[st],
+                marker_color=color,
+            ), row=1, col=1)
+
+    # 右：概率 vs 实际收益散点（颜色按方向）
+    if {"probability", "actual_return_pct"} <= set(d.columns):
+        sub = d.dropna(subset=["probability", "actual_return_pct"])
+        for dr, color in (("up", RED), ("down", GREEN), ("sideways", GRAY)):
+            s = sub[sub["direction"] == dr]
+            if s.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=s["probability"], y=s["actual_return_pct"],
+                mode="markers", name=dir_label.get(dr, dr),
+                marker=dict(color=color, size=9, opacity=0.75),
+            ), row=1, col=2)
+        fig.add_hline(y=0, line=dict(color="#bdbdbd", width=1, dash="dash"),
+                      row=1, col=2)
+
+    fig.update_layout(
+        title="预测验证（已到期预测 vs 实际走势）", template="plotly_white",
+        barmode="stack", height=380, showlegend=True,
+        legend=dict(orientation="h", y=-0.16),
+        margin=dict(l=10, r=10, t=50, b=70),
+    )
+    fig.update_xaxes(title_text="方向", row=1, col=1)
+    fig.update_yaxes(title_text="笔数", row=1, col=1)
+    fig.update_xaxes(title_text="预测概率", row=1, col=2, range=[0, 1])
+    fig.update_yaxes(title_text="实际收益 %", row=1, col=2)
+    return fig

@@ -716,10 +716,44 @@ class PredictionService:
             if pending.empty:
                 return self._summary(store)
 
+            # 只为「已到期」的预测拉行情。旧行为：对所有 pending 的 symbol 都拉
+            # 行情 —— pending 常年上百条，而 kline_provider（多源 router）在东财
+            # 被限流时每只要跑完整个降级链，几十次调用必然把 MCP 客户端拖到超时，
+            # 结果一条都回填不了。这里先用交易日历 + 库内最新行情日筛出真正
+            # 到期的少数几条，再拉行情。日历不可用时回退旧行为（宁慢勿错）。
+            h_days_map = {"1d": 1, "5d": 5, "20d": 20}
+            latest = store.query_df("SELECT MAX(date) AS d FROM kline_daily", [])
+            latest_day = (str(latest["d"].iloc[0])[:10]
+                          if latest is not None and not latest.empty else None)
+            cal_days: list[str] = []
+            try:
+                cal = store.query_df(
+                    "SELECT date FROM trade_calendar WHERE is_trading_day = TRUE "
+                    "ORDER BY date", [])
+                if cal is not None and not cal.empty:
+                    cal_days = [str(x)[:10] for x in cal["date"]]
+            except Exception:
+                cal_days = []
+
+            def _due(row) -> bool:
+                if not latest_day or not cal_days:
+                    return True  # 无法判断 → 保守处理
+                h = h_days_map.get(str(row["horizon"]), 5)
+                pd_ = str(row["predict_date"])[:10]
+                after = [d for d in cal_days if d >= pd_]
+                if len(after) < h + 1:
+                    return False  # 还没走完 horizon 个交易日
+                return after[h] <= latest_day
+
+            due_mask = pending.apply(_due, axis=1)
+            due_rows = pending[due_mask]
+            if due_rows.empty:
+                return self._summary(store)
+
             # 拉取所需股票最新行情（按到期预测分组，避免重复拉取）
             needed = {
                 row["symbol"]: row["horizon"]
-                for _, row in pending.iterrows()
+                for _, row in due_rows.iterrows()
             }
             klines: dict[str, pd.DataFrame] = {}
             latest_dates: dict[str, str] = {}
@@ -731,7 +765,7 @@ class PredictionService:
                 latest_dates[sym] = str(df["date"].iloc[-1])[:10]
 
             evaluated = 0
-            for _, row in pending.iterrows():
+            for _, row in due_rows.iterrows():
                 sym, hor = row["symbol"], row["horizon"]
                 df = klines.get(sym)
                 if df is None:

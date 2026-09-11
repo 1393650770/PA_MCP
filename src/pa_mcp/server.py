@@ -2730,6 +2730,85 @@ async def chart_sentiment(days: int = 30,
                          error_type="INTERNAL_ERROR")
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_limit_up_ladder(days: int = 30,
+                                width: int = 1280, height: int = 480) -> dict[str, Any]:
+    """连板梯队堆叠图（首板/2板/3板/4板+ 每日家数），PNG。
+
+    游资核心视角：梯队是否「断板」（2 板以上数量骤降）直接说明情绪接力
+    是否顺畅。数据来自 sentiment_daily 表（东财涨停池全市场口径）。
+
+    Returns:
+        data.qqmedia 已包装好的 `<qqmedia>path</qqmedia>`，直接发给 QQBot。
+    """
+    try:
+        if _store is None:
+            return _response(success=False, error="store 未初始化",
+                             error_type="INTERNAL")
+        end = datetime.now().date()
+        start = end - timedelta(days=days * 2 + 5)
+        df = _store.query_df(
+            "SELECT date, limit_up_count, first_board_count, board2_count, "
+            "board3_count, board4p_count FROM sentiment_daily "
+            "WHERE date >= ? AND date <= ? ORDER BY date ASC",
+            [start.isoformat(), end.isoformat()],
+        )
+        if df is None or df.empty:
+            return _response(success=False, error="无连板梯队数据",
+                             error_type="NOT_FOUND")
+        fig = chart_figs.limit_up_ladder_figure(df)
+        out = chart_render.render(
+            fig, prefix="ladder", title="连板梯队",
+            width=width, height=height)
+        return _response(success=True, data=out)
+    except Exception as e:
+        logger.error("chart_limit_up_ladder failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def chart_prediction_review(symbol: str = "",
+                                  days: int = 365,
+                                  width: int = 1280, height: int = 480) -> dict[str, Any]:
+    """预测验证图（按方向命中/未命中 + 预测概率 vs 实际收益散点），PNG。
+
+    只统计已到期的预测（prediction_log.status = hit/miss/ambiguous），
+    pending 的不画。预测可检验，非算命——这张图就是「检验」本身的可视化。
+
+    Args:
+        symbol: 可选，只看某只股票；留空看全部
+    """
+    try:
+        if _store is None:
+            return _response(success=False, error="store 未初始化",
+                             error_type="INTERNAL")
+        start = (datetime.now().date() - timedelta(days=days)).isoformat()
+        where = ["status IN ('hit','miss','ambiguous')",
+                 "predict_date >= ?"]
+        params: list[Any] = [start]
+        if symbol:
+            where.append("symbol = ?")
+            params.append(symbol)
+        df = _store.query_df(
+            "SELECT predict_date, symbol, horizon, direction, probability, "
+            "status, actual_return_pct FROM prediction_log "
+            f"WHERE {' AND '.join(where)} ORDER BY predict_date ASC", params)
+        if df is None or df.empty:
+            return _response(success=False,
+                             error="暂无已到期的预测记录（先调 predict_market 且等到期验证）",
+                             error_type="NOT_FOUND")
+        fig = chart_figs.prediction_review_figure(df)
+        title = f"预测验证 · {symbol}" if symbol else "预测验证"
+        out = chart_render.render(
+            fig, prefix="pred_review", title=title, width=width, height=height)
+        return _response(success=True, data={**out, "samples": int(len(df))})
+    except Exception as e:
+        logger.error("chart_prediction_review failed", error=str(e))
+        return _response(success=False, error=str(e),
+                         error_type="INTERNAL_ERROR")
+
+
 async def predict_market(symbol: str, horizon: Literal["1d", "5d", "20d"] = "5d",
                          save: bool = True) -> dict[str, Any]:
     """AI 市场预测：基于 K 线技术特征预测未来走势方向与概率。
