@@ -152,7 +152,13 @@ class TestLockContention:
         assert "排他锁" in out or "占用" in out, out
 
     def test_connects_immediately_when_unlocked(self, src_dir):
-        """无竞争时零等待。"""
+        """无竞争时应立刻连上（不应排队等待）。
+
+        注意：不要断言"等待恰好为 0.0s"。子进程首次 `duckdb.connect`
+        偶发失败（Windows 上文件句柄释放有延迟、杀软扫描、全量跑套件时
+        机器负载高）会走一次重试，waited 变成 0.1 —— 这仍属"立刻连上"，
+        但该断言会让测试随机器负载随机变红。这里只卡"远小于重试预算"。
+        """
         tmp = tempfile.mkdtemp(prefix="duckfree_")
         db_path = str(Path(tmp) / "free.duckdb")
         con = duckdb.connect(db_path)
@@ -161,7 +167,8 @@ class TestLockContention:
 
         out = _run_child(db_path, src_dir, timeout_seconds="5")
         assert out.startswith("OK "), out
-        assert "waited=0.0" in out, out
+        waited_s = out.split("waited=")[1].split()[0]
+        assert float(waited_s) <= 0.5, out
 
 
 class TestReadOnlyMode:
