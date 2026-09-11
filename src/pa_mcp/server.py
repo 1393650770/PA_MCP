@@ -3732,6 +3732,103 @@ async def data_quality_report() -> dict[str, Any]:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def data_freshness_check() -> dict[str, Any]:
+    """数据新鲜度体检：各表最新交易日 vs 应到达的交易日。
+
+    回答一个关键问题："今天的收盘数据到底进库了没有？"
+
+    背景（真实事故）：日线 phase 会因数据源限流在跑了一半时熔断退出，
+    当天 K 线缺失却不报错 —— 于是当天所有预测/简报都建立在**上一交易日**
+    的数据上，用户看到"看涨"时行情已经走完（"预测出来时票已经涨完了"）。
+    本工具把这种滞后显式暴露出来：stale_trading_days > 0 时应该补跑
+    run_daily_update()。
+
+    Returns:
+        expected_date: 应到达的交易日（盘中为上一交易日，收盘后为当日）
+        tables: 各表 {last_date, stale_trading_days, ok}
+        fresh: 关键表（kline_daily）是否新鲜
+        hint: 可执行的处置建议
+    """
+    try:
+        from datetime import datetime as _dt
+
+        from pa_mcp.config import get_settings
+        from pa_mcp.data.store import DuckDBStore
+
+        settings = get_settings()
+        store = DuckDBStore(settings.database.path)
+        store.connect()
+        try:
+            today = _dt.now().date().isoformat()
+
+            def _scalar(sql: str, params: list | None = None) -> str:
+                try:
+                    df = store.query_df(sql, params or [])
+                    if df is None or df.empty:
+                        return ""
+                    return str(df.iloc[0, 0])[:10]
+                except Exception:
+                    return ""
+
+            # 应到达交易日：15:00 前用上一交易日，收盘后用当日
+            now_hm = _dt.now().hour * 60 + _dt.now().minute
+            expected = _scalar(
+                "SELECT CAST(MAX(date) AS VARCHAR) FROM trade_calendar "
+                "WHERE is_trading_day = TRUE AND CAST(date AS VARCHAR) <= ?",
+                [today if now_hm >= 15 * 60 + 5 else
+                 _scalar("SELECT CAST(MAX(date) AS VARCHAR) FROM trade_calendar "
+                         "WHERE is_trading_day = TRUE AND CAST(date AS VARCHAR) < ?",
+                         [today]) or today])
+
+            def _stale(last: str) -> int:
+                if not last or not expected or last >= expected:
+                    return 0
+                n = _scalar(
+                    "SELECT COUNT(*) FROM trade_calendar WHERE is_trading_day = TRUE "
+                    "AND CAST(date AS VARCHAR) > ? AND CAST(date AS VARCHAR) <= ?",
+                    [last, expected])
+                try:
+                    return int(n)
+                except Exception:
+                    return 0
+
+            tables: dict[str, dict[str, Any]] = {}
+            for t, col in (("kline_daily", "date"), ("index_daily", "date"),
+                           ("sentiment_daily", "date"), ("sector_daily", "date")):
+                try:
+                    last = _scalar(f"SELECT CAST(MAX({col}) AS VARCHAR) FROM {t}")
+                except Exception:
+                    last = ""
+                if not last:
+                    continue
+                sd = _stale(last)
+                tables[t] = {"last_date": last, "stale_trading_days": sd,
+                             "ok": sd == 0}
+
+            kline_stale = tables.get("kline_daily", {}).get(
+                "stale_trading_days", 0)
+            fresh = kline_stale == 0
+            hint = (
+                "数据新鲜，可直接做预测与简报。" if fresh else
+                f"kline_daily 落后 {kline_stale} 个交易日（最新 {tables.get('kline_daily', {}).get('last_date')}，"
+                f"应为 {expected}）：此刻所有预测都建立在过期数据上，请先调用 run_daily_update() 补跑，"
+                f"并在简报中标注'数据截至 <as_of>'。")
+            return _response(data={
+                "today": today,
+                "expected_date": expected,
+                "tables": tables,
+                "fresh": fresh,
+                "stale_trading_days": kline_stale,
+                "hint": hint,
+            })
+        finally:
+            store.close()
+    except Exception as e:
+        logger.error("data_freshness_check failed", error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def trading_actions(symbols: str = "",
                            include_llm: bool = True) -> dict[str, Any]:
     """💰 今日操作面板：持仓止盈止损 / 买入候选 / 操作建议（含 LLM 解读）。

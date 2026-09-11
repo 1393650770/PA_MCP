@@ -331,6 +331,14 @@ TABLE_DEFINITIONS: dict[str, str] = {
             status VARCHAR(10) DEFAULT 'pending',
             actual_return_pct DOUBLE,
             evaluated_date DATE,
+            -- 时效性字段：预测到底基于哪一天的行情（as_of），相对预测日滞后
+            -- 几个交易日（stale_days），以及预测时该股是否已涨过头（entry_timing）。
+            -- 没有这三个字段时，用户看到"看涨 60%"无法判断行情走完没有 —— 这正是
+            -- "预测出来时票已经涨完了"的根因之一。
+            as_of VARCHAR(10),
+            stale_days INTEGER DEFAULT 0,
+            entry_timing VARCHAR(20),
+            base_close DOUBLE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """,
@@ -550,7 +558,12 @@ class DuckDBStore:
                 logger.info("DuckDB connection closed")
 
     def _init_tables(self) -> None:
-        """Create all required tables if they don't exist."""
+        """Create all required tables if they don't exist.
+
+        已存在的库（CREATE TABLE IF NOT EXISTS 不会改结构）走一遍轻量迁移，
+        补齐后加的列（ALTER TABLE ... ADD COLUMN IF NOT EXISTS）。DuckDB 支持
+        IF NOT EXISTS，重复执行安全。
+        """
         conn = self.connect()
         for table_name, ddl in TABLE_DEFINITIONS.items():
             try:
@@ -559,6 +572,42 @@ class DuckDBStore:
             except Exception as e:
                 logger.error("Failed to create table", table=table_name, error=str(e))
                 raise
+        self._migrate_columns(conn)
+
+    # 后加的列（老库缺列时补上）：表名 → [(列名, 类型), ...]
+    _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+        "prediction_log": [
+            ("as_of", "VARCHAR(10)"),
+            ("stale_days", "INTEGER DEFAULT 0"),
+            ("entry_timing", "VARCHAR(20)"),
+            ("base_close", "DOUBLE"),
+        ],
+    }
+
+    def _migrate_columns(self, conn) -> None:
+        """为已存在的表补齐后加的列（幂等）。"""
+        for table, cols in self._ADDED_COLUMNS.items():
+            try:
+                have = {
+                    r[0] for r in conn.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = ?", [table]).fetchall()
+                }
+            except Exception as e:  # noqa: BLE001
+                logger.debug("column check skipped", table=table, error=str(e))
+                continue
+            if not have:
+                continue
+            for name, typ in cols:
+                if name in have:
+                    continue
+                try:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {typ}")
+                    logger.info("Column migrated", table=table, column=name)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Column migration failed", table=table,
+                                   column=name, error=str(e))
 
     # ---- CRUD Operations ----
 

@@ -56,7 +56,33 @@ SIDEWAYS_THRESHOLD_PCT = 1.5   # |收益| <= 1.5% 视为 sideways 命中
 AMBIGUOUS_THRESHOLD_PCT = 1.0  # 非 sideways 预测中 |收益| <= 1.0% 视为模糊
 DEFAULT_SIDEWAYS_PROB = 0.15   # 确定性降级时 sideways 基准概率
 
-PROMPT_VERSION = "pred-v1"
+# ---- 入场时机（反追高）阈值 ----
+# 场景：预测基于收盘数据产出，用户次日才看到 —— 若这只票在预测基准日已经涨停
+#      / 20 日已涨 30%+，等用户看到时涨幅早就兑现了，此时再给"看涨"等于让人接盘。
+# 因此对"已经涨过"的票在看涨方向上做概率收缩 + 期望收益折扣，并显式告警。
+LIMIT_UP_PCT = 9.8        # 单日涨幅 ≥ 此值视为涨停（主板 10%，留 0.2 容差）
+OVERHEAT_RET20 = 30.0     # 20 日涨幅 ≥ 30% 视为过热
+OVERHEAT_BIAS20 = 20.0    # 乖离 MA20 ≥ 20% 视为过热
+EXTENDED_RET20 = 18.0     # 20 日涨幅 ≥ 18% 视为已拉伸
+EXTENDED_BIAS20 = 12.0    # 乖离 MA20 ≥ 12% 视为已拉伸
+EXTENDED_RET5 = 12.0      # 5 日涨幅 ≥ 12% 视为已拉伸（短期急拉）
+
+# 看涨方向上的收缩系数：(概率向 0.5 收缩系数, 期望收益折扣)
+GUARD_FACTORS: dict[str, tuple[float, float]] = {
+    "limit_up": (0.55, 0.40),
+    "overheated": (0.70, 0.55),
+    "extended": (0.85, 0.75),
+    "ok": (1.0, 1.0),
+}
+
+ENTRY_TIMING_ZH: dict[str, str] = {
+    "ok": "位置正常",
+    "extended": "已拉伸",
+    "overheated": "过热",
+    "limit_up": "已涨停",
+}
+
+PROMPT_VERSION = "pred-v2"
 
 
 def cycle_zh(raw: str) -> str:
@@ -109,6 +135,17 @@ def extract_features(df: pd.DataFrame) -> dict[str, Any]:
         if avg20 > 0:
             vol_ratio = float(vol.iloc[-1]) / avg20
 
+    # ---- 时效性与反追高特征（"看到预测时已经涨完"的根因在此暴露） ----
+    # as_of：本批数据的最后一根 K 线日期。预测结论的时效性全靠它。
+    try:
+        as_of = str(data["date"].iloc[-1])[:10]
+    except Exception:
+        as_of = ""
+    last_chg = (last_close / float(close.iloc[-2]) - 1) * 100 if n >= 2 else 0.0
+    ret5 = (last_close / float(close.iloc[-6]) - 1) * 100 if n >= 6 else ret20
+    bias5 = (last_close / ma5 - 1) * 100 if ma5 else 0.0
+    bias20 = (last_close / ma20 - 1) * 100 if ma20 else 0.0
+
     atr_pct = _series(atr["atr14"]) / last_close * 100 if "atr14" in atr else 0.0
     adx_val = _series(adx["adx14"]) if "adx14" in adx else 20.0
     rsi14 = _series(rsi["rsi14"]) if "rsi14" in rsi else 50.0
@@ -151,7 +188,12 @@ def extract_features(df: pd.DataFrame) -> dict[str, Any]:
 
     features = {
         "last_close": round(last_close, 3),
+        "as_of": as_of,
         "ret20_pct": round(ret20, 2),
+        "ret5_pct": round(ret5, 2),
+        "last_chg_pct": round(last_chg, 2),
+        "bias5_pct": round(bias5, 2),
+        "bias20_pct": round(bias20, 2),
         "ret60_pct": round(ret60, 2),
         "ma5": round(ma5, 3), "ma20": round(ma20, 3), "ma60": round(ma60, 3),
         "ma_alignment": (
@@ -172,20 +214,72 @@ def extract_features(df: pd.DataFrame) -> dict[str, Any]:
     return features
 
 
+def entry_timing(features: dict[str, Any]) -> dict[str, str]:
+    """入场时机判定（确定性规则）：这只票现在追还来不来得及？
+
+    解决的核心问题：预测基于收盘数据产出、用户次日才看到，若基准日已经涨停
+    或 20 日已大涨，用户看到时涨幅早已兑现，"看涨"结论等于引导追高。
+
+    Returns:
+        {"state": ok|extended|overheated|limit_up, "state_zh": ..., "note": ...}
+    """
+    if not features or "error" in features:
+        return {"state": "ok", "state_zh": "位置正常", "note": "无数据，未判定"}
+
+    def _f(k: str) -> float:
+        try:
+            return float(features.get(k, 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    ret20, ret5 = _f("ret20_pct"), _f("ret5_pct")
+    bias20, last_chg = _f("bias20_pct"), _f("last_chg_pct")
+
+    if last_chg >= LIMIT_UP_PCT:
+        return {
+            "state": "limit_up", "state_zh": ENTRY_TIMING_ZH["limit_up"],
+            "note": (f"数据末日已涨停（{last_chg:+.1f}%），次日往往高开回落，"
+                     f"此时追涨性价比最低 —— 想参与需等回踩或换标的"),
+        }
+    if ret20 >= OVERHEAT_RET20 or bias20 >= OVERHEAT_BIAS20:
+        return {
+            "state": "overheated", "state_zh": ENTRY_TIMING_ZH["overheated"],
+            "note": (f"20 日涨幅 {ret20:+.1f}%、乖离 MA20 {bias20:+.1f}%，"
+                     f"涨幅已充分兑现，追高风险显著大于机会"),
+        }
+    if ret20 >= EXTENDED_RET20 or bias20 >= EXTENDED_BIAS20 or ret5 >= EXTENDED_RET5:
+        return {
+            "state": "extended", "state_zh": ENTRY_TIMING_ZH["extended"],
+            "note": (f"20 日涨幅 {ret20:+.1f}%（5 日 {ret5:+.1f}%）、"
+                     f"乖离 MA20 {bias20:+.1f}%，已有可观涨幅，回踩风险上升"),
+        }
+    return {
+        "state": "ok", "state_zh": ENTRY_TIMING_ZH["ok"],
+        "note": "未见明显过热，位置中性",
+    }
+
+
 def format_features(features: dict[str, Any]) -> str:
     """特征字典 → LLM 可读文本。"""
     if not features or "error" in features:
         return "无数据"
+    et = entry_timing(features)
     return (
-        f"收盘 {features['last_close']}，20日涨跌 {features['ret20_pct']:+.1f}%"
-        f"（60日 {features['ret60_pct']:+.1f}%）\n"
+        f"数据截至 {features.get('as_of') or '未知'}（收盘 {features['last_close']}），"
+        f"20日涨跌 {features['ret20_pct']:+.1f}%"
+        f"（5日 {features.get('ret5_pct', 0):+.1f}%，60日 {features['ret60_pct']:+.1f}%）\n"
+        f"乖离：MA5 {features.get('bias5_pct', 0):+.1f}% / MA20 {features.get('bias20_pct', 0):+.1f}%"
+        f"（末日涨跌 {features.get('last_chg_pct', 0):+.1f}%）\n"
         f"均线：MA5 {features['ma5']} / MA20 {features['ma20']} / MA60 {features['ma60']}"
         f" → {features['ma_alignment']}\n"
         f"动量：RSI14 {features['rsi14']}，MACD柱 {features['macd_hist']}，"
         f"ADX14 {features['adx14']}，ATR {features['atr_pct']:.2f}%\n"
         f"量能：量比 {features['volume_ratio']}，布林位置 {features['boll_position_pct']}%\n"
         f"关键位：支撑 {features['support_20d']} / 压力 {features['resistance_20d']}\n"
-        f"周期位置：{features['cycle_position_zh']}（{features['cycle_position']}）"
+        f"周期位置：{features['cycle_position_zh']}（{features['cycle_position']}）\n"
+        f"入场时机：{et['state_zh']} —— {et['note']}\n"
+        f"注意：预测基于上述收盘数据产出，若已涨停/大幅偏离均线，"
+        f"请勿给出高置信的看涨结论。"
     )
 
 
@@ -215,15 +309,34 @@ class PredictionResult:
     model: str = "deterministic"
     prompt_version: str = PROMPT_VERSION
     mode: str = "deterministic"  # llm | deterministic
+    # ---- 时效性 / 入场时机（"看到预测时票已经涨完"的解药） ----
+    as_of: str = ""            # 预测所基于的最后一根 K 线日期
+    stale_days: int = 0        # as_of 相对 predict_date 滞后几个交易日
+    entry_timing: str = "ok"   # ok | extended | overheated | limit_up
+    entry_timing_zh: str = ENTRY_TIMING_ZH["ok"]
+    entry_note: str = ""
+    base_close: float = 0.0            # 预测基准价（用户可对照现价判断是否已错过）
+    calibrated_probability: float = 0.0  # 按历史概率桶实测命中率校准后的概率
     disclaimer: str = "研究参考，非投资建议。预测存在不确定性，请以实际行情为准。"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
             "predict_date": self.predict_date,
+            "as_of": self.as_of,
+            "stale_days": self.stale_days,
+            "freshness": (
+                "实时/当日收盘" if self.stale_days <= 0
+                else f"滞后 {self.stale_days} 个交易日（基于 {self.as_of} 收盘）"
+            ),
+            "base_close": self.base_close,
             "horizon": self.horizon,
             "direction": self.direction,
             "probability": self.probability,
+            "calibrated_probability": self.calibrated_probability,
+            "entry_timing": self.entry_timing,
+            "entry_timing_zh": self.entry_timing_zh,
+            "entry_note": self.entry_note,
             "probability_distribution": {
                 "up": self.prob_up, "down": self.prob_down, "sideways": self.prob_sideways,
             },
@@ -394,17 +507,122 @@ class PredictionService:
 
         # 尝试 LLM（use_llm=False 时跳过），失败/未配置则确定性降级
         # ensure_llm_adapter 统一兜底：单例为空时主动读配置初始化
+        result: Optional[PredictionResult] = None
         try:
             from pa_mcp.agent.llm_port import LLMCallParams
             from pa_mcp.agent.llm_factory import ensure_llm_adapter
             adapter = ensure_llm_adapter() if use_llm else None
             if adapter is not None:
-                return await self._predict_with_llm(
+                result = await self._predict_with_llm(
                     adapter, symbol, today, horizon, features, kline_df)
         except Exception as e:  # noqa: BLE001
             logger.warning("LLM 预测失败，降级为确定性预测: %s / %s", symbol, e)
+            result = None
 
-        return self._predict_deterministic(symbol, today, horizon, features)
+        if result is None:
+            result = self._predict_deterministic(symbol, today, horizon, features)
+
+        # 时效性 + 反追高校准（两条路径都要过，LLM 也必须在过热票上收敛）
+        self._finalize(result, features)
+        return result
+
+    # ---- 时效性与反追高校准 ----
+    def _finalize(self, result: PredictionResult, features: dict[str, Any]) -> None:
+        """回填 as_of / stale_days / entry_timing，并对追高与滞后做收敛。"""
+        result.as_of = str(features.get("as_of") or "")
+        result.base_close = float(features.get("last_close") or 0.0)
+
+        et = entry_timing(features)
+        result.entry_timing = et["state"]
+        result.entry_timing_zh = et["state_zh"]
+        result.entry_note = et["note"]
+
+        # 数据滞后：as_of 之后又过了几个交易日（盘前预测/数据未入库时 > 0）
+        result.stale_days = self._stale_trading_days(result.as_of, result.predict_date)
+
+        risks: list[str] = []
+        if result.stale_days >= 1:
+            # 滞后越久，置信度衰减越快：1 天 ×0.7，2 天 ×0.49 …
+            result.confidence = round(
+                max(0.15, result.confidence * (0.7 ** result.stale_days)), 3)
+            risks.append(
+                f"数据时效：本预测基于 {result.as_of} 收盘，距预测日已滞后 "
+                f"{result.stale_days} 个交易日，期间行情可能已大幅变化")
+
+        # 反追高：只在看涨方向收敛（看跌方向不存在"追高"问题）
+        if result.direction == "up" and et["state"] in GUARD_FACTORS:
+            shrink, discount = GUARD_FACTORS[et["state"]]
+            if shrink < 1.0:
+                old = result.probability
+                result.probability = round(0.5 + (old - 0.5) * shrink, 3)
+                # 同步收缩概率分布，保证 up+down+sideways = 1
+                pu = max(0.02, result.prob_up - (old - result.probability))
+                rest = max(0.02, 1.0 - pu)
+                dn, sd = result.prob_down, result.prob_sideways
+                ratio = dn / (dn + sd) if (dn + sd) > 0 else 0.5
+                result.prob_up = round(pu, 3)
+                result.prob_down = round(rest * ratio, 3)
+                result.prob_sideways = round(rest * (1 - ratio), 3)
+                result.expected_return_pct = round(
+                    result.expected_return_pct * discount, 2)
+                risks.append(f"追高预警：{et['note']}（看涨概率已由 "
+                             f"{old:.0%} 收缩至 {result.probability:.0%}）")
+
+        if risks:
+            result.key_risks = risks + list(result.key_risks or [])
+            result.key_risks = result.key_risks[:8]
+
+        result.calibrated_probability = self._calibrate(result)
+
+    def _calibrate(self, result: PredictionResult) -> float:
+        """按历史同概率桶的实测命中率做收缩校准（缓解过度自信）。"""
+        if result.direction not in ("up", "down"):
+            return round(result.probability, 3)
+        try:
+            for lo, hi in ((0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 1.01)):
+                if lo <= result.probability < hi:
+                    hit = self._bucket_hit_rate(lo, hi)
+                    if hit is None:
+                        return round(result.probability, 3)
+                    # 各取一半权重：既不迷信模型，也不完全否定新信息
+                    return round(0.5 * result.probability + 0.5 * hit, 3)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("calibration unavailable: %s", e)
+        return round(result.probability, 3)
+
+    def _stale_trading_days(self, as_of: str, predict_date: str) -> int:
+        """as_of → predict_date 之间跨越的交易日数（0 = 未滞后）。
+
+        日历不可用时退化为工作日粗估（周末不计）。
+        """
+        if not as_of or not predict_date or as_of >= predict_date:
+            return 0
+        try:
+            store = self._store()
+            try:
+                df = store.query_df(
+                    "SELECT COUNT(*) AS c FROM trade_calendar "
+                    "WHERE is_trading_day = TRUE AND CAST(date AS VARCHAR) > ? "
+                    "AND CAST(date AS VARCHAR) <= ?", [as_of, predict_date])
+                if df is not None and not df.empty:
+                    return int(df["c"].iloc[0])
+            finally:
+                store.close()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("trade calendar unavailable: %s", e)
+        # 退化估算：按工作日计（不含周末），节假日会被高估但方向正确
+        try:
+            d0 = datetime.strptime(as_of, "%Y-%m-%d").date()
+            d1 = datetime.strptime(predict_date, "%Y-%m-%d").date()
+            n = 0
+            d = d0
+            while d < d1:
+                d += timedelta(days=1)
+                if d.weekday() < 5:
+                    n += 1
+            return n
+        except Exception:
+            return 0
 
     async def _predict_with_llm(self, adapter, symbol: str, predict_date: str,
                                 horizon: str, features: dict[str, Any],
@@ -660,11 +878,58 @@ class PredictionService:
     def save_prediction(self, result: PredictionResult) -> int:
         """写入 prediction_log 表，返回记录 id。
 
+        去重（重要）：同一 symbol + horizon + 数据基准日（as_of）在 pending
+        状态下只保留一条，重复预测走 UPDATE 覆盖。否则一次简报对同一只票跑
+        两三遍（LLM/确定性各一次）就会堆出多条同質记录，把命中率统计冲稀。
+
         注意：id 为 NOT NULL 主键且 fill_defaults 会用 None 填充缺失列，
         因此显式计算 id（COALESCE(MAX)+1），避免插入 NULL 主键。
         """
         store = self._store()
         try:
+            # 已有的同基准日 pending 记录 → 覆盖（保留原 id）
+            try:
+                dup = store.query_df(
+                    "SELECT id FROM prediction_log WHERE symbol = ? "
+                    "AND horizon = ? AND status = 'pending' "
+                    "AND COALESCE(as_of, CAST(predict_date AS VARCHAR)) = ? "
+                    "ORDER BY id LIMIT 1",
+                    [result.symbol, result.horizon, result.as_of or result.predict_date])
+            except Exception as e:  # noqa: BLE001 - 老库无 as_of 列时退化为按 predict_date
+                logger.debug("dedupe query fell back: %s", e)
+                dup = store.query_df(
+                    "SELECT id FROM prediction_log WHERE symbol = ? "
+                    "AND horizon = ? AND status = 'pending' "
+                    "AND CAST(predict_date AS VARCHAR) = ? ORDER BY id LIMIT 1",
+                    [result.symbol, result.horizon, result.predict_date])
+            if dup is not None and not dup.empty:
+                rid = int(dup["id"].iloc[0])
+                store.execute(
+                    "UPDATE prediction_log SET direction = ?, probability = ?, "
+                    "prob_up = ?, prob_down = ?, prob_sideways = ?, "
+                    "expected_return_pct = ?, expected_range_low = ?, "
+                    "expected_range_high = ?, cycle_position = ?, "
+                    "cycle_forecast = ?, support_levels = ?, "
+                    "resistance_levels = ?, scenarios = ?, confidence = ?, "
+                    "key_reasons = ?, key_risks = ?, model = ?, "
+                    "prompt_version = ?, mode = ?, as_of = ?, stale_days = ?, "
+                    "entry_timing = ?, base_close = ? WHERE id = ?",
+                    [result.direction, result.probability, result.prob_up,
+                     result.prob_down, result.prob_sideways,
+                     result.expected_return_pct, result.expected_range_low,
+                     result.expected_range_high, result.cycle_position,
+                     result.cycle_forecast,
+                     json.dumps(result.support_levels, ensure_ascii=False),
+                     json.dumps(result.resistance_levels, ensure_ascii=False),
+                     json.dumps(result.scenarios, ensure_ascii=False),
+                     result.confidence,
+                     json.dumps(result.key_reasons, ensure_ascii=False),
+                     json.dumps(result.key_risks, ensure_ascii=False),
+                     result.model, result.prompt_version, result.mode,
+                     result.as_of, result.stale_days, result.entry_timing,
+                     result.base_close, rid])
+                return rid
+
             max_id = store.query_df("SELECT COALESCE(MAX(id), 0) AS m FROM prediction_log", [])
             new_id = int(max_id.iloc[0]["m"]) + 1 if not max_id.empty else 1
             row = pd.DataFrame([{
@@ -692,6 +957,10 @@ class PredictionService:
                 "prompt_version": result.prompt_version,
                 "mode": result.mode,
                 "status": "pending",
+                "as_of": result.as_of,
+                "stale_days": int(result.stale_days or 0),
+                "entry_timing": result.entry_timing,
+                "base_close": result.base_close,
             }])
             store.insert_df("prediction_log", row)
             return new_id
@@ -1046,6 +1315,13 @@ class PredictionService:
         direction = p["direction"]
         prob = p["probability"]
 
+        # 入场时机降档：已经涨停/过热的票，即使方向看涨也不该给满仓建议
+        entry_factor = {"limit_up": 0.4, "overheated": 0.6,
+                        "extended": 0.8, "ok": 1.0}.get(
+                            result.entry_timing, 1.0)
+        entry_note = ("" if entry_factor >= 1.0
+                      else f"（入场时机「{result.entry_timing_zh}」降档）")
+
         # 历史校准：同方向已评估预测的命中率
         store = self._store()
         try:
@@ -1124,6 +1400,8 @@ class PredictionService:
         except Exception:
             pass
 
+        suggested *= entry_factor
+
         suggested = max(0.0, min(20.0, suggested))  # RiskGuard 硬上限
         suggested = round(suggested, 1)
 
@@ -1133,6 +1411,11 @@ class PredictionService:
             "horizon": horizon,
             "direction": direction,
             "probability": prob,
+            "as_of": result.as_of,
+            "stale_days": result.stale_days,
+            "entry_timing": result.entry_timing,
+            "entry_timing_zh": result.entry_timing_zh,
+            "entry_factor": round(entry_factor, 2),
             "base_position_pct": base_position_pct,
             "hist_hit_rate": round(hist_hit, 3),
             "hist_samples": n_hist,
@@ -1150,6 +1433,7 @@ class PredictionService:
                 f"（{n_hist}样本）{'× 概率桶校准' if bucket_hit is not None else ''}"
                 f"× 共振校准 {resonance_factor:.1f}{resonance_note}"
                 f"× 综合信号校准 {consensus_factor:.1f}{consensus_note}"
+                f"× 入场时机 {entry_factor:.1f}{entry_note}"
                 f" → 建议仓位 ≤{suggested}%（RiskGuard 20% 上限内）"),
             "disclaimer": "研究参考，非投资建议。仓位须结合自身风险承受能力。",
         }
@@ -1179,7 +1463,11 @@ class PredictionService:
             df = store.query_df(
                 "SELECT id, symbol, predict_date, horizon, direction, probability, "
                 "expected_return_pct, cycle_position, cycle_forecast, confidence, "
-                "mode, model, status, actual_return_pct, evaluated_date "
+                "mode, model, status, actual_return_pct, evaluated_date, "
+                "COALESCE(as_of, '') AS as_of, "
+                "COALESCE(entry_timing, 'ok') AS entry_timing, "
+                "COALESCE(stale_days, 0) AS stale_days, "
+                "COALESCE(base_close, 0) AS base_close "
                 "FROM prediction_log WHERE symbol = ? ORDER BY id DESC LIMIT ?",
                 [symbol, limit])
             rows: list[dict[str, Any]] = []

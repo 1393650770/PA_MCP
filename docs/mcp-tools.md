@@ -1,6 +1,6 @@
 # PA_MCP MCP 工具全览
 
-> 自动盘点：共 **118** 个 MCP 工具（与 UI 功能对等，新增工具自动入 pa_help）。研究参考，非投资建议。
+> 自动盘点：共 **119** 个 MCP 工具（与 UI 功能对等，新增工具自动入 pa_help）。研究参考，非投资建议。
 
 ## 数据（19）
 | 工具 | 说明 |
@@ -149,10 +149,11 @@
 | `scan_etf` | ETF 策略信号扫描（池 = 沪深 ETF 列表，与股票同等信号逻辑）。 |
 | `etf_backfill` | 批量回填 ETF K 线到本地库（扫描提速治本）。 |
 
-## 系统（7）
+## 系统（8）
 | 工具 | 说明 |
 |---|---|
 | `data_quality_report` | 数据质量体检：表覆盖 + K 线完整性（OHLC 一致性/非正/NaN/缺口）。 |
+| `data_freshness_check` | 数据新鲜度体检：各表最新交易日 vs 应到达交易日 —— 日线 phase 被限流熔断会导致当天 K 线缺失却不报错，本工具显式暴露滞后（stale_trading_days）并给出补跑建议。 |
 | `pa_help` | Get a complete guide to PA_MCP — all tools, common workflows, and data |
 | `run_daily_update` | 每日数据自动更新：调度器 11-phase 全链路（日历/股票池/日线/分钟线/财务/资金流/龙虎榜/指标/指数日线/游资情绪/板块日线）。 |
 | `compress_context` | 上下文压缩：长文本 LLM 精炼（保留关键数字/结论/风险，≤max_chars）。 |
