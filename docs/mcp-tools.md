@@ -1,15 +1,16 @@
 # PA_MCP MCP 工具全览
 
-> 自动盘点：共 **119** 个 MCP 工具（与 UI 功能对等，新增工具自动入 pa_help）。研究参考，非投资建议。
+> 自动盘点：共 **120** 个 MCP 工具（与 UI 功能对等，新增工具自动入 pa_help）。研究参考，非投资建议。
 
-## 数据（19）
+## 数据（20）
 | 工具 | 说明 |
 |---|---|
 | `analyze_stock` | 个股综合分析（数据看板对等）：K线+实时估值+资金流+策略信号+缠论。 |
 | `analyze_timeframe_alignment` | 多周期对齐分析：日/周/月均线共振与背离。 |
 | `calc_vwap` | VWAP 成交量加权均价计算。 |
 | `get_data_source_health` | 数据源健康状态：各源熔断/成功/失败统计。 |
-| `get_kline` | Get historical K-line (OHLCV) data. |
+| `get_kline` | 历史 K 线（OHLCV）。**默认只返回最近 250 根**（单票全量约 2400 行/700KB，会撑爆上下文）；要全量用 `full=true` 或 `days=0`。`start_date/end_date` 支持 `YYYYMMDD` 或 `YYYY-MM-DD`，`compact` 控制是否附带 amount/换手等列；返回 `rows`/`as_of`/`truncated`。 |
+| `get_kline_batch` | **批量取多只日线（单条 SQL）**：多只票一次查询（窗口函数按 symbol 取最近 N 根），替代逐只 get_kline 的 N+1 调用（20 只实测 0.054s vs 0.155s）。返回 `{symbol: records}` + 每只的 `as_of`；`max_symbols` 上限 60，超出截断并在 `dropped_over_cap` 说明。 |
 | `get_major_events` | Get all major events for a stock: block trades, lockup expiry, insider |
 | `get_market_overview` | Get current A-share market overview with key metrics. |
 | `get_market_sentiment` | Get current market sentiment assessment with position suggestion. |

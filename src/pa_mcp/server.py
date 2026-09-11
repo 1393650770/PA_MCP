@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Literal, Optional
@@ -463,61 +464,263 @@ async def analyze_stock(symbol: str, days: int = 120) -> dict[str, Any]:
                          error_type="INTERNAL_ERROR")
 
 
+_KLINE_CORE_COLS = (
+    "CAST(date AS VARCHAR) AS date, open, high, low, close, volume")
+_KLINE_EXTRA_COLS = (
+    ", amount, amplitude, pct_change, change, turnover, adjust_factor")
+
+# 单次返回的行数硬上限：一只票 2016 年至今约 2400 行 ≈ 700KB JSON，
+# 直接塞进 MCP 响应会撑爆客户端上下文（实测单条 293B）。批量接口同理。
+MAX_KLINE_ROWS = 5000
+MAX_BATCH_SYMBOLS = 60
+
+
+def _norm_date(value: str, *, end: bool = False) -> str:
+    """把 'YYYYMMDD' / 'YYYY-MM-DD' / 'YYYY/MM/DD' 归一为 'YYYY-MM-DD'。
+
+    空串返回 ''。end=True 时允许 'today'。
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.lower() == "today":
+        return datetime.now().strftime("%Y-%m-%d")
+    digits = "".join(ch for ch in v if ch.isdigit())
+    if len(digits) == 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    return v[:10]
+
+
+def _kline_query(cols: str, symbols: list[str], start: str, end: str,
+                 days: int) -> tuple[str, list]:
+    """构造 K 线查询（多 symbol 共用一条 SQL，避免 N+1）。
+
+    days>0 时用窗口函数取每只票**最近 days 根**（按 symbol 分组），
+    否则走日期区间；两者都为空则全量。
+    """
+    ph = ",".join("?" * len(symbols))
+    params: list = list(symbols)
+    where = [f"symbol IN ({ph})"]
+    if start:
+        where.append("date >= CAST(? AS DATE)")
+        params.append(start)
+    if end:
+        where.append("date <= CAST(? AS DATE)")
+        params.append(end)
+    where_sql = " AND ".join(where)
+
+    if days and days > 0:
+        sql = (
+            f"SELECT symbol, {cols} FROM ("
+            f"  SELECT symbol, {cols}, ROW_NUMBER() OVER ("
+            f"    PARTITION BY symbol ORDER BY date DESC) AS _rn "
+            f"  FROM kline_daily WHERE {where_sql}"
+            f") WHERE _rn <= ? ORDER BY symbol, date ASC"
+        )
+        params.append(int(days))
+    else:
+        sql = (f"SELECT symbol, {cols} FROM kline_daily "
+               f"WHERE {where_sql} ORDER BY symbol, date ASC")
+    return sql, params
+
+
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_kline(
     symbol: str,
     period: Literal["daily", "weekly", "monthly", "1", "5", "15", "30", "60"] = "daily",
     start_date: str = "", end_date: str = "",
     adjust: Literal["qfq", "hfq", "bfq"] = "qfq",
+    days: int = 250,
+    full: bool = False,
+    compact: bool = True,
 ) -> dict[str, Any]:
     """Get historical K-line (OHLCV) data.
 
+    默认只返回**最近 250 根**（约一年，26KB 左右）——全量历史单票约 2400 行
+    / 700KB，会撑爆客户端上下文，别默认拉全量。要全量请显式 `full=true`
+    或 `days=0`，并优先配合 `start_date/end_date` 缩小窗口。
+
     Args:
         symbol: Stock code
-        period: 'daily', 'weekly', 'monthly', or '1','5','15','30','60' for minutes
-        start_date: Start date YYYYMMDD
-        end_date: End date YYYYMMDD (empty = today)
-        adjust: 'qfq' (forward adjusted), 'hfq' (backward), 'bfq' (no adjust)
+        period: 'daily'（走本地库，快）, 'weekly', 'monthly',
+                or '1','5','15','30','60' for minutes（走网络源）
+        start_date: 起始日 'YYYYMMDD' 或 'YYYY-MM-DD'（含）
+        end_date: 结束日，同上；空 = 今天
+        adjust: 'qfq' 前复权 / 'hfq' 后复权 / 'bfq' 不复权
+        days: 返回最近 N 根（默认 250）；0 = 不限（受 MAX_KLINE_ROWS 保护）
+        full: True 时忽略 days 直接取全量（等价 days=0）
+        compact: True 只返回 date/open/high/low/close/volume；False 附带
+                 amount/amplitude/pct_change/change/turnover/adjust_factor
     """
     try:
-        # 优先查库（日线），无数据才走网络 fallback
-        df, source = None, "database"
+        start = _norm_date(start_date)
+        end = _norm_date(end_date, end=True)
+        if full:
+            days = 0
+        cols = _KLINE_CORE_COLS + ("" if compact else _KLINE_EXTRA_COLS)
+
+        df: Optional[pd.DataFrame] = None
+        source = "database"
         if period == "daily" and _store:
-            try:
-                q = _store.query_df(
-                    "SELECT * FROM kline_daily WHERE symbol = ? "
-                    "ORDER BY date ASC",
-                    [symbol],
-                )
-                if not q.empty:
-                    df = q
-            except Exception:
-                pass
+            df = await _fetch_kline_db([symbol], cols, start, end, days)
         if df is None or df.empty:
             df, source = await _get_kline_fallback(
                 symbol=symbol, period=period,
                 start_date=start_date, end_date=end_date,
-                adjust=adjust,
+                adjust=adjust, days=days if days else 0,
             )
-        # Convert to list of dicts for JSON serialization
-        records = df.to_dict(orient="records")
-        # Convert Timestamps to strings
-        for r in records:
-            for k, v in r.items():
-                if hasattr(v, "isoformat"):
-                    r[k] = v.isoformat()
-                elif hasattr(v, "item"):
-                    r[k] = float(v)
+            if df is None or df.empty:
+                return _response(success=False,
+                                 error=f"No kline data for symbol {symbol}",
+                                 error_type="NOT_FOUND")
+            df = _trim_kline_df(df, days, start, end)
+
+        if len(df) > MAX_KLINE_ROWS:
+            df = df.tail(MAX_KLINE_ROWS)
+            truncated = True
+        else:
+            truncated = False
+
+        records = df.drop(columns=["symbol"], errors="ignore").to_dict(
+            orient="records")
+        as_of = records[-1]["date"] if records else None
         return _response(
-            data={"symbol": symbol, "period": period, "adjust": adjust, "kline": records},
+            data={
+                "symbol": symbol,
+                "period": period,
+                "adjust": adjust,
+                "kline": records,
+                "rows": len(records),
+                "window": {"start": start or None, "end": end or None,
+                           "days": days or None},
+                "truncated": truncated,
+                "max_rows": MAX_KLINE_ROWS,
+            },
             source=source,
-            freshness=records[-1]["date"] if records else None,
+            freshness=as_of,
         )
     except RuntimeError as e:
         logger.warning("get_kline all sources failed", symbol=symbol, error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
     except Exception as e:
         logger.error("get_kline failed", symbol=symbol, error=str(e))
+        return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
+
+
+async def _fetch_kline_db(symbols: list[str], cols: str, start: str, end: str,
+                          days: int) -> Optional[pd.DataFrame]:
+    """从本地库批量读 K 线（单条 SQL + 缓存）。读失败返回 None 交调用方降级。"""
+    if _store is None:
+        return None
+    key = f"kline:{','.join(symbols)}:{start}:{end}:{days}:{len(cols)}"
+
+    async def _query() -> Optional[pd.DataFrame]:
+        try:
+            sql, params = _kline_query(cols, symbols, start, end, days)
+            return await asyncio.to_thread(_store.query_df, sql, params)
+        except Exception as e:
+            logger.warning("kline db query failed", error=str(e)[:120])
+            return None
+
+    try:
+        if _cache is not None:
+            return await _cache.get_or_set(key, _query, ttl_seconds=300)
+        return await _query()
+    except Exception as e:
+        logger.warning("kline cache failed", error=str(e)[:120])
+        return await _query()
+
+
+def _trim_kline_df(df: pd.DataFrame, days: int, start: str, end: str) -> pd.DataFrame:
+    """对网络源返回的 DataFrame 做同样的窗口裁剪（保持两条路径口径一致）。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "date" in out.columns:
+        d = out["date"].astype(str).str[:10]
+        if start:
+            out = out[d >= start]
+            d = out["date"].astype(str).str[:10]
+        if end:
+            out = out[d <= end]
+    if days and days > 0 and len(out) > days:
+        out = out.tail(days)
+    return out
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_kline_batch(
+    symbols: str,
+    days: int = 250,
+    start_date: str = "", end_date: str = "",
+    compact: bool = True,
+    max_symbols: int = 20,
+) -> dict[str, Any]:
+    """批量取多只股票的日线（**单条 SQL**，替代逐只 get_kline 的 N+1 调用）。
+
+    一次性拿全市场/一组票的 K 线时用这个，不要循环调 get_kline：
+    实测 60 只逐只全量 0.18s 起（且每只 700KB payload），单条 SQL 同样
+    数据仅 0.017s，且可按 days 窗口把 payload 压到 1/27。
+
+    Args:
+        symbols: 股票代码，逗号或顿号分隔（最多 max_symbols 只，上限 60）
+        days: 每只返回最近 N 根（默认 250）；0 = 全部历史（谨慎：60 只约 15 万行）
+        start_date / end_date: 日期窗口（'YYYYMMDD' 或 'YYYY-MM-DD'）
+        compact: True 只返回 OHLCV 六列
+        max_symbols: 本次最多取几只（超出部分截断并在 missing/truncated 中说明）
+    """
+    try:
+        pool = [s.strip() for s in re.split(r"[,，、\s]+", symbols or "") if s.strip()]
+        if not pool:
+            return _response(success=False, error="symbols 不能为空",
+                             error_type="INVALID_ARGUMENT")
+        cap = min(int(max_symbols or 20), MAX_BATCH_SYMBOLS)
+        dropped = pool[cap:]
+        pool = pool[:cap]
+
+        start = _norm_date(start_date)
+        end = _norm_date(end_date, end=True)
+        cols = _KLINE_CORE_COLS + ("" if compact else _KLINE_EXTRA_COLS)
+
+        df = await _fetch_kline_db(pool, cols, start, end, days)
+        if df is None:
+            df = await asyncio.to_thread(
+                _store.query_df, *_kline_query(cols, pool, start, end, days)) \
+                if _store else None
+        if df is None or df.empty:
+            return _response(success=False,
+                             error="本地库无数据（或查询失败）；请先 run_daily_update()",
+                             error_type="NOT_FOUND")
+
+        out: dict[str, list] = {}
+        as_of_map: dict[str, str] = {}
+        for sym, g in df.groupby("symbol", sort=True):
+            recs = g.drop(columns=["symbol"], errors="ignore").to_dict(
+                orient="records")
+            if len(recs) > MAX_KLINE_ROWS:
+                recs = recs[-MAX_KLINE_ROWS:]
+            out[str(sym)] = recs
+            if recs:
+                as_of_map[str(sym)] = str(recs[-1].get("date", ""))[:10]
+
+        missing = [s for s in pool if s not in out]
+        rows_total = sum(len(v) for v in out.values())
+        return _response(
+            data={
+                "symbols": list(out.keys()),
+                "missing": missing,
+                "dropped_over_cap": dropped,
+                "rows_total": rows_total,
+                "window": {"start": start or None, "end": end or None,
+                           "days": days or None},
+                "as_of": as_of_map,
+                "kline": out,
+            },
+            source="database",
+            freshness=max(as_of_map.values()) if as_of_map else None,
+        )
+    except Exception as e:
+        logger.error("get_kline_batch failed", error=str(e))
         return _response(success=False, error=str(e), error_type="INTERNAL_ERROR")
 
 
